@@ -1,0 +1,1772 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>04 · The Neural-Net Toolkit — How LLMs Really Work</title>
+<link rel="stylesheet" href="assets/style.css">
+<script src="assets/blog.js" defer></script>
+<style>
+  /* chapter 04 styles: every selector scoped with #ch04, keyframes prefixed ch04- */
+  /* let .wide figures inside sections use the wide column (sections themselves are capped at the text width) */
+  #ch04 > section { max-width: var(--wide-w); }
+  #ch04 figure svg .mono text { font-family: var(--mono); }
+  #ch04 figure svg .mono text, #ch04 figure svg text.mono { white-space: pre; }
+  #ch04 .ch04-flow { stroke-dasharray: 7 9; animation: ch04-dash 1.1s linear infinite; }
+  #ch04 .ch04-flow-slow { stroke-dasharray: 5 11; animation: ch04-dash 2.2s linear infinite; }
+  @keyframes ch04-dash { to { stroke-dashoffset: -32; } }
+  #ch04 .ch04-pulse { animation: ch04-pulse 2.4s ease-in-out infinite; }
+  @keyframes ch04-pulse { 0%, 100% { opacity: .45 } 50% { opacity: 1 } }
+
+  /* grid-warp figure */
+  #ch04 .ch04-actsel { display: flex; gap: 8px; align-items: center; font-family: var(--sans); font-size: 14px; margin-bottom: 8px; color: var(--ink-2); }
+  #ch04 .ch04-actsel button.on { background: var(--ink); color: #fff; border-color: var(--ink); }
+  #ch04 .ch04-warp .stg { fill: #687084; }
+  #ch04 .ch04-warp .stg-box { fill: #ffffff; stroke: #ddd8ce; }
+  #ch04 .ch04-warp.at-step-1 .s1 .stg, #ch04 .ch04-warp.at-step-2 .s2 .stg, #ch04 .ch04-warp.at-step-3 .s3 .stg,
+  #ch04 .ch04-warp.at-step-4 .s4 .stg, #ch04 .ch04-warp.at-step-5 .s5 .stg { fill: #1d2433; font-weight: 700; }
+  #ch04 .ch04-warp.at-step-1 .s1 .stg-box, #ch04 .ch04-warp.at-step-2 .s2 .stg-box, #ch04 .ch04-warp.at-step-3 .s3 .stg-box,
+  #ch04 .ch04-warp.at-step-4 .s4 .stg-box, #ch04 .ch04-warp.at-step-5 .s5 .stg-box { fill: #f2eefc; stroke: #7b5cd6; }
+
+  /* widgets */
+  #ch04 .ch04-sm-table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 13px; margin-top: 6px; }
+  #ch04 .ch04-sm-table th { font-family: var(--sans); font-size: 12px; font-weight: 700; color: var(--muted); text-align: right; padding: 4px 6px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  #ch04 .ch04-sm-table th:first-child, #ch04 .ch04-sm-table td:first-child { text-align: left; }
+  #ch04 .ch04-sm-table td { text-align: right; padding: 4px 6px; border-bottom: 1px solid #eeebe4; white-space: nowrap; }
+  #ch04 .ch04-sm-table td.bad { color: #d64545; font-weight: 700; }
+  #ch04 .ch04-sm-table input { width: 78px; font-family: var(--mono); font-size: 13px; padding: 3px 5px; border: 1px solid var(--line); border-radius: 5px; background: var(--bg); text-align: right; }
+  #ch04 .ch04-bar { display: inline-block; height: 12px; background: #7b5cd6; border-radius: 3px; vertical-align: middle; }
+  #ch04 .ch04-barcell { width: 130px; text-align: left !important; }
+  #ch04 .ch04-sum { margin-top: 10px; }
+  #ch04 .ch04-presets { display: flex; flex-wrap: wrap; gap: 8px; }
+  #ch04 .ch04-note { font-size: 13.5px; color: var(--muted); margin-top: 8px; }
+  #ch04 .ch04-hist { display: block; width: 100%; height: auto; }
+  #ch04 .ch04-scan { animation: ch04-scan 4.5s linear infinite; }
+  @keyframes ch04-scan { from { transform: translateX(0); } to { transform: translateX(540px); } }
+</style>
+</head>
+<body data-chapter="04">
+<div class="layout">
+<nav id="sidebar"></nav>
+<main class="article" id="ch04">
+
+<header class="chapter-head">
+  <div class="kicker">Part I · Chapter 4</div>
+  <h1>The Neural-Net Toolkit: vectors, layers, softmax</h1>
+  <p class="lede">An LLM is built from very few kinds of operation: dot products, matrix multiplies, a few nonlinear functions, softmax, normalization and plain addition. This chapter covers each one: what it does, why it exists, its exact math with Llama&#160;3.1&#160;8B shapes, and what it costs on real hardware. After this chapter you can read transformer math.</p>
+</header>
+
+<div class="tldr">
+  <div class="tldr-title">In this chapter</div>
+  <ul>
+    <li>A token's meaning is a vector of 4,096 numbers. Similarity is a dot product or a cosine. Concepts are <em>directions</em>, and high-dimensional space has room for far more nearly-orthogonal directions than it has dimensions. This is called superposition.</li>
+    <li>A linear layer <var>y</var> = <var>Wx</var> is one dot product per output row, which is a loop of fused multiply-adds (FMAs). With many tokens at once it becomes a matrix multiply <var>Y</var> = <var>X</var><var>W</var><sup>T</sup>. Each Llama MLP matrix holds 14,336 × 4,096 = 58.7 M weights.</li>
+    <li>Without a nonlinearity between them, any stack of linear layers collapses into a single linear layer. ReLU, GELU and SiLU bend space. SwiGLU multiplies a SiLU "gate" by a second linear projection.</li>
+    <li>Softmax turns logits into probabilities. You must subtract the maximum first: in FP32, exp(89) is already infinity.</li>
+    <li>Cross-entropy is −log p(correct token). An untrained Llama&#160;3 model starts near ln&#160;128,256 ≈ 11.76.</li>
+    <li>RMSNorm rescales each vector to a standard size (root-mean-square 1). Residual connections add a layer's output to its input. Matmuls are compute-heavy; almost everything else is memory-bound, which is why inference engines fuse kernels.</li>
+  </ul>
+</div>
+
+<section>
+<h2>Vectors as meaning</h2>
+
+<p><a href="03-tokens.html">Chapter 3</a> turned text into integers: <span class="tok">The</span>, <span class="tok">&#9251;cat</span>, <span class="tok">&#9251;sat</span>… become token IDs. An ID is just a row number. ID 8415 and ID 8416 are no more related than ID 8415 and ID 90. Arithmetic on IDs means nothing. The network needs a representation where "similar" is something you can compute.</p>
+
+<p>The idea is to give each token a <strong>point in space</strong>. A <dfn>vector</dfn> is an ordered list of numbers, and you can read it as the coordinates of a point (or an arrow from the origin to that point). Llama&#160;3.1&#160;8B gives every token a vector of <var>d</var> = 4,096 numbers. That vector is the token's <dfn>embedding</dfn>. The lookup from ID to vector is a row read from a big table (owned by <a href="03-tokens.html">Chapter 3</a>). Everything after that lookup is math on vectors.</p>
+
+<p>Training places these points so that tokens used in similar ways land close together. Nobody designs the layout by hand; it falls out of training on next-token prediction. The result behaves like a <strong>map of meaning</strong>: animals in one region, furniture in another, past-tense verbs in another.</p>
+
+<figure>
+<svg viewBox="0 0 760 440" role="img" aria-label="Illustrative 2-D projection of an embedding space: animal words cluster together, floor-covering words cluster together, posture verbs cluster together, and the man-woman and king-queen offsets are parallel.">
+  <defs>
+    <marker id="ch04-m1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#d65c9a"/></marker>
+    <marker id="ch04-m2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#687084"/></marker>
+  </defs>
+  <rect x="14" y="14" width="530" height="412" rx="10" fill="#fbfaf7" stroke="#ddd8ce"/>
+  <text x="30" y="40" font-size="14" fill="#687084">illustrative 2-D projection of a 4,096-D space</text>
+  <!-- animals -->
+  <ellipse cx="150" cy="135" rx="112" ry="66" fill="#7b5cd6" fill-opacity=".10" stroke="#7b5cd6" stroke-opacity=".4"/>
+  <text x="150" y="215" font-size="13" fill="#5a3fb3" text-anchor="middle" font-weight="700">animals</text>
+  <g font-size="15" fill="#1d2433">
+    <circle cx="112" cy="112" r="4" fill="#7b5cd6"/><text x="120" y="108">cat</text>
+    <circle cx="150" cy="96" r="4" fill="#7b5cd6"/><text x="158" y="92">kitten</text>
+    <circle cx="96" cy="148" r="4" fill="#7b5cd6"/><text x="104" y="153">dog</text>
+    <circle cx="152" cy="160" r="4" fill="#7b5cd6"/><text x="160" y="165">puppy</text>
+    <circle cx="212" cy="128" r="4" fill="#7b5cd6"/><text x="220" y="133">tiger</text>
+  </g>
+  <!-- surfaces -->
+  <ellipse cx="420" cy="120" rx="100" ry="62" fill="#e5b62b" fill-opacity=".14" stroke="#e5b62b" stroke-opacity=".6"/>
+  <text x="420" y="198" font-size="13" fill="#9a7410" text-anchor="middle" font-weight="700">things you sit on</text>
+  <g font-size="15" fill="#1d2433">
+    <circle cx="380" cy="100" r="4" fill="#c99a12"/><text x="388" y="96">mat</text>
+    <circle cx="430" cy="88" r="4" fill="#c99a12"/><text x="438" y="84">rug</text>
+    <circle cx="372" cy="138" r="4" fill="#c99a12"/><text x="380" y="143">carpet</text>
+    <circle cx="440" cy="128" r="4" fill="#c99a12"/><text x="448" y="133">floor</text>
+    <circle cx="470" cy="156" r="4" fill="#c99a12"/><text x="478" y="161">sofa</text>
+  </g>
+  <!-- posture verbs -->
+  <ellipse cx="135" cy="330" rx="92" ry="56" fill="#2f9e6e" fill-opacity=".10" stroke="#2f9e6e" stroke-opacity=".45"/>
+  <text x="135" y="404" font-size="13" fill="#1f7a53" text-anchor="middle" font-weight="700">posture verbs</text>
+  <g font-size="15" fill="#1d2433">
+    <circle cx="100" cy="312" r="4" fill="#2f9e6e"/><text x="108" y="308">sat</text>
+    <circle cx="150" cy="300" r="4" fill="#2f9e6e"/><text x="158" y="296">stood</text>
+    <circle cx="96" cy="350" r="4" fill="#2f9e6e"/><text x="104" y="355">lay</text>
+    <circle cx="160" cy="345" r="4" fill="#2f9e6e"/><text x="168" y="350">sits</text>
+  </g>
+  <!-- royalty parallelogram -->
+  <g font-size="15" fill="#1d2433">
+    <circle cx="300" cy="372" r="5" fill="#2f6fde"/><text x="290" y="377" text-anchor="end">man</text>
+    <circle cx="300" cy="282" r="5" fill="#2f6fde"/><text x="290" y="287" text-anchor="end">woman</text>
+    <circle cx="460" cy="360" r="5" fill="#2f6fde"/><text x="472" y="365">king</text>
+    <circle cx="460" cy="270" r="5" fill="#2f6fde"/><text x="472" y="275">queen</text>
+  </g>
+  <path d="M300 366 V290" stroke="#d65c9a" stroke-width="2.5" marker-end="url(#ch04-m1)"/>
+  <path d="M460 354 V278" stroke="#d65c9a" stroke-width="2.5" marker-end="url(#ch04-m1)"/>
+  <path d="M306 371 L452 361" stroke="#687084" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#ch04-m2)"/>
+  <path d="M306 281 L452 271" stroke="#687084" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#ch04-m2)"/>
+  <text x="380" y="322" font-size="13.5" fill="#ad2f6f" text-anchor="middle">same offset</text>
+  <text x="380" y="340" font-size="13.5" fill="#ad2f6f" text-anchor="middle">"male → female"</text>
+  <text x="380" y="398" font-size="13.5" fill="#687084" text-anchor="middle">offset "→ royal"</text>
+  <!-- vector card -->
+  <rect x="566" y="14" width="180" height="412" rx="10" fill="#f3f1ec" stroke="#ddd8ce"/>
+  <text x="656" y="44" font-size="15" text-anchor="middle" font-weight="700" fill="#1d2433">one point =</text>
+  <text x="656" y="64" font-size="15" text-anchor="middle" font-weight="700" fill="#1d2433">one vector</text>
+  <rect x="616" y="80" width="80" height="26" rx="5" fill="#fbefc5" stroke="#ecd27e"/>
+  <text x="656" y="98" font-size="14" text-anchor="middle" class="mono" fill="#1d2433">&#9251;cat</text>
+  <path d="M656 108 V124" stroke="#1d2433" stroke-width="1.5" marker-end="url(#ch04-m2)"/>
+  <rect x="606" y="130" width="100" height="232" rx="6" fill="#ffffff" stroke="#7b5cd6"/>
+  <g class="mono" font-size="14" fill="#1d2433" text-anchor="middle">
+    <text x="656" y="154">0.21</text>
+    <text x="656" y="178">-1.37</text>
+    <text x="656" y="202">0.05</text>
+    <text x="656" y="226">0.62</text>
+    <text x="656" y="250">-0.18</text>
+    <text x="656" y="276">&#8942;</text>
+    <text x="656" y="304">0.88</text>
+    <text x="656" y="328">-0.44</text>
+    <text x="656" y="352">0.09</text>
+  </g>
+  <text x="656" y="386" font-size="14" text-anchor="middle" fill="#1d2433">4,096 numbers</text>
+  <text x="656" y="406" font-size="13" text-anchor="middle" fill="#687084">(values illustrative)</text>
+</svg>
+<figcaption><span class="fig-label">Figure 4.1</span> — Embedding space, squashed to 2-D for drawing. Similar tokens sit close together. Relations can show up as consistent offsets: the step from <i>man</i> to <i>woman</i> is roughly the same arrow as the step from <i>king</i> to <i>queen</i>. Positions are illustrative, not measured from a real model.</figcaption>
+</figure>
+
+<h3>Dimensions as features</h3>
+<p>A helpful first picture: each coordinate measures one property. Coordinate 17 might be "is an animal", coordinate 940 "is plural", coordinate 2,001 "is past tense". A token's vector would then be a list of property scores, like a row in a feature table.</p>
+<p>The real picture differs in one important way. The axes are not special. Training is free to use <em>any direction</em> in the 4,096-D space as a feature, and it usually does. "Animal-ness" is more likely a direction such as 0.3·axis<sub>17</sub> − 0.2·axis<sub>940</sub> + … spread over many coordinates. To measure how much of a feature a vector contains, you project the vector onto that feature's direction. That projection is a dot product.</p>
+
+<h3>Dot product and cosine similarity</h3>
+<p>The <dfn>dot product</dfn> of two vectors of the same length multiplies them element by element and adds the results:</p>
+<div class="formula">
+  <var>a</var> · <var>b</var> = Σ<sub><var>i</var></sub> <var>a</var><sub><var>i</var></sub> <var>b</var><sub><var>i</var></sub> = |<var>a</var>| |<var>b</var>| cos θ
+  <span class="where">where <var>a</var><sub><var>i</var></sub>, <var>b</var><sub><var>i</var></sub> are the <var>i</var>-th coordinates, |<var>a</var>| = √(<var>a</var>·<var>a</var>) is the length (norm) of <var>a</var>, and θ is the angle between the two arrows.</span>
+</div>
+<p>The two forms say the same thing. The left one is how you compute it: a loop of multiply-adds. The right one is how you read it: the dot product is large and positive when the arrows point the same way, zero when they are perpendicular (<dfn>orthogonal</dfn>), and negative when they point in opposite directions. It also grows with the lengths. To compare directions only, divide out the lengths. That gives the <dfn>cosine similarity</dfn>:</p>
+<div class="formula">
+  cos θ = <span class="frac"><span><var>a</var> · <var>b</var></span><span>|<var>a</var>| |<var>b</var>|</span></span> &#160; ∈ [−1, 1]
+</div>
+
+<figure>
+<svg viewBox="0 0 760 330" role="img" aria-label="Three panels: vectors pointing in similar directions have a positive dot product, perpendicular vectors have zero, opposite vectors have a negative dot product.">
+  <defs>
+    <marker id="ch04-m3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#7b5cd6"/></marker>
+    <marker id="ch04-m4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#e8833a"/></marker>
+  </defs>
+  <g font-size="15" font-weight="700" fill="#1d2433" text-anchor="middle">
+    <text x="125" y="28">similar</text><text x="380" y="28">unrelated (orthogonal)</text><text x="635" y="28">opposite</text>
+  </g>
+  <path d="M253 40 V310 M507 40 V310" stroke="#ddd8ce"/>
+  <!-- panel 1: origin (100,170) -->
+  <g>
+    <path d="M100 170 L172 146" stroke="#2f9e6e" stroke-width="8" stroke-opacity=".35"/>
+    <path d="M160 110 L172 146" stroke="#687084" stroke-width="1.4" stroke-dasharray="4 4"/>
+    <path d="M100 170 L190 140" stroke="#7b5cd6" stroke-width="3" marker-end="url(#ch04-m3)"/>
+    <path d="M100 170 L160 110" stroke="#e8833a" stroke-width="3" marker-end="url(#ch04-m4)"/>
+    <path d="M142.7 155.8 A 45 45 0 0 0 131.8 138.2" fill="none" stroke="#1d2433" stroke-width="1.4"/>
+    <text x="150" y="146" font-size="14" fill="#1d2433">θ</text>
+    <text x="198" y="146" font-size="15" fill="#5a3fb3" font-weight="700">a</text>
+    <text x="164" y="104" font-size="15" fill="#b8641f" font-weight="700">b</text>
+    <text x="138" y="190" font-size="13" fill="#1f7a53">projection</text>
+  </g>
+  <!-- panel 2: origin (350,170) -->
+  <g>
+    <path d="M350 170 L440 140" stroke="#7b5cd6" stroke-width="3" marker-end="url(#ch04-m3)"/>
+    <path d="M350 170 L320 80" stroke="#e8833a" stroke-width="3" marker-end="url(#ch04-m4)"/>
+    <path d="M360.4 166.5 L357 156.1 L346.5 159.6" fill="none" stroke="#1d2433" stroke-width="1.4"/>
+    <text x="448" y="146" font-size="15" fill="#5a3fb3" font-weight="700">a</text>
+    <text x="308" y="80" font-size="15" fill="#b8641f" font-weight="700">b</text>
+  </g>
+  <!-- panel 3: origin (620,170) -->
+  <g>
+    <path d="M620 170 L710 140" stroke="#7b5cd6" stroke-width="3" marker-end="url(#ch04-m3)"/>
+    <path d="M620 170 L560 200" stroke="#e8833a" stroke-width="3" marker-end="url(#ch04-m4)"/>
+    <path d="M648 161 A 30 30 0 0 1 593 183" fill="none" stroke="#1d2433" stroke-width="1.4"/>
+    <text x="718" y="146" font-size="15" fill="#5a3fb3" font-weight="700">a</text>
+    <text x="548" y="214" font-size="15" fill="#b8641f" font-weight="700">b</text>
+  </g>
+  <g font-size="14" fill="#1d2433" text-anchor="middle" class="mono">
+    <text x="125" y="244">a=(3,1)  b=(2,2)</text>
+    <text x="125" y="268">a·b = 6+2 = 8</text>
+    <text x="125" y="292">cos = 0.89, θ≈27°</text>
+    <text x="380" y="244">a=(3,1)  b=(-1,3)</text>
+    <text x="380" y="268">a·b = -3+3 = 0</text>
+    <text x="380" y="292">cos = 0, θ=90°</text>
+    <text x="635" y="244">a=(3,1)  b=(-2,-1)</text>
+    <text x="635" y="268">a·b = -6-1 = -7</text>
+    <text x="635" y="292">cos = -0.99, θ≈172°</text>
+  </g>
+</svg>
+<figcaption><span class="fig-label">Figure 4.2</span> — The dot product measures alignment. Left: |<var>a</var>| = √10 ≈ 3.16 and |<var>b</var>| = √8 ≈ 2.83, so cos θ = 8 / (3.16 × 2.83) ≈ 0.89. The green bar is the projection of <var>b</var> onto <var>a</var>'s direction: <var>a</var>·<var>b</var> / |<var>a</var>| = 8 / 3.16 ≈ 2.53 units. "Read a feature" means exactly this projection.</figcaption>
+</figure>
+
+<p>Hold on to the projection picture. It is the most important piece of geometry in this blog, and it comes back again and again:</p>
+<ul>
+  <li>An <strong>attention score</strong> is the dot product of a query vector and a key vector (<a href="05-attention.html">Chapter 5</a>).</li>
+  <li>Every <strong>neuron</strong> in a linear layer computes a dot product of its weight vector with the input (below).</li>
+  <li>The final <strong>logits</strong> are dot products of the last hidden vector with one vector per vocabulary token (below).</li>
+</ul>
+
+<aside class="callout deep"><div class="callout-title">Low-level: what a dot product costs</div>
+<p>For <var>d</var> = 4,096 you do 4,096 multiplies and 4,095 adds, which is ≈ 8,192 FLOPs (2 per element). Each pair is one fused multiply-add (FMA) instruction. On a CPU with AVX-512, one FMA instruction handles 16 FP32 lanes, so a 4,096-long dot product is 256 vector FMAs. With BF16 inputs (2 bytes each), the two vectors are 16 KiB together. Cosine similarity needs two more dot products for the norms, then a square root and a divide. That is why vector databases usually <em>pre-normalize</em> stored vectors to length 1: after that, cosine is a plain dot product.</p>
+</aside>
+
+<h3>Analogy arithmetic, and its caveats</h3>
+<p>The famous demo comes from word2vec (Mikolov et al., 2013): take the vector for <i>King</i>, subtract <i>Man</i>, add <i>Woman</i>, and the nearest word vector is <i>Queen</i>. The reading is that the difference <i>woman − man</i> captures a "gender" direction, and adding it to <i>king</i> moves you along that direction. Figure 4.1 shows this as a parallelogram.</p>
+<p>The idea is real but oversold. Three caveats:</p>
+<ol>
+  <li><strong>The standard test cheats a little.</strong> The usual analogy code is not allowed to return any of the three input words. Nissim et al. (2019) removed that rule. On the standard Google analogy test set, accuracy for the usual method fell from 0.74 to 0.21. Most of the time the "answer" was simply the input word: <i>man is to king as woman is to king</i>.</li>
+  <li><strong>It works for some relations</strong> (capital-of, plural, verb tense) much better than others.</li>
+  <li><strong>LLM input embeddings have no context.</strong> The vector for <span class="tok">&#9251;bank</span> is the same in "river bank" and "bank loan". The model sorts out which meaning is intended later, by mixing in information from other tokens (<a href="05-attention.html">Chapter 5</a>). The rich, context-aware meaning lives in the vectors <em>inside</em> the model (the residual stream, <a href="06-transformer.html">Chapter 6</a>), not in the input table.</li>
+</ol>
+<p>The useful lesson is the <em>linear representation</em> idea: many concepts are stored, roughly, as directions. That is why so much of an LLM is dot products. Reading a feature is a projection, and writing a feature is adding a vector.</p>
+</section>
+
+<section>
+<h2>High-dimensional space has room for many features</h2>
+
+<p>The model has to represent far more concepts than it has dimensions: every topic, name, language, code construct, tone and fact. If each concept needed its own private axis, 4,096 axes would run out almost immediately. Two facts about high-dimensional geometry explain how models get around this.</p>
+
+<h3>Fact 1: random directions are almost orthogonal</h3>
+<p>Pick two random directions in 2-D and the angle between them can be anything. Pick two random directions in 4,096-D and they are almost always within a degree or so of perpendicular. The reason is the law of large numbers. The cosine is a sum of 4,096 small products with random signs, divided by the lengths. Those products mostly cancel. The typical size of what is left shrinks like 1/√<var>d</var>:</p>
+<div class="formula">
+  std(cos θ) ≈ <span class="frac"><span>1</span><span>√<var>d</var></span></span> &#160;&#160;→&#160;&#160; <var>d</var> = 4,096: &#160; 1/64 ≈ 0.016
+  <span class="where">For two independent random directions in <var>d</var> dimensions. In 2-D the spread covers the whole range [−1, 1]. At <var>d</var> = 4,096, a cosine of 0.1 is more than six standard deviations out, so it practically never happens by chance.</span>
+</div>
+
+<div class="widget" id="ch04-hd">
+  <div class="widget-title">Try it: how orthogonal are random directions?</div>
+  <div class="controls">
+    <label>Dimension <var>d</var> <input type="range" id="ch04-hd-d" min="0" max="12" step="1" value="12"> <span class="readout" id="ch04-hd-dout">4096</span></label>
+    <button type="button" id="ch04-hd-go">Resample</button>
+  </div>
+  <svg class="ch04-hist" id="ch04-hd-svg" viewBox="0 0 720 260" role="img" aria-label="Histogram of the cosine similarity between 1,500 pairs of random vectors"></svg>
+  <div class="out" id="ch04-hd-out">computing…</div>
+  <div class="ch04-note">Each run draws 1,500 pairs of random Gaussian vectors in your browser and plots the cosine of each pair. Drag toward <var>d</var> = 2 and the histogram spreads across [−1, 1]. Drag toward 4,096 and it collapses into a spike at 0.</div>
+</div>
+
+<h3>Fact 2: you can pack many more nearly-orthogonal directions than dimensions</h3>
+<p>You can have only <var>d</var> <em>exactly</em> orthogonal directions in <var>d</var> dimensions. If you allow a small tolerance, say every pair must have |cos| below 0.1, the number of directions you can fit grows <em>exponentially</em> with <var>d</var>. This is the concentration-of-measure effect behind the Johnson–Lindenstrauss lemma. So 4,096 dimensions can hold far more than 4,096 "almost independent" feature directions.</p>
+
+<h3>Superposition</h3>
+<p>Elhage et al. (2022, "Toy Models of Superposition") showed that networks really do this. They trained small ReLU networks to squeeze <var>n</var> features through <var>m</var> &lt; <var>n</var> dimensions and read them back out. When features were <dfn>sparse</dfn>, meaning only a few are active on any one input, the networks stored more features than dimensions. They arranged the feature directions in regular shapes, for example 5 features in 2-D as a pentagon. They called this <dfn>superposition</dfn>. The cost is <dfn>interference</dfn>: when feature A is active, reading feature B along B's direction gives a small nonzero value. A nonlinearity with a threshold filters that noise out.</p>
+
+<figure class="stepper ch04-sup" data-steps="4" data-interval="3200">
+<svg viewBox="0 0 760 400" role="img" aria-label="Packing 2, then 3, then 5 feature directions into a 2-D space, and filtering the interference with a ReLU threshold.">
+  <defs>
+    <marker id="ch04-m5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#7b5cd6"/></marker>
+    <marker id="ch04-m6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#d64545"/></marker>
+  </defs>
+  <circle cx="190" cy="205" r="140" fill="#fbfaf7" stroke="#ddd8ce" stroke-dasharray="4 4"/>
+  <path d="M40 205 H340 M190 55 V355" stroke="#ece8df"/>
+  <circle cx="190" cy="205" r="4" fill="#1d2433"/>
+  <text x="190" y="388" font-size="14" fill="#687084" text-anchor="middle">a 2-D space (think: 4,096-D)</text>
+  <g data-step-only="1" font-size="16" font-weight="700" fill="#5a3fb3" text-anchor="middle">
+    <path d="M190 205 L328 205" stroke="#7b5cd6" stroke-width="3" marker-end="url(#ch04-m5)"/>
+    <path d="M190 205 L190 67" stroke="#7b5cd6" stroke-width="3" marker-end="url(#ch04-m5)"/>
+    <text x="350" y="210">A</text><text x="190" y="50">B</text>
+  </g>
+  <g data-step-only="2" font-size="16" font-weight="700" fill="#5a3fb3" text-anchor="middle">
+    <path d="M190 205 L190 67" stroke="#7b5cd6" stroke-width="3" marker-end="url(#ch04-m5)"/>
+    <path d="M190 205 L70.5 274" stroke="#7b5cd6" stroke-width="3" marker-end="url(#ch04-m5)"/>
+    <path d="M190 205 L309.5 274" stroke="#7b5cd6" stroke-width="3" marker-end="url(#ch04-m5)"/>
+    <text x="190" y="50">A</text><text x="52" y="292">B</text><text x="328" y="292">C</text>
+  </g>
+  <g data-step-range="3-4" font-size="16" font-weight="700" fill="#5a3fb3" text-anchor="middle">
+    <path d="M190 205 L190 67" stroke="#7b5cd6" stroke-width="3" marker-end="url(#ch04-m5)"/>
+    <path d="M190 205 L321.2 162.4" stroke="#7b5cd6" stroke-width="3" marker-end="url(#ch04-m5)"/>
+    <path d="M190 205 L271.1 316.6" stroke="#7b5cd6" stroke-width="3" marker-end="url(#ch04-m5)"/>
+    <path d="M190 205 L108.9 316.6" stroke="#7b5cd6" stroke-width="3" marker-end="url(#ch04-m5)"/>
+    <path d="M190 205 L58.8 162.4" stroke="#7b5cd6" stroke-width="3" marker-end="url(#ch04-m5)"/>
+    <text x="190" y="50">A</text><text x="346" y="160">B</text><text x="286" y="340">C</text><text x="94" y="340">D</text><text x="34" y="160">E</text>
+    <path d="M196 120 A 85 85 0 0 1 270 179" fill="none" stroke="#1d2433" stroke-width="1.3"/>
+    <text x="262" y="118" font-size="14" font-weight="400" fill="#1d2433">72°</text>
+  </g>
+  <g data-step-only="4"><path d="M190 205 L190 67" stroke="#d64545" stroke-width="5" marker-end="url(#ch04-m6)"/></g>
+
+  <!-- right panel -->
+  <g data-step-only="1" font-size="15" fill="#1d2433">
+    <text x="400" y="80" font-size="18" font-weight="700">2 features, 2 dimensions</text>
+    <text x="400" y="118">Each feature gets its own axis.</text>
+    <text x="400" y="146">A · B = 0: reading B never sees A.</text>
+    <text x="400" y="174">No interference, but only 2 features fit.</text>
+  </g>
+  <g data-step-only="2" font-size="15" fill="#1d2433">
+    <text x="400" y="80" font-size="18" font-weight="700">3 features, 2 dimensions</text>
+    <text x="400" y="118">Every pair is 120° apart: cos = −0.50.</text>
+    <text x="400" y="146">If only A is active, reading B gives −0.50</text>
+    <text x="400" y="174">instead of 0. That error is interference.</text>
+    <text x="400" y="214" fill="#687084">Fine if A, B, C are rarely active together.</text>
+  </g>
+  <g data-step-only="3" font-size="15" fill="#1d2433">
+    <text x="400" y="80" font-size="18" font-weight="700">5 features, 2 dimensions (pentagon)</text>
+    <text x="400" y="118">Neighbours are 72° apart: cos = +0.31.</text>
+    <text x="400" y="146">Non-neighbours are 144° apart: cos = −0.81.</text>
+    <text x="400" y="186">Toy models trained on sparse features</text>
+    <text x="400" y="210">really learn this layout (Elhage et al. 2022).</text>
+  </g>
+  <g data-step-only="4" font-size="14" fill="#1d2433">
+    <text x="400" y="56" font-size="17" font-weight="700">Only A is active. Read all five:</text>
+    <text x="490" y="96" text-anchor="middle" font-weight="700">raw readout x · f</text>
+    <text x="670" y="96" text-anchor="middle" font-weight="700">ReLU(x · f − 0.35)</text>
+    <path d="M410 230 H572 M590 230 H752" stroke="#1d2433"/>
+    <path d="M410 205.5 H572 M590 205.5 H752" stroke="#d64545" stroke-dasharray="3 3"/>
+    <text x="752" y="199" font-size="13" fill="#d64545" text-anchor="end">threshold 0.35</text>
+    <!-- raw bars: 70 px per unit -->
+    <rect x="418" y="160" width="22" height="70" fill="#d64545"/>
+    <rect x="450" y="208.4" width="22" height="21.6" fill="#7b5cd6"/>
+    <rect x="482" y="230" width="22" height="56.6" fill="#7b5cd6"/>
+    <rect x="514" y="230" width="22" height="56.6" fill="#7b5cd6"/>
+    <rect x="546" y="208.4" width="22" height="21.6" fill="#7b5cd6"/>
+    <g font-size="13" text-anchor="middle" class="mono">
+      <text x="429" y="153">1.00</text><text x="461" y="202">.31</text><text x="509" y="302">-.81 each</text><text x="557" y="202">.31</text>
+    </g>
+    <!-- after ReLU -->
+    <rect x="598" y="184.5" width="22" height="45.5" fill="#d64545"/>
+    <g font-size="13" text-anchor="middle" class="mono">
+      <text x="609" y="178">0.65</text><text x="641" y="222">0</text><text x="673" y="222">0</text><text x="705" y="222">0</text><text x="737" y="222">0</text>
+    </g>
+    <g font-size="14" text-anchor="middle" font-weight="700" fill="#5a3fb3">
+      <text x="429" y="322">A</text><text x="461" y="322">B</text><text x="493" y="322">C</text><text x="525" y="322">D</text><text x="557" y="322">E</text>
+      <text x="609" y="322">A</text><text x="641" y="322">B</text><text x="673" y="322">C</text><text x="705" y="322">D</text><text x="737" y="322">E</text>
+    </g>
+    <text x="400" y="358">The threshold removes the interference.</text>
+  </g>
+</svg>
+<div class="step-captions">
+  <p data-step-only="1"><b>Step 1.</b> With one feature per dimension, features never interfere, but the space fills up fast.</p>
+  <p data-step-only="2"><b>Step 2.</b> Squeeze in a third direction. Now every pair overlaps a little, and reading one feature picks up a small signal from the others.</p>
+  <p data-step-only="3"><b>Step 3.</b> Five directions fit as a pentagon. In 4,096-D the same trick packs vastly more directions, and the overlaps are much smaller (Fact 1).</p>
+  <p data-step-only="4"><b>Step 4.</b> Feature A is on. Dot products with all five directions give 1.00 for A and +0.31 or −0.81 noise for the others. A ReLU with a threshold of 0.35 keeps A (0.65) and zeroes the rest. This is why nonlinearities matter for storing features, too.</p>
+</div>
+<figcaption><span class="fig-label">Figure 4.3</span> — Superposition: storing more features than dimensions by accepting small overlaps, then filtering them with a nonlinearity. The geometry follows Elhage et al. (2022). The 0.35 threshold is an illustrative choice.</figcaption>
+</figure>
+
+<aside class="callout intuition"><div class="callout-title">Systems analogy: hashing with collisions</div>
+<p>Superposition works like a hash table that is deliberately overfilled. You accept occasional collisions because most slots are empty most of the time, and a cheap check (here, a ReLU threshold) throws away false hits. It works only while the data is sparse. If many features are active at once, the interference adds up and the scheme fails.</p>
+</aside>
+
+<p>One consequence matters for anyone trying to look inside a model. A single neuron (one coordinate) usually responds to several unrelated things. This is called being <dfn>polysemantic</dfn>, and it happens because features are spread across directions rather than tied to axes. Tools that recover the real feature directions, such as sparse autoencoders, get a short tour in <a href="06-transformer.html">Chapter 6</a>.</p>
+
+<aside class="callout key"><div class="callout-title">Key takeaway</div>
+<p>A hidden vector is a sum of many feature directions, each scaled by how strongly that feature is present. You read a feature with a dot product and write one by adding a vector. High dimension lets thousands of features share 4,096 numbers with little interference.</p>
+</aside>
+</section>
+
+<section>
+<h2>The neuron and the linear layer</h2>
+
+<h3>One neuron</h3>
+<p>A <dfn>neuron</dfn> is the smallest unit. It takes an input vector <var>x</var>, computes a weighted sum, adds a constant, and passes the result through a simple function:</p>
+<div class="formula">
+  <var>z</var> = <var>w</var> · <var>x</var> + <var>b</var> &#160;&#160;&#160;&#160; <var>y</var> = φ(<var>z</var>)
+  <span class="where"><var>w</var> = the neuron's <dfn>weights</dfn> (one per input), <var>b</var> = its <dfn>bias</dfn> (a single number), <var>z</var> = the <dfn>pre-activation</dfn>, φ = the <dfn>activation function</dfn> (covered in the next section). <var>w</var> and <var>b</var> are <dfn>parameters</dfn>: numbers found by training and then frozen (<a href="01-big-picture.html">Chapter 1</a>).</span>
+</div>
+<p>In words: the neuron measures how much the input points along its weight vector <var>w</var>, shifts that by <var>b</var>, and squashes the result. It is a feature detector built from one dot product.</p>
+
+<figure>
+<svg viewBox="0 0 760 300" role="img" aria-label="A neuron: four inputs multiplied by four weights, summed with a bias, passed through ReLU to give the output 0.6.">
+  <defs>
+    <marker id="ch04-m7" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#1d2433"/></marker>
+  </defs>
+  <g stroke="#5a6b8c" stroke-width="2">
+    <path d="M92 50 L368 138"/><path d="M92 110 L366 146"/><path d="M92 170 L366 154"/><path d="M92 230 L368 162"/>
+  </g>
+  <g stroke="#7b5cd6" stroke-width="2.6" fill="none" class="ch04-flow">
+    <path d="M92 50 L368 138"/><path d="M92 110 L366 146"/><path d="M92 170 L366 154"/><path d="M92 230 L368 162"/>
+  </g>
+  <g font-size="15" text-anchor="middle" class="mono">
+    <circle cx="70" cy="50" r="22" fill="#f2eefc" stroke="#7b5cd6" stroke-width="2"/><text x="70" y="55">1.0</text>
+    <circle cx="70" cy="110" r="22" fill="#f2eefc" stroke="#7b5cd6" stroke-width="2"/><text x="70" y="115">-2.0</text>
+    <circle cx="70" cy="170" r="22" fill="#f2eefc" stroke="#7b5cd6" stroke-width="2"/><text x="70" y="175">0.5</text>
+    <circle cx="70" cy="230" r="22" fill="#f2eefc" stroke="#7b5cd6" stroke-width="2"/><text x="70" y="235">3.0</text>
+  </g>
+  <g font-size="14" fill="#687084" text-anchor="end"><text x="42" y="55">x₁</text><text x="42" y="115">x₂</text><text x="42" y="175">x₃</text><text x="42" y="235">x₄</text></g>
+  <g font-size="14" class="mono" fill="#3a4a6a" text-anchor="middle">
+    <rect x="168" y="76.7" width="78" height="20" rx="4" fill="#ffffff" stroke="#ddd8ce"/><text x="207" y="91.7">w₁=0.4</text>
+    <rect x="168" y="115.1" width="78" height="20" rx="4" fill="#ffffff" stroke="#ddd8ce"/><text x="207" y="130.1">w₂=0.1</text>
+    <rect x="164" y="153.3" width="86" height="20" rx="4" fill="#ffffff" stroke="#ddd8ce"/><text x="207" y="168.3">w₃=-0.6</text>
+    <rect x="168" y="191.7" width="78" height="20" rx="4" fill="#ffffff" stroke="#ddd8ce"/><text x="207" y="206.7">w₄=0.2</text>
+  </g>
+  <path d="M400 46 V108" stroke="#1d2433" stroke-width="1.6" marker-end="url(#ch04-m7)"/>
+  <text x="400" y="36" font-size="15" text-anchor="middle" class="mono">b = 0.1</text>
+  <circle cx="400" cy="150" r="34" fill="#ffffff" stroke="#1d2433" stroke-width="2"/>
+  <text x="400" y="158" font-size="24" text-anchor="middle" fill="#1d2433">Σ</text>
+  <text x="400" y="206" font-size="15" text-anchor="middle" class="mono">z = 0.6</text>
+  <path d="M434 150 H494" stroke="#1d2433" stroke-width="2" marker-end="url(#ch04-m7)"/>
+  <rect x="498" y="124" width="92" height="52" rx="8" fill="#fcecec" stroke="#d64545" stroke-width="2"/>
+  <text x="544" y="148" font-size="15" text-anchor="middle" font-weight="700" fill="#ad2f2f">φ = ReLU</text>
+  <text x="544" y="166" font-size="13" text-anchor="middle" fill="#ad2f2f" class="mono">max(0, z)</text>
+  <path d="M590 150 H648" stroke="#1d2433" stroke-width="2" marker-end="url(#ch04-m7)"/>
+  <circle cx="676" cy="150" r="24" fill="#f2eefc" stroke="#7b5cd6" stroke-width="2"/>
+  <text x="676" y="155" font-size="15" text-anchor="middle" class="mono">0.6</text>
+  <text x="676" y="196" font-size="14" text-anchor="middle" fill="#687084">output y</text>
+  <text x="380" y="282" font-size="14" text-anchor="middle" class="mono" fill="#1d2433">z = 0.4·1.0 + 0.1·(-2.0) + (-0.6)·0.5 + 0.2·3.0 + 0.1 = 0.6</text>
+</svg>
+<figcaption><span class="fig-label">Figure 4.4</span> — One neuron. The weighted sum is a dot product: 0.4 − 0.2 − 0.3 + 0.6 = 0.5. Adding the bias gives <var>z</var> = 0.6, and ReLU passes it through unchanged because it is positive. Had <var>z</var> been negative, the output would be 0.</figcaption>
+</figure>
+
+<h3>A layer is many neurons: a matrix times a vector</h3>
+<p>A <dfn>layer</dfn> is <var>m</var> neurons that all read the same input. Stack their weight vectors as the rows of a matrix <var>W</var> with <var>m</var> rows and <var>d</var> columns. Then all <var>m</var> weighted sums are one matrix–vector product:</p>
+<div class="formula">
+  <var>y</var> = <var>W</var> <var>x</var> + <var>b</var> &#160;&#160;&#160;&#160; <var>W</var> ∈ ℝ<sup><var>m</var>×<var>d</var></sup>, &#160;<var>x</var> ∈ ℝ<sup><var>d</var></sup>, &#160;<var>b</var>, <var>y</var> ∈ ℝ<sup><var>m</var></sup>
+  <span class="where">ℝ<sup><var>m</var>×<var>d</var></sup> means "a grid of real numbers with <var>m</var> rows and <var>d</var> columns". Output <var>y</var>[<var>i</var>] is the dot product of row <var>i</var> of <var>W</var> with <var>x</var>, plus <var>b</var>[<var>i</var>].</span>
+</div>
+<p>This is called a <dfn>linear layer</dfn> (also "dense" or "fully connected" layer, or a "projection"). Strictly, with a bias it is <em>affine</em>; people say "linear" anyway. Llama's linear layers have no bias at all (its config sets <code>attention_bias</code> and <code>mlp_bias</code> to false), so for Llama, <var>y</var> = <var>Wx</var> exactly.</p>
+<p>There is a geometric reading too. <var>W</var> maps a point in <var>d</var>-dimensional space to a point in <var>m</var>-dimensional space. It can rotate, stretch, squash, shear and project, but it keeps straight lines straight and keeps the origin fixed. Column <var>j</var> of <var>W</var> is where the <var>j</var>-th axis direction lands. Figure 4.7 below shows this on a 2-D grid.</p>
+<p>The running example for the rest of the chapter is one of Llama&#160;3.1&#160;8B's MLP projections, <code>gate_proj</code>. It maps <var>d</var> = 4,096 to <var>d</var><sub>ff</sub> = 14,336, so <var>W</var> has 14,336 × 4,096 = <strong>58,720,256</strong> weights, or 117.4 MB in BF16.</p>
+
+<figure class="stepper ch04-lin wide" data-steps="4" data-interval="3400">
+<svg viewBox="0 0 960 500" role="img" aria-label="A linear layer as matrix times vector: one row of W dotted with x gives one output; the dot product is a loop of fused multiply-adds; cost of the whole layer.">
+  <!-- left: W x = y -->
+  <rect x="80" y="50" width="110" height="385" fill="#eef0f5" stroke="#5a6b8c" stroke-width="2"/>
+  <g stroke="#d5dae5"><path d="M80 98 H190 M80 146 H190 M80 242 H190 M80 290 H190 M80 338 H190 M80 386 H190"/></g>
+  <text x="135" y="152" font-size="30" font-weight="700" fill="#5a6b8c" text-anchor="middle">W</text>
+  <text x="135" y="462" font-size="15" text-anchor="middle" class="mono" fill="#1d2433">[14,336 × 4,096]</text>
+  <rect x="230" y="50" width="24" height="110" fill="#f2eefc" stroke="#7b5cd6" stroke-width="2"/>
+  <text x="242" y="186" font-size="18" font-weight="700" fill="#5a3fb3" text-anchor="middle">x</text>
+  <text x="242" y="206" font-size="15" text-anchor="middle" class="mono" fill="#1d2433">[4,096]</text>
+  <text x="282" y="250" font-size="28" text-anchor="middle" fill="#1d2433">=</text>
+  <rect x="310" y="50" width="24" height="385" fill="#f2eefc" stroke="#7b5cd6" stroke-width="2"/>
+  <text x="322" y="462" font-size="18" font-weight="700" fill="#5a3fb3" text-anchor="middle">y</text>
+  <text x="322" y="484" font-size="15" text-anchor="middle" class="mono" fill="#1d2433">[14,336]</text>
+  <g data-step="2">
+    <rect x="80" y="190" width="110" height="11" fill="#d64545" class="ch04-pulse"/>
+    <text x="72" y="200" font-size="14" text-anchor="end" fill="#ad2f2f" font-weight="700">row i</text>
+    <rect x="230" y="50" width="24" height="110" fill="none" stroke="#d64545" stroke-width="3"/>
+    <rect x="310" y="190" width="24" height="11" fill="#d64545"/>
+    <text x="342" y="200" font-size="14" fill="#ad2f2f" font-weight="700">y[i]</text>
+  </g>
+  <path d="M378 30 V480" stroke="#ddd8ce"/>
+
+  <!-- step 1 -->
+  <g data-step-only="1" fill="#1d2433">
+    <text x="400" y="74" font-size="19" font-weight="700">A linear layer is a matrix–vector product</text>
+    <text x="400" y="116" font-size="16">Each row of W holds one neuron's 4,096 weights.</text>
+    <text x="400" y="146" font-size="16">Output y[i] is the dot product of row i with x.</text>
+    <text x="400" y="176" font-size="16">14,336 rows give 14,336 outputs.</text>
+    <rect x="400" y="206" width="520" height="62" rx="8" fill="#f3f1ec" stroke="#ddd8ce"/>
+    <text x="660" y="245" font-size="20" text-anchor="middle" class="mono">y[i] = Σⱼ W[i, j] · x[j]</text>
+    <text x="400" y="312" font-size="16">Llama 3.1 8B gate_proj: no bias, BF16 weights,</text>
+    <text x="400" y="338" font-size="16">58,720,256 weights = 117.4 MB.</text>
+    <text x="400" y="380" font-size="14" fill="#687084">(shapes on the left are not to scale)</text>
+  </g>
+
+  <!-- step 2 -->
+  <g data-step-only="2" fill="#1d2433">
+    <text x="400" y="74" font-size="19" font-weight="700">One output = one dot product</text>
+    <g font-size="14" class="mono" text-anchor="middle">
+      <rect x="400" y="104" width="62" height="34" fill="#fcecec" stroke="#d64545"/><text x="431" y="126">W[i,0]</text>
+      <rect x="466" y="104" width="62" height="34" fill="#fcecec" stroke="#d64545"/><text x="497" y="126">W[i,1]</text>
+      <rect x="532" y="104" width="62" height="34" fill="#fcecec" stroke="#d64545"/><text x="563" y="126">W[i,2]</text>
+      <rect x="598" y="104" width="62" height="34" fill="#fcecec" stroke="#d64545"/><text x="629" y="126">W[i,3]</text>
+      <text x="700" y="126" font-size="18">…</text>
+      <rect x="738" y="104" width="90" height="34" fill="#fcecec" stroke="#d64545"/><text x="783" y="126">W[i,4095]</text>
+      <rect x="400" y="178" width="62" height="34" fill="#f2eefc" stroke="#7b5cd6"/><text x="431" y="200">x[0]</text>
+      <rect x="466" y="178" width="62" height="34" fill="#f2eefc" stroke="#7b5cd6"/><text x="497" y="200">x[1]</text>
+      <rect x="532" y="178" width="62" height="34" fill="#f2eefc" stroke="#7b5cd6"/><text x="563" y="200">x[2]</text>
+      <rect x="598" y="178" width="62" height="34" fill="#f2eefc" stroke="#7b5cd6"/><text x="629" y="200">x[3]</text>
+      <text x="700" y="200" font-size="18">…</text>
+      <rect x="738" y="178" width="90" height="34" fill="#f2eefc" stroke="#7b5cd6"/><text x="783" y="200">x[4095]</text>
+      <g font-size="18"><text x="431" y="164">×</text><text x="497" y="164">×</text><text x="563" y="164">×</text><text x="629" y="164">×</text><text x="783" y="164">×</text></g>
+    </g>
+    <g stroke="#1d2433" stroke-width="1.4"><path d="M431 214 L600 262 M497 214 L605 262 M563 214 L610 262 M629 214 L615 262 M783 214 L625 262"/></g>
+    <rect x="540" y="262" width="160" height="40" rx="8" fill="#ffffff" stroke="#1d2433" stroke-width="1.6"/>
+    <text x="620" y="288" font-size="17" text-anchor="middle">Σ  →  y[i]</text>
+    <text x="400" y="350" font-size="16">4,096 multiplies and 4,095 adds.</text>
+    <text x="400" y="378" font-size="16">Row i is contiguous in memory; x is shared by every row.</text>
+  </g>
+
+  <!-- step 3 -->
+  <g data-step-only="3" fill="#1d2433">
+    <text x="400" y="74" font-size="19" font-weight="700">…which is a loop of fused multiply-adds</text>
+    <rect x="400" y="92" width="530" height="122" rx="8" fill="#1b2030"/>
+    <g font-size="15" class="mono" fill="#e6e9f2">
+      <text x="416" y="118">float acc = 0.0f;</text>
+      <text x="416" y="144">for (int j = 0; j &lt; 4096; j++)</text>
+      <text x="416" y="170">    acc = fmaf(W[i*4096 + j], x[j], acc);</text>
+      <text x="416" y="196">y[i] = acc;</text>
+    </g>
+    <g font-size="15" class="mono">
+      <text x="416" y="250" font-weight="700">j    W[i,j]    x[j]      acc</text>
+      <text x="416" y="276">0     0.02     1.30     0.026</text>
+      <text x="416" y="300">1    -0.11     0.40    -0.018</text>
+      <text x="416" y="324">2     0.07    -2.00    -0.158</text>
+      <text x="416" y="348" fill="#687084">…    4,093 more FMAs</text>
+    </g>
+    <text x="400" y="392" font-size="15" fill="#687084">BF16 weights, FP32 accumulator. Values illustrative.</text>
+  </g>
+
+  <!-- step 4 -->
+  <g data-step-only="4" fill="#1d2433">
+    <text x="400" y="74" font-size="19" font-weight="700">Cost of the whole layer for one token</text>
+    <text x="400" y="116" font-size="16">FMAs: 14,336 × 4,096 = 58.7 M  →  117.4 MFLOP</text>
+    <text x="400" y="146" font-size="16">Bytes: 58.7 M weights × 2 B = 117.4 MB (BF16)</text>
+    <text x="400" y="176" font-size="16">Every weight is read once and used once.</text>
+    <rect x="400" y="200" width="530" height="56" rx="8" fill="#fcecec" stroke="#d64545"/>
+    <text x="416" y="234" font-size="17" font-weight="700" fill="#ad2f2f">≈ 1 FLOP per byte → memory-bound (GEMV)</text>
+    <text x="400" y="296" font-size="16">H100: streaming 117.4 MB at 3.35 TB/s ≈ 35 µs.</text>
+    <text x="400" y="326" font-size="16">The math alone at 989 TFLOPS ≈ 0.12 µs.</text>
+    <text x="400" y="368" font-size="15" fill="#687084">The fix is to reuse each weight for many tokens:</text>
+    <text x="400" y="392" font-size="15" fill="#687084">batching (next figure).</text>
+  </g>
+</svg>
+<div class="step-captions">
+  <p data-step-only="1"><b>Step 1.</b> <var>y</var> = <var>Wx</var>. There is one output per row of <var>W</var>.</p>
+  <p data-step-only="2"><b>Step 2.</b> Pick one row. Its 4,096 weights are multiplied pairwise with the 4,096 inputs and summed into one output number.</p>
+  <p data-step-only="3"><b>Step 3.</b> In code, that sum is an accumulator updated by one FMA per element. GPUs and SIMD CPUs run many of these loops side by side.</p>
+  <p data-step-only="4"><b>Step 4.</b> For a single token, the hardware spends almost all its time moving weights, not multiplying them.</p>
+</div>
+<figcaption><span class="fig-label">Figure 4.5</span> — A linear layer from the outside (a matrix times a vector) down to the inside (a loop of FMAs), using Llama&#160;3.1&#160;8B's <code>gate_proj</code> shape.</figcaption>
+</figure>
+
+<h3>How W sits in memory</h3>
+<p>PyTorch's <code>nn.Linear</code> stores its weight with shape <code>[out_features, in_features]</code>, here <code>[14336, 4096]</code>, in row-major order. Row-major layout was covered in <a href="02-numbers-and-hardware.html">Chapter 2</a>. So the 4,096 weights of one output neuron sit next to each other: one contiguous 8 KiB run. The dot product for <var>y</var>[<var>i</var>] streams through that run front to back. On a CPU this is exactly the pattern hardware prefetchers love. On a GPU, neighbouring threads read neighbouring addresses, so their loads <em>coalesce</em> into wide memory transactions.</p>
+
+<figure class="wide">
+<svg viewBox="0 0 960 470" role="img" aria-label="Row-major memory layout of W: each row is a contiguous 8 KiB block; address formula; and batched matrix multiply Y equals X times W transposed.">
+  <text x="40" y="34" font-size="17" font-weight="700" fill="#1d2433">W in memory: row-major, BF16 (2 bytes per weight), 117,440,512 bytes total</text>
+  <g font-size="15" text-anchor="middle" fill="#1d2433">
+    <rect x="40" y="52" width="110" height="40" fill="#eef0f5" stroke="#5a6b8c"/><text x="95" y="77">row 0</text>
+    <rect x="150" y="52" width="110" height="40" fill="#eef0f5" stroke="#5a6b8c"/><text x="205" y="77">row 1</text>
+    <rect x="260" y="52" width="110" height="40" fill="#eef0f5" stroke="#5a6b8c"/><text x="315" y="77">row 2</text>
+    <rect x="370" y="52" width="100" height="40" fill="#f7f8fa" stroke="#5a6b8c"/><text x="420" y="77">…</text>
+    <rect x="470" y="52" width="110" height="40" fill="#fcecec" stroke="#d64545" stroke-width="2"/><text x="525" y="77" fill="#ad2f2f" font-weight="700">row i</text>
+    <rect x="580" y="52" width="230" height="40" fill="#f7f8fa" stroke="#5a6b8c"/><text x="695" y="77">…</text>
+    <rect x="810" y="52" width="110" height="40" fill="#eef0f5" stroke="#5a6b8c"/><text x="865" y="77">row 14,335</text>
+  </g>
+  <g font-size="14" class="mono" fill="#687084" text-anchor="middle">
+    <text x="44" y="112" text-anchor="start">0</text><text x="150" y="112">8,192</text><text x="260" y="112">16,384</text><text x="470" y="112">i·8,192</text><text x="810" y="112">117,432,320</text>
+  </g>
+  <path d="M470 92 L300 140 M580 92 L920 140" stroke="#d64545" stroke-dasharray="4 4"/>
+  <g font-size="14" text-anchor="middle" class="mono" fill="#1d2433">
+    <rect x="300" y="140" width="100" height="36" fill="#fcecec" stroke="#d64545"/><text x="350" y="163">W[i,0]</text>
+    <rect x="400" y="140" width="100" height="36" fill="#fcecec" stroke="#d64545"/><text x="450" y="163">W[i,1]</text>
+    <rect x="500" y="140" width="100" height="36" fill="#fcecec" stroke="#d64545"/><text x="550" y="163">W[i,2]</text>
+    <rect x="600" y="140" width="100" height="36" fill="#fcecec" stroke="#d64545"/><text x="650" y="163">W[i,3]</text>
+    <rect x="700" y="140" width="100" height="36" fill="#fff7f7" stroke="#d64545"/><text x="750" y="163">…</text>
+    <rect x="800" y="140" width="120" height="36" fill="#fcecec" stroke="#d64545"/><text x="860" y="163">W[i,4095]</text>
+    <g fill="#687084" font-size="13"><text x="350" y="194">+0</text><text x="450" y="194">+2</text><text x="550" y="194">+4</text><text x="650" y="194">+6</text><text x="860" y="194">+8,190</text></g>
+  </g>
+  <text x="40" y="164" font-size="15" fill="#1d2433">one row = 8 KiB,</text>
+  <text x="40" y="184" font-size="15" fill="#1d2433">contiguous</text>
+  <text x="480" y="228" font-size="16" text-anchor="middle" class="mono" fill="#1d2433">&amp;W[i][j] = base + (i · 4,096 + j) · 2 bytes</text>
+  <path d="M30 248 H930" stroke="#ddd8ce"/>
+
+  <text x="40" y="276" font-size="17" font-weight="700" fill="#1d2433">Many tokens at once: Y = X · Wᵀ</text>
+  <rect x="60" y="300" width="70" height="60" fill="#f2eefc" stroke="#7b5cd6" stroke-width="2"/>
+  <rect x="60" y="322" width="70" height="9" fill="#d64545"/>
+  <text x="95" y="384" font-size="15" text-anchor="middle" class="mono">X [n × 4,096]</text>
+  <text x="150" y="338" font-size="24" text-anchor="middle">·</text>
+  <rect x="170" y="295" width="245" height="70" fill="#eef0f5" stroke="#5a6b8c" stroke-width="2"/>
+  <rect x="300" y="295" width="9" height="70" fill="#d64545"/>
+  <text x="292" y="384" font-size="15" text-anchor="middle" class="mono">Wᵀ [4,096 × 14,336]</text>
+  <text x="440" y="340" font-size="24" text-anchor="middle">=</text>
+  <rect x="465" y="300" width="245" height="60" fill="#f2eefc" stroke="#7b5cd6" stroke-width="2"/>
+  <rect x="595" y="322" width="9" height="9" fill="#d64545"/>
+  <text x="587" y="384" font-size="15" text-anchor="middle" class="mono">Y [n × 14,336]</text>
+  <g font-size="15" fill="#1d2433">
+    <text x="730" y="306">row t of X = token t</text>
+    <text x="730" y="330">column i of Wᵀ = row i of W</text>
+    <text x="730" y="354" class="mono">Y[t,i] = X[t,:]·W[i,:]</text>
+  </g>
+  <text x="40" y="424" font-size="15" fill="#1d2433">Each row of W is loaded from memory once and reused for all n tokens (kept in on-chip SRAM / registers).</text>
+  <text x="40" y="450" font-size="15" class="mono" fill="#1d2433">FLOPs = 2·n·4,096·14,336   n = 2,048 → 240.5 GFLOP ≈ 0.24 ms at H100 BF16 peak</text>
+</svg>
+<figcaption><span class="fig-label">Figure 4.6</span> — Top: the weight matrix is one long array; row <var>i</var> starts at byte <var>i</var> × 8,192. Bottom: with <var>n</var> tokens stacked as rows of <var>X</var>, the layer becomes a matrix–matrix product (GEMM). Each output is still the dot product of a token row and a weight row. Both are contiguous, which is why PyTorch stores <var>W</var> as [out, in] and computes <var>X</var><var>W</var><sup>T</sup>.</figcaption>
+</figure>
+
+<h3>Batching: from GEMV to GEMM</h3>
+<p>Feeding one token through the layer is a matrix–vector product, a <dfn>GEMV</dfn>. Each weight is used once, so the hardware does about 1 FLOP per byte it loads and spends nearly all its time waiting on memory (<a href="02-numbers-and-hardware.html">Chapter 2</a>). Stack <var>n</var> token vectors as the rows of <var>X</var> ∈ ℝ<sup><var>n</var>×4096</sup> and the same layer becomes</p>
+<div class="formula">
+  <var>Y</var> = <var>X</var> <var>W</var><sup>T</sup> &#160;&#160;&#160; [<var>n</var> × 4,096] · [4,096 × 14,336] → [<var>n</var> × 14,336] &#160;&#160;&#160; FLOPs = 2 · <var>n</var> · 4,096 · 14,336
+  <span class="where"><var>W</var><sup>T</sup> ("W transposed") swaps rows and columns. No data moves in practice: the kernel simply reads <var>W</var> row by row. The factor 2 counts one multiply and one add per FMA.</span>
+</div>
+<p>This is a matrix–matrix product, a <dfn>GEMM</dfn>. The weights are read once and reused <var>n</var> times, so the work per byte grows roughly in proportion to <var>n</var>. At <var>n</var> = 2,048 one projection is 240.5 GFLOP. That is about 0.24 ms at an H100's 989 TFLOPS BF16 peak, and enough reuse to be limited by compute, not memory. GPUs run GEMMs on tensor cores using the tiled scheme from <a href="02-numbers-and-hardware.html">Chapter 2</a>. The gap between one-token GEMV and many-token GEMM is the whole story of prefill versus decode in <a href="11-inference.html">Chapter 11</a>.</p>
+
+<aside class="callout key"><div class="callout-title">Key takeaway</div>
+<p>A linear layer is a matrix multiply: one dot product per (token, output neuron) pair, each a loop of FMAs over a contiguous weight row. Almost all of an LLM's parameters and FLOPs are in these layers. For one token they are limited by memory bandwidth; for many tokens, by compute.</p>
+</aside>
+</section>
+
+<section>
+<h2>Why nonlinearities</h2>
+
+<p>Stacking linear layers does not make a network more powerful. Two linear layers in a row are just one linear layer:</p>
+<div class="formula">
+  <var>W</var><sub>2</sub>(<var>W</var><sub>1</sub><var>x</var> + <var>b</var><sub>1</sub>) + <var>b</var><sub>2</sub> = (<var>W</var><sub>2</sub><var>W</var><sub>1</sub>)<var>x</var> + (<var>W</var><sub>2</sub><var>b</var><sub>1</sub> + <var>b</var><sub>2</sub>) = <var>W</var>′<var>x</var> + <var>b</var>′
+  <span class="where">Matrix multiplication is associative, so the two matrices fold into one, <var>W</var>′ = <var>W</var><sub>2</sub><var>W</var><sub>1</sub>. Example: <var>W</var><sub>1</sub> = [[1, 2], [0, 1]] and <var>W</var><sub>2</sub> = [[2, 0], [1, 1]] give <var>W</var>′ = [[2, 4], [1, 3]]. A hundred stacked linear layers still compute one linear function.</span>
+</div>
+<p>A compiler would constant-fold this, and so does the math. Geometrically, a linear map keeps grid lines straight, parallel and evenly spaced. It cannot fold, bend or cut space. But nearly every interesting function needs that: "if this feature is present, do this, otherwise do something else."</p>
+<p>The fix is a cheap <dfn>nonlinear</dfn> function φ applied to each number on its own (<dfn>elementwise</dfn>) after a linear layer. With φ in between, stacked layers no longer collapse. A network with one hidden layer and enough neurons can approximate any continuous function on a bounded region; this result is the <dfn>universal approximation theorem</dfn>. With ReLU, each hidden neuron adds one "crease" (the line where it switches on), and the network becomes a piecewise-linear function with many creases. Figure 4.7 computes this live on a 2-D grid.</p>
+
+<figure class="stepper ch04-warp" id="ch04-warp" data-steps="5" data-interval="3000">
+<div class="ch04-actsel">Activation φ: <button type="button" class="btn on" data-act="relu">ReLU</button><button type="button" class="btn" data-act="tanh">tanh</button></div>
+<svg viewBox="0 0 760 440" role="img" aria-label="A 2-D grid of points transformed by a linear layer, a bias, a nonlinearity, and a second linear layer. Computed in the browser.">
+  <defs><clipPath id="ch04-warp-clip"><rect x="20" y="15" width="410" height="410"/></clipPath></defs>
+  <rect x="20" y="15" width="410" height="410" fill="#fbfaf7" stroke="#ddd8ce"/>
+  <g stroke="#e6e2d9" stroke-width="1">
+    <path d="M75 15 V425 M125 15 V425 M175 15 V425 M275 15 V425 M325 15 V425 M375 15 V425"/>
+    <path d="M20 70 H430 M20 120 H430 M20 170 H430 M20 270 H430 M20 320 H430 M20 370 H430"/>
+  </g>
+  <path d="M20 220 H430 M225 15 V425" stroke="#c9c3b6" stroke-width="1.2"/>
+  <g font-size="13" fill="#687084" text-anchor="middle">
+    <text x="125" y="418">-2</text><text x="225" y="418">0</text><text x="325" y="418">2</text>
+    <text x="28" y="124" text-anchor="start">2</text><text x="28" y="324" text-anchor="start">-2</text>
+  </g>
+  <g clip-path="url(#ch04-warp-clip)">
+    <g id="ch04-warp-ghost" data-step-only="5" fill="none" stroke="#687084" stroke-width="1.2" stroke-dasharray="4 4" opacity=".55"></g>
+    <g id="ch04-warp-grid" fill="none"></g>
+  </g>
+  <!-- right panel -->
+  <g font-size="15">
+    <g class="s1"><rect class="stg-box" x="452" y="18" width="296" height="38" rx="7"/><text class="stg" x="466" y="42">1. input grid x</text></g>
+    <g class="s2"><rect class="stg-box" x="452" y="62" width="296" height="38" rx="7"/><text class="stg" x="466" y="86">2. W₁ x  (linear)</text></g>
+    <g class="s3"><rect class="stg-box" x="452" y="106" width="296" height="38" rx="7"/><text class="stg" x="466" y="130">3. W₁ x + b₁  (shift)</text></g>
+    <g class="s4"><rect class="stg-box" x="452" y="150" width="296" height="38" rx="7"/><text class="stg" x="466" y="174">4. φ(W₁ x + b₁)  (bend)</text></g>
+    <g class="s5"><rect class="stg-box" x="452" y="194" width="296" height="38" rx="7"/><text class="stg" x="466" y="218">5. W₂ φ(…) + b₂  (layer 2)</text></g>
+  </g>
+  <g font-size="14" class="mono" fill="#1d2433">
+    <text x="456" y="264">W₁ = [[1.2, 0.5], [-0.4, 1.0]]</text>
+    <text x="456" y="286">b₁ = [0.3, -0.4]</text>
+    <text x="456" y="308">W₂ = [[0.9, -0.7], [0.5, 0.8]]</text>
+    <text x="456" y="330">b₂ = [-0.2, 0.1]</text>
+  </g>
+  <g font-size="14" fill="#1d2433">
+    <path d="M458 360 H486" stroke="#7b5cd6" stroke-width="3"/><text x="494" y="365">line x₁ = 0</text>
+    <path d="M600 360 H628" stroke="#3d8bd4" stroke-width="3"/><text x="636" y="365">line x₂ = 0</text>
+    <circle cx="472" cy="390" r="6" fill="#e5b62b" stroke="#1d2433"/><text x="494" y="395">point (1, 1)</text>
+    <g data-step-only="5"><path d="M600 390 H628" stroke="#687084" stroke-width="1.5" stroke-dasharray="4 4"/><text x="636" y="395">without φ</text></g>
+  </g>
+</svg>
+<div class="step-captions">
+  <p data-step-only="1"><b>Step 1.</b> A grid of input points covering the square [−2, 2] × [−2, 2]. Each crossing is one 2-D input vector.</p>
+  <p data-step-only="2"><b>Step 2.</b> Multiply every point by <var>W</var><sub>1</sub>. The grid shears and stretches, but lines stay straight, parallel and evenly spaced, and the origin stays put.</p>
+  <p data-step-only="3"><b>Step 3.</b> Add the bias <var>b</var><sub>1</sub>: the whole grid slides. Steps 2 and 3 together are one linear (affine) layer.</p>
+  <p data-step-only="4"><b>Step 4.</b> Apply φ to each coordinate separately. ReLU flattens every negative coordinate to 0, folding whole regions onto the axes. tanh squeezes everything into the square (−1, 1)² and bends the lines. Switch between them with the buttons above.</p>
+  <p data-step-only="5"><b>Step 5.</b> A second linear layer moves the bent shape again. The dashed grid shows the same two layers <em>without</em> φ: still a straight, evenly spaced grid, i.e. a single linear map.</p>
+</div>
+<figcaption><span class="fig-label">Figure 4.7</span> — A two-layer network acting on 2-D space, computed in your browser. Each animation step moves every grid point from one stage to the next. Real layers do the same in 4,096 or 14,336 dimensions.</figcaption>
+</figure>
+
+<h3>ReLU, GELU and SiLU</h3>
+<p>Three activation functions cover almost every LLM you will meet:</p>
+<div class="formula">
+  ReLU(<var>x</var>) = max(0, <var>x</var>) &#160;&#160;&#160; GELU(<var>x</var>) = <var>x</var> · Φ(<var>x</var>) &#160;&#160;&#160; SiLU(<var>x</var>) = <var>x</var> · σ(<var>x</var>) = <span class="frac"><span><var>x</var></span><span>1 + <var>e</var><sup>−<var>x</var></sup></span></span>
+  <span class="where">Φ(<var>x</var>) is the standard normal cumulative distribution function: the probability that a bell-curve random number is below <var>x</var>. σ(<var>x</var>) = 1/(1 + <var>e</var><sup>−<var>x</var></sup>) is the logistic sigmoid, an S-curve from 0 to 1.</span>
+</div>
+<ul>
+  <li><strong>ReLU</strong> (rectified linear unit) passes positive values and zeroes negative ones. It costs one compare. Its weakness: for negative inputs the slope is exactly 0, so a neuron stuck in the negative region gets no learning signal. These are called "dead" neurons.</li>
+  <li><strong>GELU</strong> (Hendrycks &amp; Gimpel, 2016) multiplies <var>x</var> by "how likely it is to be positive-ish". It is a smooth ReLU that lets small negative values through slightly. Its minimum is about −0.170, at <var>x</var> ≈ −0.752. It was used by BERT and the GPT-2/GPT-3 family. A common fast form is the tanh approximation 0.5<var>x</var>(1 + tanh(√(2/π)(<var>x</var> + 0.044715<var>x</var><sup>3</sup>))).</li>
+  <li><strong>SiLU</strong> (sigmoid linear unit, also called Swish with β = 1) gates <var>x</var> by its own sigmoid. The name SiLU first appeared in the GELU paper; Elfwing et al. (2017) and Ramachandran et al. (2017, "Swish") studied it further. Its minimum is about −0.278, at <var>x</var> ≈ −1.278. <strong>Llama uses SiLU</strong> (its config says <code>"hidden_act": "silu"</code>).</li>
+</ul>
+
+<figure>
+<svg viewBox="0 0 760 420" role="img" aria-label="Plots of ReLU, GELU and SiLU from -4 to 4, plus a zoom on the negative region showing the small dips of GELU and SiLU below zero.">
+  <!-- left panel frame: x[-4,4] -> [70,400], y[-1,4] -> [360,40] -->
+  <rect x="70" y="40" width="330" height="320" fill="#fbfaf7" stroke="#ddd8ce"/>
+  <g stroke="#ebe7de"><path d="M111.25 40 V360 M152.5 40 V360 M193.75 40 V360 M276.25 40 V360 M317.5 40 V360 M358.75 40 V360 M70 232 H400 M70 168 H400 M70 104 H400"/></g>
+  <path d="M70 296 H400 M235 40 V360" stroke="#b9b2a4" stroke-width="1.2"/>
+  <g font-size="13" fill="#687084" text-anchor="middle">
+    <text x="70" y="378">-4</text><text x="152.5" y="378">-2</text><text x="235" y="378">0</text><text x="317.5" y="378">2</text><text x="400" y="378">4</text>
+    <text x="60" y="300" text-anchor="end">0</text><text x="60" y="236" text-anchor="end">1</text><text x="60" y="172" text-anchor="end">2</text><text x="60" y="108" text-anchor="end">3</text><text x="60" y="44" text-anchor="end">4</text>
+  </g>
+  <path id="ch04-act-relu" d="" fill="none" stroke="#687084" stroke-width="2.5" stroke-dasharray="6 4"/>
+  <path id="ch04-act-gelu" d="" fill="none" stroke="#2f6fde" stroke-width="2.5"/>
+  <path id="ch04-act-silu" d="" fill="none" stroke="#d64545" stroke-width="2.5"/>
+  <!-- right panel: x[-5,1] -> [470,730], y[-0.4,1] -> [360,40] -->
+  <rect x="470" y="40" width="260" height="320" fill="#fbfaf7" stroke="#ddd8ce"/>
+  <g stroke="#ebe7de"><path d="M513.3 40 V360 M556.7 40 V360 M600 40 V360 M643.3 40 V360 M470 314.3 H730 M470 222.9 H730 M470 177.1 H730 M470 131.4 H730 M470 85.7 H730"/></g>
+  <path d="M470 268.6 H730 M686.7 40 V360" stroke="#b9b2a4" stroke-width="1.2"/>
+  <g font-size="13" fill="#687084" text-anchor="middle">
+    <text x="470" y="378">-5</text><text x="556.7" y="378">-3</text><text x="643.3" y="378">-1</text><text x="730" y="378">1</text>
+    <text x="740" y="273" text-anchor="start">0</text><text x="740" y="181" text-anchor="start">.4</text><text x="740" y="90" text-anchor="start">.8</text><text x="740" y="318" text-anchor="start">-.2</text>
+  </g>
+  <path id="ch04-act-relu2" d="" fill="none" stroke="#687084" stroke-width="2.5" stroke-dasharray="6 4"/>
+  <path id="ch04-act-gelu2" d="" fill="none" stroke="#2f6fde" stroke-width="2.5"/>
+  <path id="ch04-act-silu2" d="" fill="none" stroke="#d64545" stroke-width="2.5"/>
+  <circle cx="654.1" cy="307.4" r="4.5" fill="#2f6fde"/>
+  <circle cx="631.3" cy="332.2" r="4.5" fill="#d64545"/>
+  <rect x="478" y="50" width="186" height="50" rx="6" fill="#ffffff" stroke="#ddd8ce"/>
+  <text x="488" y="70" font-size="13" fill="#24539f">• GELU min −0.170 at −0.75</text>
+  <text x="488" y="90" font-size="13" fill="#ad2f2f">• SiLU min −0.278 at −1.28</text>
+  <text x="600" y="30" font-size="14" text-anchor="middle" fill="#1d2433" font-weight="700">zoom: the negative side</text>
+  <!-- legend -->
+  <g font-size="15" fill="#1d2433">
+    <path d="M84 62 H112" stroke="#687084" stroke-width="2.5" stroke-dasharray="6 4"/><text x="118" y="67">ReLU</text>
+    <path d="M84 86 H112" stroke="#2f6fde" stroke-width="2.5"/><text x="118" y="91">GELU</text>
+    <path d="M84 110 H112" stroke="#d64545" stroke-width="2.5"/><text x="118" y="115">SiLU</text>
+  </g>
+  <text x="235" y="404" font-size="14" text-anchor="middle" fill="#687084">input x</text>
+  <text x="600" y="404" font-size="14" text-anchor="middle" fill="#687084">input x</text>
+</svg>
+<figcaption><span class="fig-label">Figure 4.8</span> — The three common activations. Far from zero they agree: about 0 for large negative inputs and about <var>x</var> for large positive ones. Near zero, GELU and SiLU are smooth and dip slightly below zero (right panel), so they still pass a small gradient for negative inputs. Example values: SiLU(1) = 0.731, GELU(1) = 0.841, SiLU(−1) = −0.269, GELU(−1) = −0.159.</figcaption>
+</figure>
+
+<p>Why did the smooth versions win? Mostly because they trained a little better in experiments. The usual explanation is that a smooth curve with nonzero slope for slightly negative inputs gives the optimizer useful signal everywhere. That story is plausible but was found empirically, not proven.</p>
+
+<aside class="callout deep"><div class="callout-title">Low-level: what an activation costs</div>
+<p>ReLU is one max instruction. SiLU needs an exponential, an add, a reciprocal and a multiply. On NVIDIA GPUs the exponential runs on special function units through a hardware approximate base-2 exponential, so it costs about as much as a few multiplies. Either way the arithmetic is trivial: a few FLOPs per element against 2 bytes read and 2 written in BF16. Activations are <strong>memory-bound</strong>. Run as a separate kernel, they cost a full round trip through GPU memory. That is why they are almost always fused into a neighbouring kernel (see the last section).</p>
+</aside>
+</section>
+
+<section>
+<h2>The MLP and gated units (SwiGLU)</h2>
+
+<h3>The classic MLP: up, activate, down</h3>
+<p>The <dfn>MLP</dfn> (multi-layer perceptron, also called the feed-forward network or FFN) is the workhorse that sits in every transformer block next to attention. The classic version is two linear layers with an activation between them:</p>
+<div class="formula">
+  MLP(<var>x</var>) = <var>W</var><sub>down</sub> · φ(<var>W</var><sub>up</sub> · <var>x</var>) &#160;&#160;&#160; <var>d</var> → <var>d</var><sub>ff</sub> → <var>d</var>
+  <span class="where"><var>W</var><sub>up</sub> ∈ ℝ<sup><var>d</var><sub>ff</sub>×<var>d</var></sup> projects up to a wider hidden size <var>d</var><sub>ff</sub> (classically 4<var>d</var>). φ acts on each of the <var>d</var><sub>ff</sub> numbers. <var>W</var><sub>down</sub> ∈ ℝ<sup><var>d</var>×<var>d</var><sub>ff</sub></sup> projects back to <var>d</var>.</span>
+</div>
+<p>Why go wider? Each hidden unit is one feature detector: row <var>j</var> of <var>W</var><sub>up</sub> is the direction it looks for. φ decides how strongly the unit fires. Column <var>j</var> of <var>W</var><sub>down</sub> is the vector it writes back if it fires. More hidden units means more detectors per token. <a href="06-transformer.html">Chapter 6</a> develops this "detector → written vector" view into the FFN-as-key–value-memory picture. One thing to note now: the MLP processes <strong>each token independently</strong>. The same weights are applied to every position, and no information flows between tokens here. Mixing across tokens is attention's job (<a href="05-attention.html">Chapter 5</a>).</p>
+
+<h3>Gated linear units</h3>
+<p>A <dfn>gated linear unit</dfn> (GLU; Dauphin et al., 2016) computes <em>two</em> projections of the same input. One goes through a sigmoid and acts as a gate; the gate then multiplies the other projection element by element:</p>
+<div class="formula">
+  GLU(<var>x</var>) = σ(<var>W</var><var>x</var>) ⊙ (<var>V</var><var>x</var>) &#160;&#160;&#160;&#160; SwiGLU(<var>x</var>) = SiLU(<var>W</var><var>x</var>) ⊙ (<var>V</var><var>x</var>)
+  <span class="where">⊙ is elementwise multiplication (the Hadamard product): element <var>j</var> of the result is gate<sub><var>j</var></sub> × value<sub><var>j</var></sub>. Shazeer (2020, "GLU Variants Improve Transformer") tried other gate functions: ReGLU (ReLU), GEGLU (GELU) and SwiGLU (Swish/SiLU). Biases are omitted, as in Llama.</span>
+</div>
+<p>The gate makes the layer <em>multiplicative</em>: each hidden unit's output is the product of two linear functions of the input. That is a soft "if": the gate decides how much of each value passes through. Shazeer found that GLU variants, SwiGLU and GEGLU in particular, predicted text better (lower loss) than ReLU or GELU MLPs at equal parameter count. His paper honestly says it offers no explanation and attributes the success "to divine benevolence". Llama's MLP is exactly this:</p>
+<div class="formula">
+  FFN(<var>x</var>) = <var>W</var><sub>down</sub> · ( SiLU(<var>W</var><sub>gate</sub> <var>x</var>) ⊙ <var>W</var><sub>up</sub> <var>x</var> )
+  <span class="where">Llama&#160;3.1&#160;8B: <var>W</var><sub>gate</sub>, <var>W</var><sub>up</sub> ∈ ℝ<sup>14336×4096</sup>, <var>W</var><sub>down</sub> ∈ ℝ<sup>4096×14336</sup>. In Hugging Face code: <code>down_proj(act_fn(gate_proj(x)) * up_proj(x))</code>.</span>
+</div>
+
+<figure class="stepper ch04-glu wide" data-steps="4" data-interval="3400">
+<svg viewBox="0 0 960 520" role="img" aria-label="Data flow of a classic MLP, then of SwiGLU: x is projected by W_gate and W_up to 14,336 numbers each, the gate goes through SiLU, the two are multiplied elementwise, and W_down projects back to 4,096.">
+  <defs>
+    <marker id="ch04-m8" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#1d2433"/></marker>
+  </defs>
+  <!-- shared x -->
+  <rect x="40" y="230" width="26" height="51" fill="#f2eefc" stroke="#7b5cd6" stroke-width="2"/>
+  <text x="53" y="220" font-size="17" font-weight="700" fill="#5a3fb3" text-anchor="middle">x</text>
+  <text x="53" y="302" font-size="14" text-anchor="middle" class="mono">[4,096]</text>
+
+  <!-- step 1: classic MLP -->
+  <g data-step-only="1">
+    <g stroke="#1d2433" stroke-width="1.6" fill="none">
+      <path d="M66 255 H116" marker-end="url(#ch04-m8)"/><path d="M250 255 H296" marker-end="url(#ch04-m8)"/>
+      <path d="M326 255 H366" marker-end="url(#ch04-m8)"/><path d="M460 255 H496" marker-end="url(#ch04-m8)"/>
+      <path d="M526 255 H576" marker-end="url(#ch04-m8)"/><path d="M710 255 H756" marker-end="url(#ch04-m8)"/>
+    </g>
+    <g stroke="#7b5cd6" stroke-width="2.4" fill="none" class="ch04-flow">
+      <path d="M66 255 H116"/><path d="M250 255 H296"/><path d="M326 255 H366"/><path d="M460 255 H496"/><path d="M526 255 H576"/><path d="M710 255 H756"/>
+    </g>
+    <rect x="120" y="210" width="130" height="90" rx="6" fill="#eef0f5" stroke="#5a6b8c" stroke-width="2"/>
+    <text x="185" y="248" font-size="17" font-weight="700" text-anchor="middle" fill="#3a4a6a">W_up</text>
+    <text x="185" y="272" font-size="15" text-anchor="middle" class="mono">14,336×4,096</text>
+    <rect x="300" y="165" width="26" height="180" fill="#f2eefc" stroke="#7b5cd6" stroke-width="2"/>
+    <text x="313" y="364" font-size="14" text-anchor="middle" class="mono">[14,336]</text>
+    <rect x="370" y="230" width="90" height="50" rx="8" fill="#fcecec" stroke="#d64545" stroke-width="2"/>
+    <text x="415" y="261" font-size="17" text-anchor="middle" font-weight="700" fill="#ad2f2f">φ</text>
+    <rect x="500" y="165" width="26" height="180" fill="#f2eefc" stroke="#7b5cd6" stroke-width="2"/>
+    <text x="513" y="364" font-size="14" text-anchor="middle" class="mono">[14,336]</text>
+    <rect x="580" y="210" width="130" height="90" rx="6" fill="#eef0f5" stroke="#5a6b8c" stroke-width="2"/>
+    <text x="645" y="248" font-size="17" font-weight="700" text-anchor="middle" fill="#3a4a6a">W_down</text>
+    <text x="645" y="272" font-size="15" text-anchor="middle" class="mono">4,096×14,336</text>
+    <rect x="760" y="230" width="26" height="51" fill="#f2eefc" stroke="#7b5cd6" stroke-width="2"/>
+    <text x="773" y="220" font-size="17" font-weight="700" fill="#5a3fb3" text-anchor="middle">y</text>
+    <text x="773" y="302" font-size="14" text-anchor="middle" class="mono">[4,096]</text>
+    <text x="480" y="430" font-size="17" text-anchor="middle" fill="#1d2433">Classic MLP (GPT-2, BERT): up-project, activate, down-project</text>
+    <text x="480" y="458" font-size="16" text-anchor="middle" class="mono" fill="#1d2433">MLP(x) = W_down · φ(W_up · x)</text>
+  </g>
+
+  <!-- steps 2-4: SwiGLU -->
+  <g data-step="2">
+    <g stroke="#1d2433" stroke-width="1.6" fill="none">
+      <path d="M66 245 C 92 245, 92 120, 116 120" marker-end="url(#ch04-m8)"/>
+      <path d="M66 266 C 92 266, 92 390, 116 390" marker-end="url(#ch04-m8)"/>
+      <path d="M250 120 H296" marker-end="url(#ch04-m8)"/><path d="M250 390 H296" marker-end="url(#ch04-m8)"/>
+      <path d="M326 120 H366" marker-end="url(#ch04-m8)"/><path d="M460 120 H496" marker-end="url(#ch04-m8)"/>
+      <path d="M526 120 C 575 120, 600 160, 600 231" marker-end="url(#ch04-m8)"/>
+      <path d="M326 390 C 480 390, 600 350, 600 279" marker-end="url(#ch04-m8)"/>
+      <path d="M622 255 H646" marker-end="url(#ch04-m8)"/><path d="M676 255 H716" marker-end="url(#ch04-m8)"/>
+      <path d="M850 255 H886" marker-end="url(#ch04-m8)"/>
+    </g>
+    <g stroke="#7b5cd6" stroke-width="2.4" fill="none" class="ch04-flow">
+      <path d="M66 245 C 92 245, 92 120, 116 120"/><path d="M66 266 C 92 266, 92 390, 116 390"/>
+      <path d="M250 120 H296"/><path d="M250 390 H296"/><path d="M326 120 H366"/><path d="M460 120 H496"/>
+      <path d="M526 120 C 575 120, 600 160, 600 231"/><path d="M326 390 C 480 390, 600 350, 600 279"/>
+      <path d="M622 255 H646"/><path d="M676 255 H716"/><path d="M850 255 H886"/>
+    </g>
+    <rect x="120" y="75" width="130" height="90" rx="6" fill="#eef0f5" stroke="#5a6b8c" stroke-width="2"/>
+    <text x="185" y="113" font-size="17" font-weight="700" text-anchor="middle" fill="#3a4a6a">W_gate</text>
+    <text x="185" y="137" font-size="15" text-anchor="middle" class="mono">14,336×4,096</text>
+    <rect x="120" y="345" width="130" height="90" rx="6" fill="#eef0f5" stroke="#5a6b8c" stroke-width="2"/>
+    <text x="185" y="383" font-size="17" font-weight="700" text-anchor="middle" fill="#3a4a6a">W_up</text>
+    <text x="185" y="407" font-size="15" text-anchor="middle" class="mono">14,336×4,096</text>
+    <rect x="300" y="30" width="26" height="180" fill="#f2eefc" stroke="#7b5cd6" stroke-width="2"/>
+    <text x="313" y="22" font-size="16" font-weight="700" text-anchor="middle" fill="#5a3fb3">g</text>
+    <text x="313" y="230" font-size="14" text-anchor="middle" class="mono">[14,336]</text>
+    <rect x="300" y="300" width="26" height="180" fill="#f2eefc" stroke="#7b5cd6" stroke-width="2"/>
+    <text x="313" y="292" font-size="14" text-anchor="middle" class="mono">[14,336]</text>
+    <text x="313" y="502" font-size="16" font-weight="700" text-anchor="middle" fill="#5a3fb3">u</text>
+    <rect x="370" y="95" width="90" height="50" rx="8" fill="#fcecec" stroke="#d64545" stroke-width="2"/>
+    <text x="415" y="126" font-size="17" text-anchor="middle" font-weight="700" fill="#ad2f2f">SiLU</text>
+    <rect x="500" y="30" width="26" height="180" fill="#f2eefc" stroke="#7b5cd6" stroke-width="2"/>
+    <text x="513" y="22" font-size="16" font-weight="700" text-anchor="middle" fill="#5a3fb3">s</text>
+    <text x="513" y="230" font-size="14" text-anchor="middle" class="mono">[14,336]</text>
+    <circle cx="600" cy="255" r="22" fill="#ffffff" stroke="#1d2433" stroke-width="2"/>
+    <text x="600" y="263" font-size="22" text-anchor="middle" fill="#1d2433">⊙</text>
+    <rect x="650" y="165" width="26" height="180" fill="#f2eefc" stroke="#7b5cd6" stroke-width="2"/>
+    <text x="663" y="155" font-size="16" font-weight="700" text-anchor="middle" fill="#5a3fb3">h</text>
+    <text x="663" y="364" font-size="14" text-anchor="middle" class="mono">[14,336]</text>
+    <rect x="720" y="210" width="130" height="90" rx="6" fill="#eef0f5" stroke="#5a6b8c" stroke-width="2"/>
+    <text x="785" y="248" font-size="17" font-weight="700" text-anchor="middle" fill="#3a4a6a">W_down</text>
+    <text x="785" y="272" font-size="15" text-anchor="middle" class="mono">4,096×14,336</text>
+    <rect x="890" y="230" width="26" height="51" fill="#f2eefc" stroke="#7b5cd6" stroke-width="2"/>
+    <text x="903" y="220" font-size="17" font-weight="700" fill="#5a3fb3" text-anchor="middle">y</text>
+    <text x="903" y="302" font-size="14" text-anchor="middle" class="mono">[4,096]</text>
+    <text x="640" y="56" font-size="15" fill="#687084">gate branch: decides how much</text>
+    <text x="640" y="76" font-size="15" fill="#687084">of each value passes</text>
+  </g>
+  <g data-step-only="3"><rect x="626" y="384" width="324" height="128" rx="8" fill="#f3f1ec" stroke="#ddd8ce"/>
+    <text x="640" y="406" font-size="14" fill="#687084">first 3 of 14,336 elements (illustrative)</text></g>
+  <g data-step-only="3" font-size="14" class="mono" fill="#1d2433">
+    <text x="640" y="430">g       =  2.10  -3.00   0.40</text>
+    <text x="640" y="452">SiLU(g) =  1.87  -0.14   0.24</text>
+    <text x="640" y="474">u       =  0.50   1.20  -2.00</text>
+    <text x="640" y="496" font-weight="700">h = s⊙u =  0.94  -0.17  -0.48</text>
+  </g>
+  <g data-step-only="4" font-size="15" fill="#1d2433">
+    <rect x="626" y="384" width="324" height="128" rx="8" fill="#fcecec" stroke="#d64545"/>
+    <text x="640" y="408" font-weight="700">Per layer, Llama 3.1 8B</text>
+    <text x="640" y="432" class="mono" font-size="14">params 3 × 58.7 M = 176.2 M</text>
+    <text x="640" y="454" class="mono" font-size="14">FLOPs  2 × 176.2 M = 352 M/token</text>
+    <text x="640" y="476" class="mono" font-size="14">× 32 layers = 11.3 GFLOP/token</text>
+    <text x="640" y="498" font-size="14">≈ 70% of the ~16 GFLOP forward pass</text>
+  </g>
+</svg>
+<div class="step-captions">
+  <p data-step-only="1"><b>Step 1.</b> The classic MLP: widen to <var>d</var><sub>ff</sub>, apply φ to each element, project back to <var>d</var>.</p>
+  <p data-step-only="2"><b>Step 2.</b> SwiGLU: two up-projections of the same <var>x</var>. The gate branch <var>g</var> goes through SiLU; the value branch <var>u</var> does not. Their elementwise product <var>h</var> is projected down.</p>
+  <p data-step-only="3"><b>Step 3.</b> With numbers: a strongly positive gate (2.1, SiLU 1.87) passes its value through, scaled up (0.5 → 0.94). A negative gate (−3.0, SiLU −0.14) nearly shuts its value off (1.2 → −0.17).</p>
+  <p data-step-only="4"><b>Step 4.</b> Three 58.7 M-weight matrices per layer. At one token per step, all 352 MB of them (BF16) are streamed from memory for every token.</p>
+</div>
+<figcaption><span class="fig-label">Figure 4.9</span> — From the classic MLP to SwiGLU, with Llama&#160;3.1&#160;8B shapes. Purple bars are activation vectors drawn to relative length (4,096 vs 14,336). Grey boxes are weight matrices.</figcaption>
+</figure>
+
+<h3>Why 14,336?</h3>
+<p>A gated MLP has three matrices instead of two. To keep the parameter count equal to a classic 4<var>d</var> MLP, Shazeer shrank <var>d</var><sub>ff</sub> by a factor of 2/3: three matrices of width (2/3)·4<var>d</var> hold as many weights as two of width 4<var>d</var>. Llama&#160;3 starts from the same rule, then scales the result up a little and rounds it to a multiple of 1,024, which gives <strong>14,336</strong> = 3.5<var>d</var>. <a href="06-transformer.html">Chapter 6</a> shows the exact arithmetic.</p>
+
+<aside class="callout deep"><div class="callout-title">Low-level: what SwiGLU costs</div>
+<p>Per token per layer, the MLP is 352 MFLOP of GEMM work but only about 86 KB of intermediate activations in BF16 (two 14,336-long vectors in, one out). With many tokens the three GEMMs are compute-bound and the SiLU-and-multiply step is memory-bound. So engines run gate and up as one merged GEMM and do the SiLU-and-multiply in one fused kernel (<a href="06-transformer.html">Chapter 6</a>; the last section of this chapter puts numbers on the saving).</p>
+</aside>
+</section>
+
+<section>
+<h2>Softmax: from scores to probabilities</h2>
+
+<p>At the end of the network, the model produces one score for every entry in the vocabulary: 128,256 real numbers for Llama&#160;3. These scores are called <dfn>logits</dfn>. They can be any size and any sign. What we need is a <dfn>probability distribution</dfn>: every value at least 0, all values summing to 1, and a bigger score giving a bigger probability. <dfn>Softmax</dfn> does exactly this:</p>
+<div class="formula">
+  softmax(<var>z</var>)<sub><var>i</var></sub> = <span class="frac"><span><var>e</var><sup><var>z</var><sub><var>i</var></sub></sup></span><span>Σ<sub><var>j</var>=1</sub><sup><var>V</var></sup> <var>e</var><sup><var>z</var><sub><var>j</var></sub></sup></span></span>
+  <span class="where"><var>z</var> = the logit vector (length <var>V</var>), <var>e</var><sup><var>z</var></sup> = exp(<var>z</var>), always positive. The denominator is the same for every <var>i</var>: it is the normalizer that makes the outputs sum to 1.</span>
+</div>
+<p>Why the exponential? It makes everything positive, and it turns <em>differences</em> of logits into <em>ratios</em> of probabilities: <var>p</var><sub><var>i</var></sub> / <var>p</var><sub><var>j</var></sub> = <var>e</var><sup><var>z</var><sub><var>i</var></sub> − <var>z</var><sub><var>j</var></sub></sup>. A logit gap of 1 means a factor of <var>e</var> ≈ 2.72. A gap of 2.3 means about 10×.</p>
+<p><strong>Worked example</strong> (illustrative logits for continuations of "The cat sat on the", over just five candidates): <span class="tok">&#9251;mat</span> 4.0, <span class="tok">&#9251;floor</span> 3.2, <span class="tok">&#9251;bed</span> 2.5, <span class="tok">&#9251;couch</span> 2.1, <span class="tok">&#9251;roof</span> 0.5. Subtract the largest (4.0) to get 0, −0.8, −1.5, −1.9, −3.5. Exponentiate to get 1, 0.449, 0.223, 0.150, 0.030, which sum to 1.852. Divide by that sum to get probabilities <strong>0.540, 0.243, 0.120, 0.081, 0.016</strong>. (The first step is explained just below.)</p>
+
+<p>Four properties matter later:</p>
+<ol>
+  <li><strong>Shift invariance.</strong> Adding the same constant <var>c</var> to every logit changes nothing, because <var>e</var><sup><var>c</var></sup> cancels between top and bottom. Only differences between logits matter.</li>
+  <li><strong>Order is preserved.</strong> The largest logit always gets the largest probability.</li>
+  <li><strong>Scale matters.</strong> Doubling every logit doubles every gap, so the distribution gets sharper. Halving them flattens it. Dividing logits by a number <var>T</var> before softmax is exactly <em>temperature</em>, the subject of <a href="14-sampling.html">Chapter 14</a>.</li>
+  <li><strong>It is a "soft" argmax.</strong> With big gaps it is nearly one-hot (all mass on the top entry). Unlike argmax it is smooth, so training can push on it. That is why it also produces attention weights (<a href="05-attention.html">Chapter 5</a>) and MoE router weights (<a href="07-mixture-of-experts.html">Chapter 7</a>).</li>
+</ol>
+
+<h3>Numerical stability: subtract the max</h3>
+<p>The textbook formula is a trap in floating point, because <var>e</var><sup><var>z</var></sup> overflows quickly:</p>
+<div class="table-wrap">
+<table class="data">
+  <tr><th>Format</th><th class="num">Largest finite value</th><th class="num">exp(z) overflows when z &gt;</th></tr>
+  <tr><td>FP16</td><td class="num">65,504</td><td class="num">11.09</td></tr>
+  <tr><td>BF16</td><td class="num">≈ 3.39 × 10<sup>38</sup></td><td class="num">88.72</td></tr>
+  <tr><td>FP32</td><td class="num">≈ 3.40 × 10<sup>38</sup></td><td class="num">88.72</td></tr>
+  <tr><td>FP64 (JavaScript numbers)</td><td class="num">≈ 1.80 × 10<sup>308</sup></td><td class="num">709.78</td></tr>
+</table>
+</div>
+<p>Once one term is ∞, the sum is ∞ and ∞/∞ = NaN. The opposite failure happens too: if every logit is very negative (say −1,000), every <var>e</var><sup><var>z</var></sup> rounds to 0 and you compute 0/0 = NaN. The fix uses shift invariance. Subtract the maximum logit <var>m</var> before exponentiating:</p>
+<div class="formula">
+  softmax(<var>z</var>)<sub><var>i</var></sub> = <span class="frac"><span><var>e</var><sup><var>z</var><sub><var>i</var></sub> − <var>m</var></sup></span><span>Σ<sub><var>j</var></sub> <var>e</var><sup><var>z</var><sub><var>j</var></sub> − <var>m</var></sup></span></span>, &#160;&#160; <var>m</var> = max<sub><var>j</var></sub> <var>z</var><sub><var>j</var></sub>
+  <span class="where">Every exponent is now ≤ 0, so every term lies in (0, 1] and nothing can overflow. The largest term is exactly <var>e</var><sup>0</sup> = 1, so the denominator is between 1 and <var>V</var> and can never be 0. The price is one extra pass over the data to find <var>m</var>.</span>
+</div>
+
+<div class="widget" id="ch04-sm">
+  <div class="widget-title">Try it: softmax with editable logits</div>
+  <div class="controls">
+    <div class="ch04-presets">
+      <button type="button" data-preset="0">Default</button>
+      <button type="button" data-preset="1">Add 1000 to all</button>
+      <button type="button" data-preset="2">All near −1000</button>
+      <button type="button" data-preset="3">≈ 12 in FP16</button>
+      <button type="button" data-preset="4">Equal logits</button>
+    </div>
+    <label>Arithmetic <select id="ch04-sm-prec"><option value="64">FP64 (JavaScript)</option><option value="32" selected>FP32</option><option value="16">FP16</option></select></label>
+  </div>
+  <div id="ch04-sm-table"></div>
+  <div class="out ch04-sum" id="ch04-sm-out"></div>
+  <div class="ch04-note">Edit any logit. Every intermediate value is rounded to the chosen format (FP16 is emulated). "Naive" computes exp(z) directly; "stable" computes exp(z − max). The bars show the stable probabilities. Logits are illustrative.</div>
+</div>
+
+<h3>Log-softmax and log-sum-exp</h3>
+<p>Training needs the <em>logarithm</em> of a probability (next section). Computing softmax and then taking the log is fragile: a tiny probability such as <var>e</var><sup>−200</sup> underflows to 0 in FP32 (the smallest FP32 number is about <var>e</var><sup>−103</sup>), and log(0) = −∞. Instead, take the log of the formula by hand:</p>
+<div class="formula">
+  log <var>p</var><sub><var>i</var></sub> = <var>z</var><sub><var>i</var></sub> − LSE(<var>z</var>), &#160;&#160;&#160; LSE(<var>z</var>) = log Σ<sub><var>j</var></sub> <var>e</var><sup><var>z</var><sub><var>j</var></sub></sup> = <var>m</var> + log Σ<sub><var>j</var></sub> <var>e</var><sup><var>z</var><sub><var>j</var></sub> − <var>m</var></sup>
+  <span class="where">LSE ("log-sum-exp") is computed with the same max trick. Worked example: LSE = 4.0 + ln 1.852 = 4.616, so log <var>p</var>(<span class="tok">&#9251;mat</span>) = 4.0 − 4.616 = −0.616, and <var>e</var><sup>−0.616</sup> = 0.540 as before. A logit 200 below the others simply gives log <var>p</var> ≈ −200, with no underflow.</span>
+</div>
+
+<h3>What softmax costs</h3>
+<p>The FLOPs are negligible: about 5 per element (compare, subtract, exp, add, divide), or about 0.6 MFLOP for a 128,256-entry row. Compare that with ≈ 16 GFLOP for the whole forward pass of one token. The cost is data movement and synchronization. A straightforward GPU kernel makes three passes over the row. Each pass is a <dfn>reduction</dfn> or depends on one: many threads each combine their own slice, then combine across the warp with shuffle instructions, then across warps through shared memory.</p>
+
+<figure class="wide">
+<svg viewBox="0 0 960 370" role="img" aria-label="A three-pass softmax kernel over one row of 128,256 FP32 logits: pass 1 finds the max, pass 2 sums exponentials, pass 3 writes probabilities; each pass is a parallel reduction tree.">
+  <text x="30" y="30" font-size="17" font-weight="700" fill="#1d2433">Softmax over one row: V = 128,256 logits in FP32 = 513 KB</text>
+  <rect x="30" y="48" width="580" height="34" fill="#f2eefc" stroke="#7b5cd6"/>
+  <g stroke="#d9d0f3"><path d="M66 48 V82 M102 48 V82 M138 48 V82 M174 48 V82 M210 48 V82 M246 48 V82 M282 48 V82 M318 48 V82 M354 48 V82 M390 48 V82 M426 48 V82 M462 48 V82 M498 48 V82 M534 48 V82 M570 48 V82"/></g>
+  <rect class="ch04-scan" x="30" y="46" width="40" height="38" fill="#d64545" fill-opacity=".25" stroke="#d64545"/>
+  <text x="40" y="70" font-size="14" class="mono" fill="#1d2433">z[0]</text>
+  <text x="600" y="70" font-size="14" class="mono" fill="#1d2433" text-anchor="end">z[128,255]</text>
+  <g font-size="16" fill="#1d2433">
+    <rect x="30" y="108" width="270" height="44" rx="8" fill="#ffffff" stroke="#1d2433"/>
+    <text x="44" y="136"><tspan font-weight="700">Pass 1</tspan>  m = max z</text>
+    <text x="320" y="136" class="mono" font-size="15">read 513 KB</text>
+    <rect x="30" y="166" width="270" height="44" rx="8" fill="#ffffff" stroke="#1d2433"/>
+    <text x="44" y="194"><tspan font-weight="700">Pass 2</tspan>  s = Σ exp(z − m)</text>
+    <text x="320" y="194" class="mono" font-size="15">read 513 KB</text>
+    <rect x="30" y="224" width="270" height="44" rx="8" fill="#ffffff" stroke="#1d2433"/>
+    <text x="44" y="252"><tspan font-weight="700">Pass 3</tspan>  p = exp(z − m) / s</text>
+    <text x="320" y="252" class="mono" font-size="15">read 513 KB, write 513 KB</text>
+  </g>
+  <text x="30" y="306" font-size="15" fill="#1d2433">Total ≈ 2.05 MB of memory traffic for ≈ 0.6 MFLOP: about 0.3 FLOP per byte.</text>
+  <text x="30" y="332" font-size="15" fill="#687084">Online softmax merges passes 1 and 2 by rescaling the running sum whenever</text>
+  <text x="30" y="354" font-size="15" fill="#687084">the running max grows (the trick inside FlashAttention, Chapter 15).</text>
+  <!-- reduction tree -->
+  <text x="790" y="114" font-size="15" font-weight="700" text-anchor="middle" fill="#1d2433">one reduction (e.g. max)</text>
+  <g stroke="#687084" stroke-width="1.3">
+    <path d="M664 270 L682 222 M700 270 L682 222 M736 270 L754 222 M772 270 L754 222 M808 270 L826 222 M844 270 L826 222 M880 270 L898 222 M916 270 L898 222"/>
+    <path d="M682 206 L718 170 M754 206 L718 170 M826 206 L862 170 M898 206 L862 170"/>
+    <path d="M718 154 L790 134 M862 154 L790 134"/>
+  </g>
+  <g fill="#eef0f5" stroke="#5a6b8c">
+    <rect x="650" y="270" width="28" height="22"/><rect x="686" y="270" width="28" height="22"/><rect x="722" y="270" width="28" height="22"/><rect x="758" y="270" width="28" height="22"/>
+    <rect x="794" y="270" width="28" height="22"/><rect x="830" y="270" width="28" height="22"/><rect x="866" y="270" width="28" height="22"/><rect x="902" y="270" width="28" height="22"/>
+    <rect x="668" y="206" width="28" height="16"/><rect x="740" y="206" width="28" height="16"/><rect x="812" y="206" width="28" height="16"/><rect x="884" y="206" width="28" height="16"/>
+    <rect x="704" y="154" width="28" height="16"/><rect x="848" y="154" width="28" height="16"/>
+  </g>
+  <rect x="770" y="122" width="40" height="18" fill="#fcecec" stroke="#d64545"/>
+  <text x="790" y="314" font-size="14" text-anchor="middle" fill="#687084">each thread: max of its own slice</text>
+  <text x="790" y="336" font-size="14" text-anchor="middle" fill="#687084">then shuffles within a warp,</text>
+  <text x="790" y="358" font-size="14" text-anchor="middle" fill="#687084">then shared memory across warps</text>
+</svg>
+<figcaption><span class="fig-label">Figure 4.10</span> — A plain three-pass softmax kernel. The red window sweeps the row once per pass. Each pass needs a <em>reduction</em>: partial results combined in a tree, which forces threads to synchronize. The arithmetic is cheap; memory traffic and synchronization set the cost.</figcaption>
+</figure>
+
+<p>Memory becomes a real problem in training. There the model computes logits for every position of every sequence at once. For a single 8,192-token sequence the logits tensor is 8,192 × 128,256 × 4 B ≈ <strong>4.2 GB</strong> in FP32. Training frameworks therefore use fused cross-entropy kernels that compute the loss chunk by chunk and never materialize the full probability tensor (<a href="08-pretraining.html">Chapter 8</a>).</p>
+
+<aside class="callout warn"><div class="callout-title">Common misconception</div>
+<p>"Softmax probabilities are the model's confidence that its answer is true." They are the model's predicted distribution for the <em>next token</em>, nothing more. Whether a 0.54 really comes true 54% of the time (whether the model is <em>calibrated</em>) depends on how it was trained, and it says nothing about whether a multi-token answer is factually correct.</p>
+</aside>
+</section>
+
+<section>
+<h2>Logits and cross-entropy</h2>
+
+<p>Where do logits come from? The last layer of the model, the <dfn>LM head</dfn>, is one more linear layer, <var>W</var><sub>head</sub> ∈ ℝ<sup>128256×4096</sup>. Logit <var>i</var> is the dot product of the final hidden vector <var>h</var> with row <var>i</var> of <var>W</var><sub>head</sub>. In words: <em>how much does the model's final state point toward token i's direction?</em> That single matrix holds 525,336,576 parameters. Its place in the full architecture, and whether it shares weights with the input embedding, is covered in <a href="06-transformer.html">Chapter 6</a>.</p>
+
+<p>To train, we need one number that says how wrong a prediction was. The training text tells us what the next token actually was (say <span class="tok">&#9251;mat</span>). The <dfn>cross-entropy loss</dfn> for that position is</p>
+<div class="formula">
+  <var>L</var> = −log <var>p</var><sub>correct</sub> = LSE(<var>z</var>) − <var>z</var><sub>correct</sub>
+  <span class="where"><var>p</var><sub>correct</sub> = the probability the model gave the token that really came next. The second form computes the same value straight from the logits, using the stable log-sum-exp. log is the natural log, so the unit is <em>nats</em>; divide by ln 2 for bits. With <var>p</var>(<span class="tok">&#9251;mat</span>) = 0.540: <var>L</var> = 0.616 nats = 0.889 bits.</span>
+</div>
+<p>Read it as <strong>surprise</strong>. If the model gave the right answer probability 1, the loss is 0. As that probability heads toward 0, the loss climbs without limit. A model that knows nothing spreads probability evenly over all 128,256 tokens, so its loss is ln&#160;128,256 ≈ <strong>11.76</strong>. That is roughly where an untrained Llama&#160;3 starts. The training loss is this number averaged over every position of every training sequence. <a href="08-pretraining.html">Chapter 8</a> turns it into perplexity.</p>
+
+<figure>
+<svg viewBox="0 0 760 360" role="img" aria-label="Plot of cross-entropy loss minus log p against probability p, with marked points at p 0.9, 0.5, 0.2 and 0.01, and a note that a uniform guess over 128,256 tokens gives 11.76.">
+  <rect x="80" y="30" width="440" height="270" fill="#fbfaf7" stroke="#ddd8ce"/>
+  <g stroke="#ebe7de"><path d="M168 30 V300 M256 30 V300 M344 30 V300 M432 30 V300 M80 246 H520 M80 192 H520 M80 138 H520 M80 84 H520"/></g>
+  <g font-size="13" fill="#687084" text-anchor="middle">
+    <text x="80" y="318">0</text><text x="168" y="318">0.2</text><text x="256" y="318">0.4</text><text x="344" y="318">0.6</text><text x="432" y="318">0.8</text><text x="520" y="318">1</text>
+    <text x="70" y="304" text-anchor="end">0</text><text x="70" y="250" text-anchor="end">1</text><text x="70" y="196" text-anchor="end">2</text><text x="70" y="142" text-anchor="end">3</text><text x="70" y="88" text-anchor="end">4</text><text x="70" y="34" text-anchor="end">5</text>
+  </g>
+  <text x="300" y="346" font-size="14" text-anchor="middle" fill="#1d2433">p = probability given to the correct token</text>
+  <text x="26" y="165" font-size="14" text-anchor="middle" fill="#1d2433" transform="rotate(-90 26 165)">loss = −ln p (nats)</text>
+  <path id="ch04-ce-path" d="" fill="none" stroke="#d64545" stroke-width="3"/>
+  <g fill="#1d2433">
+    <circle cx="476" cy="294.3" r="5"/><circle cx="300" cy="262.6" r="5"/><circle cx="168" cy="213.1" r="5"/><circle cx="84.4" cy="51.3" r="5"/>
+  </g>
+  <g font-size="14" class="mono" fill="#1d2433">
+    <text x="470" y="278" text-anchor="end">p=0.9 → 0.105</text>
+    <text x="308" y="252">p=0.5 → 0.693</text>
+    <text x="176" y="206">p=0.2 → 1.609</text>
+    <text x="94" y="50">p=0.01 → 4.605</text>
+  </g>
+  <rect x="546" y="40" width="200" height="132" rx="8" fill="#fcecec" stroke="#d64545"/>
+  <g font-size="14" fill="#1d2433">
+    <text x="558" y="64" font-weight="700">Off the chart:</text>
+    <text x="558" y="88">uniform guess over</text>
+    <text x="558" y="108">128,256 tokens,</text>
+    <text x="558" y="128" class="mono">p = 7.8e-6</text>
+    <text x="558" y="152" class="mono" font-weight="700">loss = 11.76</text>
+  </g>
+  <rect x="546" y="188" width="200" height="112" rx="8" fill="#f2eefc" stroke="#7b5cd6"/>
+  <g font-size="14" fill="#1d2433">
+    <text x="558" y="212" font-weight="700">Running example:</text>
+    <text x="558" y="236" class="mono">p(" mat") = 0.540</text>
+    <text x="558" y="260" class="mono">loss = 0.616 nats</text>
+    <text x="558" y="284" class="mono">     = 0.889 bits</text>
+  </g>
+</svg>
+<figcaption><span class="fig-label">Figure 4.11</span> — Cross-entropy is −ln <var>p</var><sub>correct</sub>. Confident and right costs almost nothing. Confident and wrong costs a lot: putting only 1% on the true token costs 4.6 nats, 44× more than putting 90% on it.</figcaption>
+</figure>
+
+<h3>What "learning" means, in one paragraph</h3>
+<p>The loss is a function of every weight in the model: 8.03 billion inputs, one output. The <dfn>gradient</dfn> is a vector with one entry per weight. Each entry says how fast the loss would change if you nudged that weight up a tiny bit. Training repeats one move: compute the loss on a batch of text, compute the gradient, and step every weight a small amount in the direction that lowers the loss, <var>w</var> ← <var>w</var> − η·<var>g</var>, where η is the <dfn>learning rate</dfn>. The algorithm that computes all 8 billion entries in one backward sweep is <dfn>backpropagation</dfn>; that sweep costs about twice the forward pass. For softmax plus cross-entropy the gradient with respect to the logits is very simple: <var>p</var> − onehot(correct). The correct token's logit is pushed up by 1 − <var>p</var><sub>correct</sub> (0.46 for <span class="tok">&#9251;mat</span>), and every other logit is pushed down by its own probability. Everything else about training (backprop, optimizers, schedules, scale) is <a href="08-pretraining.html">Chapter 8</a>.</p>
+</section>
+
+<section>
+<h2>Normalization: LayerNorm and RMSNorm</h2>
+
+<p>As a vector moves up through 32 layers, each layer adds something to it (next section). Its size drifts: some coordinates grow large, others shrink. Downstream operations care about scale. Softmax gets too sharp or too flat, and SiLU behaves very differently at 0.1 and at 100. In training this shows up as loss spikes and NaNs. We want every sublayer to see its input at a consistent size.</p>
+<p>The idea is <strong>automatic gain control</strong>, as in a radio: before using a vector, rescale it to a standard size. Then multiply by a learned per-dimension gain, so the model can still choose whatever scale it wants for each coordinate. This is done <em>per token</em>, across that token's <var>d</var> numbers. Tokens never share statistics with each other.</p>
+
+<div class="formula">
+  LayerNorm(<var>x</var>) = <span class="frac"><span><var>x</var> − μ</span><span>√(σ<sup>2</sup> + ε)</span></span> ⊙ γ + β &#160;&#160;&#160;&#160;&#160; RMSNorm(<var>x</var>) = <span class="frac"><span><var>x</var></span><span>√(mean(<var>x</var><sup>2</sup>) + ε)</span></span> ⊙ γ
+  <span class="where">μ = mean of the <var>d</var> entries, σ<sup>2</sup> = their variance, mean(<var>x</var><sup>2</sup>) = mean of the squared entries (the square root of it is the <em>root mean square</em>, RMS). ε is a tiny constant (Llama: 10<sup>−5</sup>) that prevents division by zero. γ (gain) and β (bias) are learned vectors of length <var>d</var>.</span>
+</div>
+<p><strong>LayerNorm</strong> (Ba, Kiros &amp; Hinton, 2016) re-centres the vector to mean 0 and rescales it to variance 1. <strong>RMSNorm</strong> (Zhang &amp; Sennrich, 2019) skips the centring and the β. It only divides by the RMS. The authors' hypothesis was that re-centring is unnecessary and rescaling does the useful work. Quality turned out comparable, and RMSNorm is simpler and cheaper. Llama and most recent open models use it.</p>
+<p><strong>Worked example.</strong> <var>x</var> = [3, 5, 4, 7, 2, 6, 4, 9]. Mean μ = 5 and variance σ<sup>2</sup> = 4.5, so σ = 2.12. LayerNorm gives [−0.94, 0, −0.47, 0.94, −1.41, 0.47, −0.47, 1.89], which has mean 0 and variance 1. The mean of squares is 236/8 = 29.5, so RMS = 5.43. RMSNorm gives [0.55, 0.92, 0.74, 1.29, 0.37, 1.10, 0.74, 1.66], which has RMS 1 but a mean of 0.92, not 0.</p>
+
+<figure class="stepper ch04-norm" id="ch04-norm" data-steps="4" data-interval="3000">
+<svg viewBox="0 0 760 525" role="img" aria-label="Bar charts of an 8-element vector going through LayerNorm (subtract mean, divide by standard deviation, scale by gamma) and RMSNorm (divide by RMS, scale by gamma).">
+  <rect x="14" y="12" width="732" height="248" rx="10" fill="#fbfaf7" stroke="#ddd8ce"/>
+  <rect x="14" y="268" width="732" height="248" rx="10" fill="#fbfaf7" stroke="#ddd8ce"/>
+  <text x="30" y="40" font-size="17" font-weight="700" fill="#1d2433">LayerNorm</text>
+  <text x="30" y="62" font-size="13" class="mono" fill="#687084">(x−μ)/σ ⊙ γ + β</text>
+  <text x="30" y="296" font-size="17" font-weight="700" fill="#1d2433">RMSNorm</text>
+  <text x="30" y="318" font-size="13" class="mono" fill="#687084">x / RMS(x) ⊙ γ</text>
+  <g id="ch04-ln-bars"></g>
+  <g id="ch04-rms-bars"></g>
+  <path d="M580 20 V508" stroke="#ddd8ce"/>
+  <g font-size="14" fill="#1d2433">
+    <g data-step-only="1"><text x="594" y="44" font-weight="700">input x</text><text x="594" y="70" class="mono">μ = 5.00</text><text x="594" y="94" class="mono">σ = 2.12</text><text x="594" y="134" fill="#687084">dashed line = mean</text></g>
+    <g data-step-only="2"><text x="594" y="44" font-weight="700">subtract μ</text><text x="594" y="70">bars centre on 0</text><text x="594" y="94" class="mono">mean → 0</text></g>
+    <g data-step-only="3"><text x="594" y="44" font-weight="700">divide by σ</text><text x="594" y="70" class="mono">variance → 1</text><text x="594" y="94" class="mono">range ≈ ±2</text></g>
+    <g data-step-only="4"><text x="594" y="44" font-weight="700">× γ  (+ β = 0)</text><text x="594" y="70">learned per-dim gain</text><text x="594" y="94" class="mono">γ illustrative</text></g>
+    <g data-step-only="1"><text x="594" y="300" font-weight="700">input x</text><text x="594" y="326" class="mono">RMS = 5.43</text></g>
+    <g data-step-only="2"><text x="594" y="300" font-weight="700">no centring step</text><text x="594" y="326">(nothing happens)</text></g>
+    <g data-step-only="3"><text x="594" y="300" font-weight="700">divide by RMS</text><text x="594" y="326" class="mono">RMS → 1</text><text x="594" y="350" class="mono">mean stays 0.92</text></g>
+    <g data-step-only="4"><text x="594" y="300" font-weight="700">× γ</text><text x="594" y="326">same γ as above</text></g>
+    <g data-step-range="3-4" fill="#d64545"><text x="594" y="134">y-axis zoomed 2.25×</text><text x="594" y="390">y-axis zoomed 2.25×</text></g>
+  </g>
+  <g font-size="13" fill="#687084"><text x="594" y="236">one reduction pass</text><text x="594" y="252">for μ, one for σ²</text>
+  <text x="594" y="492">one reduction pass</text><text x="594" y="508">for mean(x²)</text></g>
+</svg>
+<div class="step-captions">
+  <p data-step-only="1"><b>Step 1.</b> The same 8-number vector enters both. Real vectors have 4,096 entries; the operations are identical.</p>
+  <p data-step-only="2"><b>Step 2.</b> LayerNorm subtracts the mean, so the bars straddle zero. RMSNorm has no such step.</p>
+  <p data-step-only="3"><b>Step 3.</b> Both divide by a measure of size: LayerNorm by the standard deviation, RMSNorm by the root mean square. Both outputs now have size about 1. Only LayerNorm's has mean 0.</p>
+  <p data-step-only="4"><b>Step 4.</b> A learned gain γ rescales each dimension (values here are made up). LayerNorm also adds β, which is 0 here. Llama has one 4,096-entry γ per norm and no β.</p>
+</div>
+<figcaption><span class="fig-label">Figure 4.12</span> — LayerNorm versus RMSNorm on <var>x</var> = [3, 5, 4, 7, 2, 6, 4, 9]. The dashed line marks each vector's mean. Both normalizations are <em>scale invariant</em>: feeding in 10·<var>x</var> gives exactly the same output (ignoring ε), so a layer never needs to care how large its input has grown.</figcaption>
+</figure>
+
+<aside class="callout deep"><div class="callout-title">Low-level: RMSNorm in Llama</div>
+<p>Llama&#160;3.1&#160;8B has 65 RMSNorms: two per block plus one final norm. That is 65 × 4,096 = 266,240 parameters, about 0.003% of the model. The Hugging Face implementation upcasts the vector to FP32, computes <code>mean(x²)</code>, multiplies by <code>rsqrt(mean + 1e-5)</code>, casts back to BF16 and multiplies by γ. A GPU kernel usually gives each token row to one thread block: one sum-of-squares reduction (the same tree as Figure 4.10), then one elementwise pass. Per token it reads 8 KB and writes 8 KB for about 16 K FLOPs, which is firmly memory-bound. Engines fuse it with the residual add that comes right before it; vLLM's kernel is called <code>fused_add_rms_norm</code>. Where the norms sit inside a block ("pre-norm") is covered in <a href="06-transformer.html">Chapter 6</a>.</p>
+</aside>
+</section>
+
+<section>
+<h2>Residual connections</h2>
+
+<p>Deep stacks are hard to train. A signal that passes through 32 transformations in series is multiplied by each layer's "gain". If each layer shrinks it slightly, say by 0.9, then after 32 layers only 0.9<sup>32</sup> ≈ 0.034 of it is left. If each grows it by 1.1, it becomes 1.1<sup>32</sup> ≈ 21×. Gradients flowing backward during training compound the same way, so they vanish or explode. He et al. (2015, ResNet) observed that simply adding more plain layers made networks <em>worse</em> even on their training data. Their fix is used in every LLM:</p>
+<div class="formula">
+  out = <var>x</var> + <var>f</var>(<var>x</var>)
+  <span class="where"><var>x</var> = the layer's input, <var>f</var> = the layer's computation (for example norm → MLP). The layer learns a <em>correction</em> to add, not a replacement. Example: <var>x</var> = [1.0, −0.5, 2.0] and <var>f</var>(<var>x</var>) = [0.1, 0.3, −0.2] give [1.1, −0.2, 1.8].</span>
+</div>
+<p>Two things follow. First, if <var>f</var> outputs about zero, the layer is just the identity, so adding a layer can hardly hurt. Second, the derivative of the output with respect to the input is <var>I</var> + ∂<var>f</var>/∂<var>x</var>. The identity term <var>I</var> is a direct path that carries the signal forward, and the gradient backward, through any number of layers without decay.</p>
+
+<figure>
+<svg viewBox="0 0 760 380" role="img" aria-label="Left: a residual block where x flows straight up and f(x) is added back. Right: signal size after k layers: shrinking by 0.9 per layer vanishes, growing by 1.1 explodes, the identity path stays at 1.">
+  <defs>
+    <marker id="ch04-m9" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#7b5cd6"/></marker>
+    <marker id="ch04-m10" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#1d2433"/></marker>
+  </defs>
+  <!-- block -->
+  <path d="M150 352 V108" stroke="#7b5cd6" stroke-width="8" stroke-opacity=".25"/>
+  <path d="M150 352 V108" stroke="#7b5cd6" stroke-width="3" class="ch04-flow"/>
+  <path d="M150 72 V30" stroke="#7b5cd6" stroke-width="3" marker-end="url(#ch04-m9)"/>
+  <circle cx="150" cy="90" r="18" fill="#ffffff" stroke="#1d2433" stroke-width="2"/>
+  <text x="150" y="97" font-size="22" text-anchor="middle" fill="#1d2433">+</text>
+  <path d="M150 290 H250 V236" stroke="#1d2433" stroke-width="1.8" fill="none" marker-end="url(#ch04-m10)"/>
+  <rect x="200" y="160" width="100" height="72" rx="8" fill="#eef0f5" stroke="#5a6b8c" stroke-width="2"/>
+  <text x="250" y="192" font-size="17" font-weight="700" text-anchor="middle" fill="#3a4a6a">f</text>
+  <text x="250" y="214" font-size="13" text-anchor="middle" fill="#3a4a6a">norm → MLP</text>
+  <path d="M250 160 V90 H172" stroke="#1d2433" stroke-width="1.8" fill="none" marker-end="url(#ch04-m10)"/>
+  <text x="150" y="372" font-size="15" text-anchor="middle" class="mono" fill="#1d2433">x = [1.0, -0.5, 2.0]</text>
+  <text x="262" y="122" font-size="14" class="mono" fill="#1d2433">f(x) =</text>
+  <text x="262" y="142" font-size="14" class="mono" fill="#1d2433">[0.1, 0.3, -0.2]</text>
+  <text x="150" y="20" font-size="15" text-anchor="middle" class="mono" fill="#1d2433">[1.1, -0.2, 1.8]</text>
+  <text x="138" y="230" font-size="14" text-anchor="end" fill="#5a3fb3">identity</text>
+  <text x="138" y="248" font-size="14" text-anchor="end" fill="#5a3fb3">path</text>
+  <!-- chart: x k=0..32 -> 420..720 ; y log10 v: 2 -> 60, -2 -> 320 -->
+  <text x="570" y="36" font-size="15" font-weight="700" text-anchor="middle" fill="#1d2433">signal size after k layers (illustrative)</text>
+  <rect x="420" y="60" width="300" height="260" fill="#fbfaf7" stroke="#ddd8ce"/>
+  <g stroke="#ebe7de"><path d="M420 125 H720 M420 255 H720 M495 60 V320 M570 60 V320 M645 60 V320"/></g>
+  <path d="M420 190 H720" stroke="#b9b2a4"/>
+  <g font-size="13" fill="#687084" text-anchor="end">
+    <text x="412" y="64">100</text><text x="412" y="129">10</text><text x="412" y="194">1</text><text x="412" y="259">0.1</text><text x="412" y="324">0.01</text>
+  </g>
+  <g font-size="13" fill="#687084" text-anchor="middle">
+    <text x="420" y="338">0</text><text x="495" y="338">8</text><text x="570" y="338">16</text><text x="645" y="338">24</text><text x="720" y="338">32</text>
+  </g>
+  <text x="570" y="362" font-size="14" text-anchor="middle" fill="#1d2433">layers k</text>
+  <path d="M420 190 L720 103.9" stroke="#d64545" stroke-width="3"/>
+  <path d="M420 190 L720 285.5" stroke="#3d8bd4" stroke-width="3"/>
+  <path d="M420 190 L720 190" stroke="#7b5cd6" stroke-width="3"/>
+  <circle r="6" fill="#d64545" stroke="#ffffff" stroke-width="1.5"><animateMotion dur="4s" repeatCount="indefinite" path="M420 190 L720 103.9"/></circle>
+  <circle r="6" fill="#3d8bd4" stroke="#ffffff" stroke-width="1.5"><animateMotion dur="4s" repeatCount="indefinite" path="M420 190 L720 285.5"/></circle>
+  <circle r="6" fill="#7b5cd6" stroke="#ffffff" stroke-width="1.5"><animateMotion dur="4s" repeatCount="indefinite" path="M420 190 L720 190"/></circle>
+  <g font-size="14">
+    <text x="712" y="94" text-anchor="end" fill="#ad2f2f">×1.1 per layer → 21</text>
+    <text x="712" y="180" text-anchor="end" fill="#5a3fb3">identity path → 1</text>
+    <text x="712" y="306" text-anchor="end" fill="#2a6aa8">×0.9 per layer → 0.034</text>
+  </g>
+</svg>
+<figcaption><span class="fig-label">Figure 4.13</span> — Left: a residual block. The input flows straight up (purple) and the layer's output is <em>added</em> to it. Right: why that matters. A chain of multiplications drifts exponentially (log scale), while the identity path keeps a gain of exactly 1 however deep the stack is.</figcaption>
+</figure>
+
+<aside class="callout intuition"><div class="callout-title">Systems analogy</div>
+<p>A residual connection is <code>state += delta</code> instead of <code>state = transform(state)</code>: each layer writes a correction, never a replacement. <a href="06-transformer.html">Chapter 6</a> builds the "residual stream" picture of the whole transformer on this idea. The add itself is the cheapest operation in the model: 4,096 additions per token, reading two vectors and writing one, and engines fuse it into the RMSNorm that follows (previous section).</p>
+</aside>
+</section>
+
+<section>
+<h2>The compute profile: where the time goes</h2>
+
+<p>You now know every operation class in an LLM except attention, which <a href="05-attention.html">Chapter 5</a> builds from these same parts. For performance, they fall into three classes:</p>
+<div class="table-wrap">
+<table class="data">
+  <tr><th>Class</th><th>Examples</th><th class="num">FLOPs per byte</th><th>Limited by</th></tr>
+  <tr><td><strong>Matmul</strong> (GEMM / GEMV)</td><td>all linear layers: Q, K, V, O, gate, up, down, LM head; attention's score and weighted-sum products</td><td class="num">≈ <var>n</var> (tokens per weight load)</td><td>compute when <var>n</var> is large; memory at <var>n</var> = 1</td></tr>
+  <tr><td><strong>Elementwise</strong></td><td>SiLU, ⊙, residual add, scaling, dtype casts, applying rotary position encoding</td><td class="num">≈ 0.2–1</td><td>memory bandwidth</td></tr>
+  <tr><td><strong>Reductions</strong></td><td>softmax, RMSNorm, top-k/argmax when sampling</td><td class="num">≈ 0.3–1</td><td>memory bandwidth + synchronization</td></tr>
+</table>
+</div>
+<p>In FLOPs, matmuls are everything. For Llama&#160;3.1&#160;8B they are ≈ 16 GFLOP per token. All elementwise ops and reductions together are a few MFLOP, well under 0.1%. But FLOPs are not time. A memory-bound op runs at the speed of memory, and a GPU can do about 295 BF16 FLOPs in the time it takes to move one byte from HBM (the H100 ridge point from <a href="02-numbers-and-hardware.html">Chapter 2</a>). Every separate elementwise kernel reads its inputs from HBM and writes its output back, even though the math takes almost no time. Every kernel launch also costs a few microseconds of overhead.</p>
+<p>The cure is <dfn>kernel fusion</dfn>: do several consecutive memory-bound steps inside one kernel, keeping intermediate values in registers or shared memory instead of round-tripping through HBM. Figure 4.14 puts numbers on it for Llama's SwiGLU at prefill.</p>
+
+<figure class="stepper ch04-fuse wide" data-steps="2" data-interval="3600">
+<svg viewBox="0 0 960 540" role="img" aria-label="Arithmetic intensity of operation classes on a log scale against the H100 ridge point, and memory traffic of the SwiGLU elementwise step unfused versus fused.">
+  <defs>
+    <marker id="ch04-m11" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#3d8bd4"/></marker>
+  </defs>
+  <text x="30" y="26" font-size="17" font-weight="700" fill="#1d2433">Arithmetic intensity, FLOPs per byte moved (BF16, approximate, log scale)</text>
+  <g stroke="#ebe7de"><path d="M300 40 V218 M420 40 V218 M540 40 V218 M660 40 V218 M780 40 V218 M900 40 V218"/></g>
+  <g font-size="14" fill="#687084" text-anchor="middle">
+    <text x="300" y="238">0.1</text><text x="420" y="238">1</text><text x="540" y="238">10</text><text x="660" y="238">100</text><text x="780" y="238">1,000</text><text x="900" y="238">10,000</text>
+  </g>
+  <g font-size="15" fill="#1d2433" text-anchor="end">
+    <text x="290" y="60">GEMM, prefill n = 2,048</text>
+    <text x="290" y="90">GEMM, decode n = 1</text>
+    <text x="290" y="120">RMSNorm</text>
+    <text x="290" y="150">SiLU ⊙ (fused)</text>
+    <text x="290" y="180">softmax, 3-pass FP32</text>
+    <text x="290" y="210">residual add</text>
+  </g>
+  <rect x="300" y="46" width="491.5" height="20" fill="#d64545"/>
+  <rect x="300" y="76" width="120" height="20" fill="#3d8bd4"/>
+  <rect x="300" y="106" width="120" height="20" fill="#3d8bd4"/>
+  <rect x="300" y="136" width="108" height="20" fill="#3d8bd4"/>
+  <rect x="300" y="166" width="57" height="20" fill="#3d8bd4"/>
+  <rect x="300" y="196" width="27" height="20" fill="#3d8bd4"/>
+  <g font-size="13" class="mono" fill="#1d2433">
+    <text x="798" y="61">≈ 1,250</text><text x="428" y="91">≈ 1</text><text x="428" y="121">≈ 1</text><text x="416" y="151">≈ 0.8</text><text x="365" y="181">≈ 0.3</text><text x="335" y="211">≈ 0.17</text>
+  </g>
+  <path d="M716 40 V222" stroke="#1d2433" stroke-width="2" stroke-dasharray="6 4"/>
+  <text x="724" y="104" font-size="14" fill="#1d2433">H100 ridge</text>
+  <text x="724" y="122" font-size="14" fill="#1d2433">≈ 295</text>
+  <text x="724" y="160" font-size="13" fill="#687084">right: compute-bound</text>
+  <text x="724" y="178" font-size="13" fill="#687084">left: memory-bound</text>
+  <path d="M20 256 H940" stroke="#ddd8ce"/>
+
+  <text x="30" y="284" font-size="16" font-weight="700" fill="#1d2433">SwiGLU elementwise step, one layer, prefill of n = 2,048 tokens on an H100 (3.35 TB/s)</text>
+  <rect x="30" y="468" width="680" height="40" rx="6" fill="#e3eefa" stroke="#3d8bd4" stroke-width="2"/>
+  <text x="370" y="494" font-size="16" text-anchor="middle" font-weight="700" fill="#2a6aa8">HBM (GPU main memory)</text>
+
+  <g data-step-only="1">
+    <rect x="70" y="316" width="230" height="58" rx="8" fill="#ffffff" stroke="#1d2433" stroke-width="2"/>
+    <text x="185" y="341" font-size="15" text-anchor="middle" font-weight="700">kernel 1</text>
+    <text x="185" y="362" font-size="15" text-anchor="middle" class="mono">s = SiLU(g)</text>
+    <rect x="380" y="316" width="290" height="58" rx="8" fill="#ffffff" stroke="#1d2433" stroke-width="2"/>
+    <text x="525" y="341" font-size="15" text-anchor="middle" font-weight="700">kernel 2</text>
+    <text x="525" y="362" font-size="15" text-anchor="middle" class="mono">h = s ⊙ u</text>
+    <g stroke="#3d8bd4" stroke-width="2.4" fill="none">
+      <path d="M110 466 V378" marker-end="url(#ch04-m11)" class="ch04-flow"/>
+      <path d="M260 376 V464" marker-end="url(#ch04-m11)" class="ch04-flow"/>
+      <path d="M420 466 V378" marker-end="url(#ch04-m11)" class="ch04-flow"/>
+      <path d="M520 466 V378" marker-end="url(#ch04-m11)" class="ch04-flow"/>
+      <path d="M630 376 V464" marker-end="url(#ch04-m11)" class="ch04-flow"/>
+    </g>
+    <g font-size="13" class="mono" fill="#1d2433">
+      <text x="116" y="430">read g</text><text x="266" y="430">write s</text><text x="426" y="430">read s</text><text x="526" y="430">read u</text><text x="636" y="430">write h</text>
+    </g>
+    <text x="830" y="350" font-size="15" text-anchor="middle">5 × 58.7 MB</text>
+    <text x="830" y="378" font-size="17" text-anchor="middle" font-weight="700">= 293.6 MB</text>
+    <text x="830" y="410" font-size="17" text-anchor="middle" font-weight="700" fill="#d64545">≈ 87.6 µs</text>
+  </g>
+  <g data-step-only="2">
+    <rect x="70" y="316" width="600" height="58" rx="8" fill="#ffffff" stroke="#2f9e6e" stroke-width="2.5"/>
+    <text x="370" y="341" font-size="15" text-anchor="middle" font-weight="700">one fused kernel (SiluAndMul)</text>
+    <text x="370" y="362" font-size="15" text-anchor="middle" class="mono">h = SiLU(g) ⊙ u, s stays in registers</text>
+    <g stroke="#3d8bd4" stroke-width="2.4" fill="none">
+      <path d="M150 466 V378" marker-end="url(#ch04-m11)" class="ch04-flow"/>
+      <path d="M330 466 V378" marker-end="url(#ch04-m11)" class="ch04-flow"/>
+      <path d="M560 376 V464" marker-end="url(#ch04-m11)" class="ch04-flow"/>
+    </g>
+    <g font-size="13" class="mono" fill="#1d2433">
+      <text x="156" y="430">read g</text><text x="336" y="430">read u</text><text x="566" y="430">write h</text>
+    </g>
+    <text x="830" y="330" font-size="15" text-anchor="middle">3 × 58.7 MB</text>
+    <text x="830" y="356" font-size="17" text-anchor="middle" font-weight="700">= 176.2 MB</text>
+    <text x="830" y="384" font-size="17" text-anchor="middle" font-weight="700" fill="#2f9e6e">≈ 52.6 µs</text>
+    <text x="830" y="420" font-size="13" text-anchor="middle" fill="#687084">fused into the GEMM's</text>
+    <text x="830" y="438" font-size="13" text-anchor="middle" fill="#687084">epilogue: write h only,</text>
+    <text x="830" y="456" font-size="13" text-anchor="middle" fill="#687084">58.7 MB ≈ 17.5 µs</text>
+  </g>
+  <text x="30" y="532" font-size="14" fill="#687084">For scale: the gate + up GEMMs of this layer are 481 GFLOP ≈ 486 µs even at 100% of the H100's 989 TFLOPS.</text>
+</svg>
+<div class="step-captions">
+  <p data-step-only="1"><b>Step 1.</b> Unfused: each 2,048 × 14,336 BF16 tensor is 58.7 MB. Two kernels move five of them through HBM. That is about 18% of the time the gate and up GEMMs take, spent on a handful of FLOPs.</p>
+  <p data-step-only="2"><b>Step 2.</b> Fused: one kernel reads <var>g</var> and <var>u</var> and writes only <var>h</var>, cutting traffic by 40%. Fusing the activation into the matmul's epilogue (applied in registers before the GEMM writes its output) goes further.</p>
+</div>
+<figcaption><span class="fig-label">Figure 4.14</span> — Top: matmuls with many tokens sit right of the ridge (compute-bound); everything else sits far left (memory-bound). Bottom: kernel fusion removes HBM round trips for memory-bound work. Intensities are rough estimates; traffic numbers are exact tensor sizes, and times are lower bounds at peak bandwidth.</figcaption>
+</figure>
+
+<p>This pattern sets the agenda for the systems chapters. Prefill is dominated by big GEMMs and is compute-bound. Decode does one token per sequence, so its GEMMs become GEMVs and the whole step is memory-bound (<a href="11-inference.html">Chapter 11</a>). Serving engines win by fusing kernels, capturing whole decode steps as CUDA Graphs to remove launch overhead, and using FlashAttention, which fuses attention's matmuls and softmax into one kernel (<a href="15-serving.html">Chapter 15</a>).</p>
+
+<h3>The toolkit at a glance</h3>
+<div class="table-wrap">
+<table class="data">
+  <tr><th>Operation</th><th>Formula</th><th>Llama 3.1 8B shape (per token)</th><th class="num">Params</th><th class="num">FLOPs / token</th><th>Bound</th></tr>
+  <tr><td>Embedding lookup</td><td>gather row <var>i</var></td><td>[128,256 × 4,096] → 4,096</td><td class="num">525.3 M</td><td class="num">0</td><td>memory (<a href="03-tokens.html">Ch 3</a>)</td></tr>
+  <tr><td>Linear layer</td><td><var>y</var> = <var>Wx</var></td><td>e.g. 4,096 → 14,336</td><td class="num">58.7 M</td><td class="num">117.4 M</td><td>compute at large <var>n</var>, memory at <var>n</var> = 1</td></tr>
+  <tr><td>SwiGLU MLP</td><td><var>W</var><sub>d</sub>(SiLU(<var>W</var><sub>g</sub><var>x</var>) ⊙ <var>W</var><sub>u</sub><var>x</var>)</td><td>4,096 → 2 × 14,336 → 4,096</td><td class="num">176.2 M</td><td class="num">352.3 M</td><td>as linear layers</td></tr>
+  <tr><td>Activation + gate</td><td>SiLU(<var>g</var>) ⊙ <var>u</var></td><td>14,336</td><td class="num">0</td><td class="num">≈ 0.1 M</td><td>memory</td></tr>
+  <tr><td>RMSNorm</td><td><var>x</var> / RMS(<var>x</var>) ⊙ γ</td><td>4,096</td><td class="num">4,096</td><td class="num">≈ 16 K</td><td>memory</td></tr>
+  <tr><td>Residual add</td><td><var>x</var> + <var>f</var>(<var>x</var>)</td><td>4,096</td><td class="num">0</td><td class="num">4,096</td><td>memory</td></tr>
+  <tr><td>LM head</td><td><var>z</var> = <var>W</var><sub>head</sub><var>h</var></td><td>4,096 → 128,256</td><td class="num">525.3 M</td><td class="num">1.05 G</td><td>as linear layers</td></tr>
+  <tr><td>Softmax / log-softmax</td><td><var>e</var><sup><var>z</var>−<var>m</var></sup>/Σ, <var>z</var> − LSE</td><td>128,256</td><td class="num">0</td><td class="num">≈ 0.6 M</td><td>memory</td></tr>
+  <tr><td>Cross-entropy (training)</td><td>LSE(<var>z</var>) − <var>z</var><sub>correct</sub></td><td>128,256 → 1</td><td class="num">0</td><td class="num">≈ 0.6 M</td><td>memory</td></tr>
+</table>
+</div>
+
+<aside class="callout key"><div class="callout-title">Key takeaway</div>
+<p>An LLM is dot products organized into matrix multiplies, with cheap elementwise and reduction glue: nonlinearities, gates, softmax, norms and residual adds. The matmuls hold the parameters and nearly all the FLOPs. The glue holds almost no FLOPs but can eat real time unless it is fused. With these parts you can read every formula in the rest of the blog. Next, <a href="05-attention.html">Chapter 5</a> uses dot products and softmax to let tokens talk to each other.</p>
+</aside>
+</section>
+
+<section>
+<h2>Further reading</h2>
+<ul>
+  <li>Mikolov et al., <a href="https://arxiv.org/abs/1301.3781">Efficient Estimation of Word Representations in Vector Space</a> (2013): word2vec and the king − man + woman example.</li>
+  <li>Nissim, van Noord &amp; van der Goot, <a href="https://arxiv.org/abs/1905.09866">Fair is Better than Sensational: Man is to Doctor as Woman is to Doctor</a> (2019): what analogy arithmetic really shows.</li>
+  <li>Elhage et al., <a href="https://arxiv.org/abs/2209.10652">Toy Models of Superposition</a> (2022): more features than dimensions, interference and nonlinear filtering.</li>
+  <li>Hendrycks &amp; Gimpel, <a href="https://arxiv.org/abs/1606.08415">Gaussian Error Linear Units (GELUs)</a> (2016).</li>
+  <li>Elfwing, Uchibe &amp; Doya, <a href="https://arxiv.org/abs/1702.03118">Sigmoid-Weighted Linear Units</a> (2017), and Ramachandran, Zoph &amp; Le, <a href="https://arxiv.org/abs/1710.05941">Searching for Activation Functions</a> (2017): SiLU / Swish.</li>
+  <li>Dauphin et al., <a href="https://arxiv.org/abs/1612.08083">Language Modeling with Gated Convolutional Networks</a> (2016): the original GLU.</li>
+  <li>Shazeer, <a href="https://arxiv.org/abs/2002.05202">GLU Variants Improve Transformer</a> (2020): SwiGLU, GEGLU and the 2/3 width rule. Short and worth reading.</li>
+  <li>Ba, Kiros &amp; Hinton, <a href="https://arxiv.org/abs/1607.06450">Layer Normalization</a> (2016).</li>
+  <li>Zhang &amp; Sennrich, <a href="https://arxiv.org/abs/1910.07467">Root Mean Square Layer Normalization</a> (2019).</li>
+  <li>He et al., <a href="https://arxiv.org/abs/1512.03385">Deep Residual Learning for Image Recognition</a> (2015): residual connections.</li>
+  <li>Meta, <a href="https://github.com/meta-llama/llama3/blob/main/llama/model.py">Llama 3 reference model code</a>: RMSNorm, the SwiGLU FeedForward and the 14,336 rounding rule in about 300 lines.</li>
+</ul>
+</section>
+
+<footer id="chapter-nav"></footer>
+</main>
+</div>
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+  "use strict";
+  var NS = "http://www.w3.org/2000/svg";
+  var reduceMotion = !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+  function $(id) { return document.getElementById(id); }
+  function svgEl(tag, attrs) {
+    var e = document.createElementNS(NS, tag);
+    if (attrs) for (var k in attrs) e.setAttribute(k, attrs[k]);
+    return e;
+  }
+  function ease(t) { return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2; }
+  // returns a function(duration, frameFn) that cancels any tween it started before
+  function makeTweener() {
+    var token = 0;
+    return function (dur, fn) {
+      var my = ++token;
+      if (reduceMotion || dur <= 0) { fn(1); return; }
+      var t0 = null;
+      function frame(now) {
+        if (my !== token) return;
+        if (t0 === null) t0 = now;
+        var t = Math.min(1, (now - t0) / dur);
+        fn(ease(t));
+        if (t < 1) requestAnimationFrame(frame);
+      }
+      requestAnimationFrame(frame);
+    };
+  }
+  function fpath(f, x0, x1, n, X, Y) {
+    var d = "";
+    for (var i = 0; i <= n; i++) {
+      var x = x0 + (x1 - x0) * i / n;
+      d += (i ? " L" : "M") + X(x).toFixed(1) + " " + Y(f(x)).toFixed(1);
+    }
+    return d;
+  }
+  function stepOf(fig) { return fig && fig._stepper ? fig._stepper.step : 1; }
+
+  /* ---------- activation functions ---------- */
+  function erf(x) { // Abramowitz-Stegun 7.1.26, |error| < 1.5e-7
+    var s = x < 0 ? -1 : 1; x = Math.abs(x);
+    var t = 1 / (1 + 0.3275911 * x);
+    var y = 1 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * Math.exp(-x * x);
+    return s * y;
+  }
+  function relu(x) { return Math.max(0, x); }
+  function gelu(x) { return 0.5 * x * (1 + erf(x / Math.SQRT2)); }
+  function silu(x) { return x / (1 + Math.exp(-x)); }
+
+  (function actPlots() {
+    var X = function (x) { return 70 + (x + 4) / 8 * 330; };
+    var Y = function (y) { return 360 - (y + 1) / 5 * 320; };
+    var X2 = function (x) { return 470 + (x + 5) / 6 * 260; };
+    var Y2 = function (y) { return 360 - (y + 0.4) / 1.4 * 320; };
+    var pairs = [["relu", relu], ["gelu", gelu], ["silu", silu]];
+    pairs.forEach(function (p) {
+      var a = $("ch04-act-" + p[0]), b = $("ch04-act-" + p[0] + "2");
+      if (a) a.setAttribute("d", fpath(p[1], -4, 4, 160, X, Y));
+      if (b) b.setAttribute("d", fpath(p[1], -5, 1, 150, X2, Y2));
+    });
+  })();
+
+  /* ---------- cross-entropy curve ---------- */
+  (function ceCurve() {
+    var path = $("ch04-ce-path");
+    if (!path) return;
+    var d = "";
+    for (var i = 0; i <= 120; i++) {
+      var L = 5 * (1 - i / 120), p = Math.exp(-L);
+      d += (i ? " L" : "M") + (80 + 440 * p).toFixed(1) + " " + (300 - 54 * L).toFixed(1);
+    }
+    path.setAttribute("d", d);
+  })();
+
+  /* ---------- widget: random directions in high dimension ---------- */
+  (function highDim() {
+    var root = $("ch04-hd");
+    if (!root) return;
+    var DIMS = [2, 3, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096];
+    var PAIRS = 1500, BINS = 100;
+    var slider = $("ch04-hd-d"), dout = $("ch04-hd-dout"), svg = $("ch04-hd-svg"), out = $("ch04-hd-out"), btn = $("ch04-hd-go");
+    var spare = null;
+    function gauss() {
+      if (spare !== null) { var s = spare; spare = null; return s; }
+      var u = 0, v = 0;
+      while (u === 0) u = Math.random();
+      v = Math.random();
+      var r = Math.sqrt(-2 * Math.log(u)), th = 2 * Math.PI * v;
+      spare = r * Math.sin(th);
+      return r * Math.cos(th);
+    }
+    function lgamma(z) { // Lanczos, g = 7
+      var c = [0.99999999999980993, 676.5203681218851, -1259.1392167224028, 771.32342877765313, -176.61502916214059,
+        12.507343278686905, -0.13857109526572012, 9.9843695780195716e-6, 1.5056327351493116e-7];
+      if (z < 0.5) return Math.log(Math.PI / Math.sin(Math.PI * z)) - lgamma(1 - z);
+      z -= 1;
+      var x = c[0];
+      for (var i = 1; i < 9; i++) x += c[i] / (z + i);
+      var t = z + 7.5;
+      return 0.5 * Math.log(2 * Math.PI) + (z + 0.5) * Math.log(t) - t + Math.log(x);
+    }
+    // exact density of the cosine between two random directions in d dimensions
+    function density(c, d) {
+      var lc = lgamma(d / 2) - 0.5 * Math.log(Math.PI) - lgamma((d - 1) / 2);
+      var one = 1 - c * c;
+      if (one <= 0) return 0;
+      return Math.exp(lc + (d - 3) / 2 * Math.log(one));
+    }
+    function draw() {
+      var d = DIMS[+slider.value];
+      dout.textContent = String(d);
+      var a = new Float64Array(d), b = new Float64Array(d);
+      var counts = new Array(BINS).fill(0), sum = 0, sum2 = 0, big = 0, maxAbs = 0;
+      for (var p = 0; p < PAIRS; p++) {
+        var dot = 0, na = 0, nb = 0, i;
+        for (i = 0; i < d; i++) { a[i] = gauss(); b[i] = gauss(); }
+        for (i = 0; i < d; i++) { dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
+        var c = dot / Math.sqrt(na * nb);
+        sum += c; sum2 += c * c;
+        if (Math.abs(c) > 0.1) big++;
+        if (Math.abs(c) > maxAbs) maxAbs = Math.abs(c);
+        var k = Math.min(BINS - 1, Math.max(0, Math.floor((c + 1) / 2 * BINS)));
+        counts[k]++;
+      }
+      var mean = sum / PAIRS, sd = Math.sqrt(Math.max(0, sum2 / PAIRS - mean * mean));
+      // theory: expected count per bin (fine midpoint integration)
+      var theo = [], bw = 2 / BINS, SUB = 40;
+      for (var j = 0; j < BINS; j++) {
+        var acc = 0;
+        for (var s = 0; s < SUB; s++) acc += density(-1 + bw * (j + (s + 0.5) / SUB), d);
+        theo.push(acc * bw / SUB * PAIRS);
+      }
+      var ymax = 1;
+      counts.forEach(function (v) { if (v > ymax) ymax = v; });
+      theo.forEach(function (v) { if (v > ymax && isFinite(v)) ymax = Math.min(v, ymax * 1.25); });
+      // render
+      while (svg.firstChild) svg.removeChild(svg.firstChild);
+      var x0 = 50, x1 = 700, y0 = 220, y1 = 22, W = (x1 - x0) / BINS;
+      svg.appendChild(svgEl("rect", { x: x0, y: y1, width: x1 - x0, height: y0 - y1, fill: "#fbfaf7", stroke: "#ddd8ce" }));
+      [-1, -0.5, 0, 0.5, 1].forEach(function (t) {
+        var xx = x0 + (t + 1) / 2 * (x1 - x0);
+        svg.appendChild(svgEl("path", { d: "M" + xx + " " + y1 + " V" + y0, stroke: t === 0 ? "#b9b2a4" : "#ebe7de" }));
+        var tx = svgEl("text", { x: xx, y: y0 + 18, "font-size": 13, "text-anchor": "middle", fill: "#687084" });
+        tx.textContent = (t === 0 ? "0 (90°)" : t === 1 ? "1 (0°)" : t === -1 ? "-1 (180°)" : String(t));
+        svg.appendChild(tx);
+      });
+      var lab = svgEl("text", { x: (x0 + x1) / 2, y: y0 + 38, "font-size": 14, "text-anchor": "middle", fill: "#1d2433" });
+      lab.textContent = "cosine similarity of a random pair (angle)";
+      svg.appendChild(lab);
+      for (var q = 0; q < BINS; q++) {
+        if (!counts[q]) continue;
+        var h = Math.min(1, counts[q] / ymax) * (y0 - y1 - 6);
+        svg.appendChild(svgEl("rect", { x: (x0 + q * W + 0.5).toFixed(1), y: (y0 - h).toFixed(1), width: Math.max(1, W - 1).toFixed(1), height: h.toFixed(1), fill: "#7b5cd6", "fill-opacity": 0.75 }));
+      }
+      var dd = "";
+      for (var r = 0; r < BINS; r++) {
+        var hv = Math.min(1, theo[r] / ymax) * (y0 - y1 - 6);
+        dd += (r ? " L" : "M") + (x0 + (r + 0.5) * W).toFixed(1) + " " + (y0 - hv).toFixed(1);
+      }
+      svg.appendChild(svgEl("path", { d: dd, fill: "none", stroke: "#d64545", "stroke-width": 2, "stroke-dasharray": "5 3" }));
+      var lg = svgEl("text", { x: x1 - 8, y: y1 + 20, "font-size": 13, "text-anchor": "end", fill: "#ad2f2f" });
+      lg.textContent = "dashed: exact theory";
+      svg.appendChild(lg);
+      var lg2 = svgEl("text", { x: x0 + 8, y: y1 + 20, "font-size": 13, fill: "#5a3fb3" });
+      lg2.textContent = "bars: " + PAIRS.toLocaleString("en-US") + " sampled pairs";
+      svg.appendChild(lg2);
+      var ang = Math.acos(Math.min(1, maxAbs)) * 180 / Math.PI;
+      out.textContent = "d = " + d + "   theory std = 1/\u221Ad = " + (1 / Math.sqrt(d)).toFixed(4) +
+        "   measured std = " + sd.toFixed(4) + "\n" +
+        "pairs with |cos| > 0.1: " + big + " of " + PAIRS + " (" + (100 * big / PAIRS).toFixed(1) + "%)" +
+        "   most aligned pair: |cos| = " + maxAbs.toFixed(3) + ", angle " + ang.toFixed(1) + "\u00B0";
+    }
+    var pending = false;
+    function schedule() {
+      dout.textContent = String(DIMS[+slider.value]);
+      if (pending) return;
+      pending = true;
+      setTimeout(function () { pending = false; draw(); }, 30);
+    }
+    slider.addEventListener("input", schedule);
+    btn.addEventListener("click", schedule);
+    schedule();
+  })();
+
+  /* ---------- figure: grid warp (linear layer + nonlinearity) ---------- */
+  (function gridWarp() {
+    var fig = $("ch04-warp"), g = $("ch04-warp-grid"), ghost = $("ch04-warp-ghost");
+    if (!fig || !g) return;
+    var W1 = [[1.2, 0.5], [-0.4, 1.0]], b1 = [0.3, -0.4], W2 = [[0.9, -0.7], [0.5, 0.8]], b2 = [-0.2, 0.1];
+    var ACTS = { relu: function (v) { return Math.max(0, v); }, tanh: Math.tanh };
+    var act = "relu";
+    function mv(W, p) { return [W[0][0] * p[0] + W[0][1] * p[1], W[1][0] * p[0] + W[1][1] * p[1]]; }
+    function stage(k, p) {
+      if (k <= 1) return p;
+      var q = mv(W1, p);
+      if (k === 2) return q;
+      q = [q[0] + b1[0], q[1] + b1[1]];
+      if (k === 3) return q;
+      var f = ACTS[act];
+      q = [f(q[0]), f(q[1])];
+      if (k === 4) return q;
+      q = mv(W2, q);
+      return [q[0] + b2[0], q[1] + b2[1]];
+    }
+    function PX(x) { return 225 + 50 * x; }
+    function PY(y) { return 220 - 50 * y; }
+    var VALS = [], SAMPLES = 49, lines = [];
+    for (var v = -2; v <= 2.0001; v += 0.5) VALS.push(Math.round(v * 2) / 2);
+    VALS.forEach(function (c) {
+      [0, 1].forEach(function (dir) {
+        var pts = [];
+        for (var i = 0; i < SAMPLES; i++) {
+          var t = -2 + 4 * i / (SAMPLES - 1);
+          pts.push(dir === 0 ? [c, t] : [t, c]);
+        }
+        var axis = c === 0, edge = Math.abs(c) === 2;
+        var el = svgEl("polyline", {
+          fill: "none",
+          stroke: dir === 0 ? "#7b5cd6" : "#3d8bd4",
+          "stroke-width": axis ? 3 : edge ? 1.8 : 1.2,
+          "stroke-opacity": axis ? 1 : 0.55,
+          "stroke-linejoin": "round"
+        });
+        lines.push({ src: pts, el: el, axis: axis });
+      });
+    });
+    lines.sort(function (a, b) { return (a.axis ? 1 : 0) - (b.axis ? 1 : 0); });
+    lines.forEach(function (L) { g.appendChild(L.el); });
+    var dot = svgEl("circle", { r: 6, fill: "#e5b62b", stroke: "#1d2433", "stroke-width": 1.5 });
+    g.appendChild(dot);
+    var dotSrc = [1, 1];
+    // ghost: same two layers without the nonlinearity
+    lines.forEach(function (L) {
+      var s = "";
+      L.src.forEach(function (p) {
+        var q = mv(W1, p); q = [q[0] + b1[0], q[1] + b1[1]]; q = mv(W2, q); q = [q[0] + b2[0], q[1] + b2[1]];
+        s += PX(q[0]).toFixed(1) + "," + PY(q[1]).toFixed(1) + " ";
+      });
+      ghost.appendChild(svgEl("polyline", { points: s }));
+    });
+    var cur = null, curDot = null;
+    function targets(k) {
+      return { lines: lines.map(function (L) { return L.src.map(function (p) { return stage(k, p); }); }), dot: stage(k, dotSrc) };
+    }
+    function render(pos, dpos) {
+      lines.forEach(function (L, i) {
+        var s = "";
+        pos[i].forEach(function (p) { s += PX(p[0]).toFixed(1) + "," + PY(p[1]).toFixed(1) + " "; });
+        L.el.setAttribute("points", s);
+      });
+      dot.setAttribute("cx", PX(dpos[0]).toFixed(1));
+      dot.setAttribute("cy", PY(dpos[1]).toFixed(1));
+    }
+    var tween = makeTweener();
+    function goTo(k, animate) {
+      var tgt = targets(k);
+      if (!cur || !animate) { cur = tgt.lines; curDot = tgt.dot; render(cur, curDot); return; }
+      var from = cur, fromDot = curDot;
+      tween(550, function (e) {
+        var pos = from.map(function (line, i) {
+          return line.map(function (p, j) { var q = tgt.lines[i][j]; return [p[0] + (q[0] - p[0]) * e, p[1] + (q[1] - p[1]) * e]; });
+        });
+        var dp = [fromDot[0] + (tgt.dot[0] - fromDot[0]) * e, fromDot[1] + (tgt.dot[1] - fromDot[1]) * e];
+        cur = pos; curDot = dp;
+        render(pos, dp);
+      });
+    }
+    fig.addEventListener("stepchange", function (e) { goTo(e.detail.step, true); });
+    var btns = fig.querySelectorAll(".ch04-actsel button");
+    Array.prototype.forEach.call(btns, function (b) {
+      b.addEventListener("click", function () {
+        act = b.getAttribute("data-act");
+        Array.prototype.forEach.call(btns, function (o) { o.classList.toggle("on", o === b); });
+        goTo(stepOf(fig), true);
+      });
+    });
+    goTo(stepOf(fig), false);
+  })();
+
+  /* ---------- figure: LayerNorm vs RMSNorm bars ---------- */
+  (function normBars() {
+    var fig = $("ch04-norm"), gl = $("ch04-ln-bars"), gr = $("ch04-rms-bars");
+    if (!fig || !gl || !gr) return;
+    var x = [3, 5, 4, 7, 2, 6, 4, 9], gamma = [1.0, 0.5, 1.5, 1.0, 1.2, 1.0, 0.5, 1.2], eps = 1e-5, n = x.length;
+    var mu = x.reduce(function (a, b) { return a + b; }, 0) / n;
+    var vr = x.reduce(function (a, b) { return a + (b - mu) * (b - mu); }, 0) / n;
+    var sd = Math.sqrt(vr + eps);
+    var rms = Math.sqrt(x.reduce(function (a, b) { return a + b * b; }, 0) / n + eps);
+    var LN = [x.slice(), x.map(function (v) { return v - mu; }), x.map(function (v) { return (v - mu) / sd; }), x.map(function (v, i) { return (v - mu) / sd * gamma[i]; })];
+    var RM = [x.slice(), x.slice(), x.map(function (v) { return v / rms; }), x.map(function (v, i) { return v / rms * gamma[i]; })];
+    // per step: [zero y, px per unit] for the LayerNorm panel and the RMSNorm panel
+    var VIEW = { 1: [[232, 20], [488, 20]], 2: [[150, 20], [488, 20]], 3: [[150, 45], [488, 45]], 4: [[150, 45], [488, 45]] };
+    function build(group) {
+      var o = { bars: [], labels: [], cur: null };
+      o.grid = svgEl("path", { stroke: "#e2ddd2", "stroke-dasharray": "2 3" });
+      o.zero = svgEl("path", { stroke: "#1d2433", "stroke-width": 1.2 });
+      o.zl = svgEl("text", { x: 164, "font-size": 13, "text-anchor": "end", fill: "#687084" });
+      o.tl = svgEl("text", { x: 164, "font-size": 13, "text-anchor": "end", fill: "#687084" });
+      o.zl.textContent = "0";
+      [o.grid, o.zero, o.zl, o.tl].forEach(function (e) { group.appendChild(e); });
+      var i;
+      for (i = 0; i < n; i++) {
+        var r = svgEl("rect", { x: 182 + 48 * i, width: 30, fill: "#7b5cd6", "fill-opacity": 0.85 });
+        group.appendChild(r); o.bars.push(r);
+      }
+      o.mean = svgEl("path", { stroke: "#d64545", "stroke-width": 1.6, "stroke-dasharray": "6 4" });
+      group.appendChild(o.mean);
+      for (i = 0; i < n; i++) {
+        var t = svgEl("text", { x: 197 + 48 * i, "font-size": 13, "text-anchor": "middle", fill: "#1d2433", "class": "mono",
+          stroke: "#fbfaf7", "stroke-width": 4, "paint-order": "stroke", "stroke-linejoin": "round" });
+        group.appendChild(t); o.labels.push(t);
+      }
+      return o;
+    }
+    var P = [build(gl), build(gr)];
+    function draw(p, vals, zero, scale, isInt) {
+      var m = 0;
+      vals.forEach(function (v, i) {
+        var h = Math.abs(v) * scale, y = v >= 0 ? zero - h : zero;
+        p.bars[i].setAttribute("y", y.toFixed(1));
+        p.bars[i].setAttribute("height", Math.max(0.5, h).toFixed(1));
+        p.labels[i].setAttribute("y", (v >= 0 ? y - 5 : y + h + 15).toFixed(1));
+        p.labels[i].textContent = isInt ? String(Math.round(v)) : (Math.abs(v) < 0.005 ? "0" : v.toFixed(2));
+        m += v;
+      });
+      m /= vals.length;
+      p.mean.setAttribute("d", "M174 " + (zero - m * scale).toFixed(1) + " H558");
+      p.zero.setAttribute("d", "M170 " + zero.toFixed(1) + " H562");
+      p.zl.setAttribute("y", (zero + 4).toFixed(1));
+      var tick = scale < 30 ? 5 : 1, ty = zero - tick * scale;
+      p.grid.setAttribute("d", "M170 " + ty.toFixed(1) + " H562");
+      p.tl.setAttribute("y", (ty + 4).toFixed(1));
+      p.tl.textContent = String(tick);
+    }
+    var tween = makeTweener();
+    function goTo(k, animate) {
+      var targets = [LN[k - 1], RM[k - 1]], view = VIEW[k];
+      var isInt = k <= 2;
+      var from = P.map(function (p, i) { return p.cur || { vals: targets[i], zero: view[i][0], scale: view[i][1] }; });
+      function frame(e) {
+        P.forEach(function (p, i) {
+          var f = from[i];
+          var vals = f.vals.map(function (v, j) { return v + (targets[i][j] - v) * e; });
+          var zero = f.zero + (view[i][0] - f.zero) * e, scale = f.scale + (view[i][1] - f.scale) * e;
+          p.cur = { vals: vals, zero: zero, scale: scale };
+          draw(p, vals, zero, scale, e >= 1 && isInt);
+        });
+      }
+      if (!animate) frame(1); else tween(550, frame);
+    }
+    fig.addEventListener("stepchange", function (e) { goTo(e.detail.step, true); });
+    goTo(stepOf(fig), false);
+  })();
+
+  /* ---------- widget: softmax with editable logits ---------- */
+  (function softmaxWidget() {
+    var root = $("ch04-sm");
+    if (!root) return;
+    var TOK = ["\u2423mat", "\u2423floor", "\u2423bed", "\u2423couch", "\u2423roof"];
+    var PRESETS = [
+      [4.0, 3.2, 2.5, 2.1, 0.5],
+      [1004, 1003.2, 1002.5, 1002.1, 1000.5],
+      [-996, -996.8, -997.5, -997.9, -999.5],
+      [12, 11.2, 10.5, 10.1, 8.5],
+      [2, 2, 2, 2, 2]
+    ];
+    var prec = $("ch04-sm-prec"), tbl = $("ch04-sm-table"), out = $("ch04-sm-out");
+    function toF16(x) {
+      if (!isFinite(x) || x === 0) return x;
+      var s = x < 0 ? -1 : 1, a = Math.abs(x);
+      if (a >= 65520) return s * Infinity;
+      var e = Math.floor(Math.log2(a));
+      if (e < -14) e = -14;
+      var q = Math.pow(2, e - 10);
+      return s * Math.round(a / q) * q;
+    }
+    function R(x) {
+      var p = prec.value;
+      if (p === "32") return Math.fround(x);
+      if (p === "16") return toF16(x);
+      return x;
+    }
+    // build table
+    var html = '<table class="ch04-sm-table"><tr><th>token</th><th>logit z</th><th>naive e<sup>z</sup></th><th>naive p</th>' +
+      '<th>e<sup>z\u2212m</sup></th><th>p (stable)</th><th>log p</th><th class="ch04-barcell">p</th></tr>';
+    TOK.forEach(function (t, i) {
+      html += '<tr><td>' + t + '</td><td><input type="number" step="0.1" id="ch04-sm-z' + i + '" aria-label="logit for ' + t + '"></td>' +
+        '<td id="ch04-sm-ne' + i + '"></td><td id="ch04-sm-np' + i + '"></td><td id="ch04-sm-se' + i + '"></td>' +
+        '<td id="ch04-sm-sp' + i + '"></td><td id="ch04-sm-lp' + i + '"></td>' +
+        '<td class="ch04-barcell"><span class="ch04-bar" id="ch04-sm-bar' + i + '"></span></td></tr>';
+    });
+    html += "</table>";
+    tbl.innerHTML = html;
+    var inputs = TOK.map(function (t, i) { return $("ch04-sm-z" + i); });
+    function fmtE(v) {
+      if (isNaN(v)) return "NaN";
+      if (!isFinite(v)) return v > 0 ? "inf" : "-inf";
+      if (v === 0) return "0";
+      var a = Math.abs(v);
+      if (a >= 1e5 || a < 1e-3) return v.toExponential(2);
+      return v.toPrecision(4);
+    }
+    function fmtP(v) {
+      if (isNaN(v)) return "NaN";
+      if (!isFinite(v)) return v > 0 ? "inf" : "-inf";
+      return v.toFixed(4);
+    }
+    function setCell(id, text, bad) {
+      var c = $(id);
+      c.textContent = text;
+      c.classList.toggle("bad", !!bad);
+    }
+    function compute() {
+      var z = inputs.map(function (inp) { var v = parseFloat(inp.value); return R(isNaN(v) ? 0 : v); });
+      // naive
+      var ne = z.map(function (v) { return R(Math.exp(v)); });
+      var ns = 0; ne.forEach(function (v) { ns = R(ns + v); });
+      var np = ne.map(function (v) { return R(v / ns); });
+      // stable
+      var m = Math.max.apply(null, z);
+      var se = z.map(function (v) { return R(Math.exp(R(v - m))); });
+      var ss = 0; se.forEach(function (v) { ss = R(ss + v); });
+      var sp = se.map(function (v) { return R(v / ss); });
+      var lse = R(m + R(Math.log(ss)));
+      var lp = z.map(function (v) { return R(R(v - m) - R(Math.log(ss))); });
+      var anyInf = ne.some(function (v) { return !isFinite(v); });
+      var allZero = ne.every(function (v) { return v === 0; });
+      var anyNaN = np.some(function (v) { return isNaN(v); });
+      z.forEach(function (v, i) {
+        setCell("ch04-sm-ne" + i, fmtE(ne[i]), !isFinite(ne[i]) || ne[i] === 0);
+        setCell("ch04-sm-np" + i, fmtP(np[i]), isNaN(np[i]) || (anyInf && np[i] === 0));
+        setCell("ch04-sm-se" + i, fmtE(se[i]), false);
+        setCell("ch04-sm-sp" + i, fmtP(sp[i]), isNaN(sp[i]));
+        setCell("ch04-sm-lp" + i, isFinite(lp[i]) ? lp[i].toFixed(3) : fmtE(lp[i]), !isFinite(lp[i]));
+        $("ch04-sm-bar" + i).style.width = (isFinite(sp[i]) ? Math.max(1, sp[i] * 120) : 0).toFixed(1) + "px";
+      });
+      var sumP = sp.reduce(function (a, b) { return a + b; }, 0);
+      var status;
+      if (anyInf) status = '<b style="color:#d64545">Naive: overflow.</b> Some e<sup>z</sup> = inf, so the sum is inf, and inf/inf = NaN.';
+      else if (allZero) status = '<b style="color:#d64545">Naive: underflow.</b> Every e<sup>z</sup> rounds to 0, so 0/0 = NaN.';
+      else if (anyNaN) status = '<b style="color:#d64545">Naive: NaN.</b>';
+      else status = '<b style="color:#2f9e6e">Naive: OK here</b> (same answer as stable, up to rounding).';
+      function fmtL(v) { return isFinite(v) && Math.abs(v) < 1e5 ? v.toFixed(3) : fmtE(v); }
+      out.innerHTML = "m = max z = " + fmtL(m) + "    \u03A3 naive = " + fmtE(ns) + "    \u03A3 stable = " + fmtE(ss) + "\n" +
+        "LSE(z) = m + ln \u03A3 stable = " + fmtL(lse) + "    \u03A3 p (stable) = " + sumP.toFixed(4) + "\n" + status +
+        ' <b style="color:#2f9e6e">Stable: always finite.</b>';
+    }
+    function setPreset(k) {
+      PRESETS[k].forEach(function (v, i) { inputs[i].value = v; });
+      if (k === 3) prec.value = "16";
+      compute();
+    }
+    inputs.forEach(function (inp) { inp.addEventListener("input", compute); });
+    prec.addEventListener("change", compute);
+    Array.prototype.forEach.call(root.querySelectorAll("[data-preset]"), function (b) {
+      b.addEventListener("click", function () { setPreset(+b.getAttribute("data-preset")); });
+    });
+    setPreset(0);
+  })();
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,1469 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>10 · Reasoning, Thinking &amp; Effort — How LLMs Really Work</title>
+<link rel="stylesheet" href="assets/style.css">
+<script src="assets/blog.js" defer></script>
+<style>
+  /* ---- Chapter 10 styles (all scoped to #ch10) ---- */
+  #ch10 > section { max-width: var(--wide-w); }
+  #ch10 figure svg .mono, #ch10 figure svg g.mono text, #ch10 .widget svg .mono { font-family: var(--mono); }
+  #ch10 figure svg .pre { white-space: pre; }
+  #ch10 .flow { stroke-dasharray: 7 6; animation: ch10-dash 1.2s linear infinite; }
+  @keyframes ch10-dash { to { stroke-dashoffset: -26; } }
+  #ch10 .pulse { animation: ch10-pulse 1.8s ease-in-out infinite; }
+  @keyframes ch10-pulse { 0%, 100% { opacity: .35 } 50% { opacity: 1 } }
+  #ch10 .blink { animation: ch10-blink 1s steps(2, start) infinite; }
+  @keyframes ch10-blink { to { visibility: hidden; } }
+
+  /* GRPO stepper: advantage bars grow from the zero line */
+  #ch10 .fig-grpo .advbar { transform-box: fill-box; transform-origin: left center; transform: scaleX(0); transition: transform .45s ease; }
+  #ch10 .fig-grpo .advbar.neg { transform-origin: right center; }
+  #ch10 .fig-grpo.at-step-3 .advbar, #ch10 .fig-grpo.at-step-4 .advbar, #ch10 .fig-grpo.at-step-5 .advbar { transform: scaleX(1); }
+
+  /* budget forcing stepper: the thinking bar grows */
+  #ch10 .fig-force .fill { transform-box: fill-box; transform-origin: left center; transition: transform .5s ease; }
+  #ch10 .fig-force.at-step-1 .fill { transform: scaleX(.30); }
+  #ch10 .fig-force.at-step-2 .fill { transform: scaleX(.35); }
+  #ch10 .fig-force.at-step-3 .fill, #ch10 .fig-force.at-step-4 .fill { transform: scaleX(1); }
+
+  /* effort simulator widget */
+  #ch10 .sim-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 12px 18px; margin-bottom: 14px; }
+  #ch10 .sim-grid label { display: flex; flex-direction: column; align-items: stretch; gap: 4px; font-size: 13.5px; }
+  #ch10 .sim-grid input[type=range] { width: 100%; }
+  #ch10 .sim-grid select, #ch10 .sim-grid input[type=number] { width: 100%; }
+  #ch10 .sim-row { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 18px; align-items: start; }
+  @media (max-width: 760px) { #ch10 .sim-row { grid-template-columns: 1fr; } }
+  #ch10 .res { width: 100%; border-collapse: collapse; font-size: 14.5px; }
+  #ch10 .res td { padding: 5px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  #ch10 .res td.v { font-family: var(--mono); font-weight: 700; text-align: right; white-space: nowrap; color: var(--ink); }
+  #ch10 .res tr:last-child td { border-bottom: 0; }
+  #ch10 .res td.h { color: var(--muted); font-size: 13px; }
+  #ch10 .tl { display: flex; height: 28px; border-radius: 6px; overflow: hidden; border: 1px solid var(--line); margin: 6px 0 4px; font-size: 12px; font-family: var(--sans); }
+  #ch10 .tl span { display: flex; align-items: center; justify-content: center; height: 100%; color: #1d2433; white-space: nowrap; overflow: hidden; min-width: 2px; transition: flex-basis .3s ease; }
+  #ch10 .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 13px; color: var(--ink-2); }
+  #ch10 .legend i { display: inline-block; width: 11px; height: 11px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+  #ch10 .note { font-size: 13px; color: var(--muted); margin-top: 8px; }
+  #ch10 .badge-ill { display: inline-block; font-size: 11.5px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; color: #ad2f2f; background: #fcecec; border: 1px solid #f0c4c4; border-radius: 999px; padding: 1px 8px; margin-left: 6px; vertical-align: 1px; }
+</style>
+</head>
+<body data-chapter="10">
+<div class="layout">
+<nav id="sidebar"></nav>
+<main class="article" id="ch10">
+
+<header class="chapter-head">
+  <div class="kicker">Part III · Chapter 10</div>
+  <h1>Reasoning, Thinking &amp; Effort</h1>
+  <p class="lede">A "reasoning model" is an ordinary transformer that has been trained to write a long scratchpad before it answers. This chapter explains why those extra tokens make it smarter, how reinforcement learning teaches the habit, what the thinking looks like at the token level, and what the <code>effort</code> knob in today's APIs actually changes: tokens, latency, memory and money.</p>
+</header>
+
+<div class="tldr">
+  <div class="tldr-title">In this chapter</div>
+  <ul>
+    <li>Why thinking helps: every token gets the same fixed compute (≈ 2<var>N</var> FLOPs) and the same fixed depth (<var>L</var> layers). Writing intermediate tokens adds serial steps and scratch memory.</li>
+    <li>Test-time compute: thinking <em>longer</em> (one long chain) versus thinking <em>wider</em> (many samples + majority vote or a verifier), with real numbers.</li>
+    <li>How reasoning is trained: reinforcement learning with verifiable rewards, the <strong>GRPO</strong> math worked step by step, the DeepSeek-R1 recipe, distillation into small models, outcome vs process rewards.</li>
+    <li>What a reasoning response is, token by token: <code>&lt;think&gt;</code> blocks and harmony channels, which tokens are billed, shown, and kept for the next turn; hidden, summarized and encrypted reasoning in commercial APIs; thinking between tool calls.</li>
+    <li>Effort and thinking budgets in the OpenAI, Anthropic, Gemini, Qwen3 and gpt-oss interfaces, and the four ways effort is implemented: prompt conditioning, budget forcing, hard caps and adaptive thinking.</li>
+    <li>What thinking costs (worked example on Llama 3.1 8B), how it fails, and how to pick an effort level. An interactive effort simulator.</li>
+  </ul>
+</div>
+
+<section>
+<h2>Why thinking helps</h2>
+
+<p><strong>The problem.</strong> A transformer produces one token per forward pass (<a href="01-big-picture.html">Chapter 1</a>). Each pass does a fixed amount of work: about 2<var>N</var> FLOPs for <var>N</var> parameters, pushed through exactly <var>L</var> layers (<a href="06-transformer.html">Chapter 6</a>). For Llama 3.1 8B that is about 16 GFLOP and 32 layers per token, no matter whether the question is "What is 2 + 2?" or "Prove this theorem." The model cannot decide to spend more on a hard token. If the answer needs more computation than one pass can hold, the first answer token is a guess.</p>
+
+<p><strong>The idea.</strong> Let the model write intermediate tokens before the answer. Each written token buys one more full forward pass, and its result is stored in the context where every later token can read it. This is the same trick you use when you multiply 47 × 38 on paper instead of in your head: you do not get smarter, you get more steps and a place to write partial results.</p>
+
+<aside class="callout intuition"><div class="callout-title">Intuition: a fixed-depth circuit with a tape</div><p>One forward pass is like a combinational circuit with a fixed depth of 32 stages: it can do a lot in parallel, but only 32 stages in sequence. Generating a token and feeding it back turns the circuit into a loop with an external tape. The tape is the context (physically, the KV cache, <a href="12-kv-cache.html">Chapter 12</a>). A loop with a tape can run algorithms whose number of sequential steps grows with the problem. That is the whole reason chain-of-thought works.</p></aside>
+
+<figure class="stepper wide fig-now" data-steps="4" data-interval="3400">
+  <svg viewBox="0 0 960 510" role="img" aria-label="Answering immediately uses one forward pass for the answer token; thinking first uses hundreds of passes, each output token fed back as the next input">
+    <defs>
+      <marker id="ch10-arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#1d2433"/></marker>
+      <marker id="ch10-arr-m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#687084"/></marker>
+      <marker id="ch10-arr-y" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#b8901a"/></marker>
+    </defs>
+    <!-- divider -->
+    <line x1="425" y1="20" x2="425" y2="440" stroke="#ddd8ce" stroke-width="1.5" stroke-dasharray="5 5"/>
+    <text x="212" y="32" text-anchor="middle" font-size="19" font-weight="800" fill="#1d2433">Answer immediately</text>
+    <text x="692" y="32" text-anchor="middle" font-size="19" font-weight="800" fill="#1d2433">Think first</text>
+
+    <!-- LEFT PANEL -->
+    <g>
+      <rect x="62" y="398" width="300" height="36" rx="7" fill="#fbefc5" stroke="#e5b62b"/>
+      <text x="212" y="422" text-anchor="middle" font-size="16" class="mono" fill="#1d2433">What is 47 × 38?</text>
+      <rect x="112" y="150" width="200" height="220" rx="8" fill="#eceff5" stroke="#5a6b8c" stroke-width="1.5"/>
+      <g stroke="#c9cfdc" stroke-width="1">
+        <line x1="112" y1="177" x2="312" y2="177"/><line x1="112" y1="204" x2="312" y2="204"/><line x1="112" y1="231" x2="312" y2="231"/>
+        <line x1="112" y1="258" x2="312" y2="258"/><line x1="112" y1="285" x2="312" y2="285"/><line x1="112" y1="312" x2="312" y2="312"/><line x1="112" y1="339" x2="312" y2="339"/>
+      </g>
+      <rect x="132" y="244" width="160" height="30" rx="5" fill="#ffffff" stroke="#5a6b8c"/>
+      <text x="212" y="265" text-anchor="middle" font-size="15" font-weight="700" fill="#5a6b8c">32 layers, once</text>
+      <path d="M212 396 V374" stroke="#1d2433" stroke-width="2" marker-end="url(#ch10-arr)"/>
+      <path d="M212 148 V124" stroke="#1d2433" stroke-width="2" marker-end="url(#ch10-arr)"/>
+      <rect x="172" y="84" width="80" height="36" rx="7" fill="#fbefc5" stroke="#e5b62b" stroke-width="2"/>
+      <text x="212" y="108" text-anchor="middle" font-size="17" class="mono" font-weight="700" fill="#1d2433">178</text>
+      <text x="262" y="100" font-size="15" fill="#687084">first answer token</text>
+      <text x="262" y="118" font-size="15" fill="#687084">("1786" = 178 + 6)</text>
+      <text x="212" y="64" text-anchor="middle" font-size="15" fill="#d64545" font-weight="700">the whole product must be computed in one pass</text>
+    </g>
+
+    <!-- RIGHT PANEL: columns -->
+    <g data-step="2">
+      <rect x="455" y="150" width="48" height="220" rx="6" fill="#eceff5" stroke="#5a6b8c" stroke-width="1.5"/>
+      <rect x="451" y="398" width="56" height="36" rx="6" fill="#fbefc5" stroke="#e5b62b"/>
+      <text x="479" y="421" text-anchor="middle" font-size="15" class="mono" fill="#1d2433">38?</text>
+      <rect x="451" y="84" width="56" height="36" rx="6" fill="#efe9fb" stroke="#7b5cd6"/>
+      <text x="479" y="107" text-anchor="middle" font-size="15" class="mono" fill="#1d2433">47</text>
+      <path d="M479 396 V374" stroke="#1d2433" stroke-width="1.6" marker-end="url(#ch10-arr)"/>
+      <path d="M479 148 V124" stroke="#1d2433" stroke-width="1.6" marker-end="url(#ch10-arr)"/>
+      <text x="479" y="265" text-anchor="middle" font-size="14" font-weight="700" fill="#5a6b8c" transform="rotate(-90 479 260)">32 layers</text>
+    </g>
+    <g data-step="3">
+      <!-- columns 2..5 -->
+      <rect x="527" y="150" width="48" height="220" rx="6" fill="#eceff5" stroke="#5a6b8c" stroke-width="1.5"/>
+      <rect x="599" y="150" width="48" height="220" rx="6" fill="#eceff5" stroke="#5a6b8c" stroke-width="1.5"/>
+      <rect x="671" y="150" width="48" height="220" rx="6" fill="#eceff5" stroke="#5a6b8c" stroke-width="1.5"/>
+      <rect x="743" y="150" width="48" height="220" rx="6" fill="#eceff5" stroke="#5a6b8c" stroke-width="1.5"/>
+      <rect x="863" y="150" width="48" height="220" rx="6" fill="#eceff5" stroke="#5a6b8c" stroke-width="1.5"/>
+      <text x="827" y="265" text-anchor="middle" font-size="22" font-weight="800" fill="#687084">…</text>
+      <text x="827" y="292" text-anchor="middle" font-size="13" fill="#687084">~490</text>
+      <text x="827" y="308" text-anchor="middle" font-size="13" fill="#687084">more</text>
+      <!-- inputs -->
+      <g font-size="15" class="mono" text-anchor="middle" fill="#1d2433">
+        <rect x="523" y="398" width="56" height="36" rx="6" fill="#efe9fb" stroke="#7b5cd6"/><text x="551" y="421">47</text>
+        <rect x="595" y="398" width="56" height="36" rx="6" fill="#efe9fb" stroke="#7b5cd6"/><text x="623" y="421">×</text>
+        <rect x="667" y="398" width="56" height="36" rx="6" fill="#efe9fb" stroke="#7b5cd6"/><text x="695" y="421">40</text>
+        <rect x="739" y="398" width="56" height="36" rx="6" fill="#efe9fb" stroke="#7b5cd6"/><text x="767" y="421">=</text>
+        <rect x="859" y="398" width="56" height="36" rx="6" fill="#efe9fb" stroke="#7b5cd6"/><text x="887" y="421">=</text>
+      </g>
+      <!-- outputs -->
+      <g font-size="15" class="mono" text-anchor="middle" fill="#1d2433">
+        <rect x="523" y="84" width="56" height="36" rx="6" fill="#efe9fb" stroke="#7b5cd6"/><text x="551" y="107">×</text>
+        <rect x="595" y="84" width="56" height="36" rx="6" fill="#efe9fb" stroke="#7b5cd6"/><text x="623" y="107">40</text>
+        <rect x="667" y="84" width="56" height="36" rx="6" fill="#efe9fb" stroke="#7b5cd6"/><text x="695" y="107">=</text>
+        <rect x="739" y="84" width="56" height="36" rx="6" fill="#efe9fb" stroke="#7b5cd6"/><text x="767" y="107">1880</text>
+        <rect x="859" y="84" width="56" height="36" rx="6" fill="#fbefc5" stroke="#e5b62b" stroke-width="2"/><text x="887" y="107" font-weight="700">178</text>
+      </g>
+      <g stroke="#1d2433" stroke-width="1.6">
+        <path d="M551 396 V374" marker-end="url(#ch10-arr)"/><path d="M551 148 V124" marker-end="url(#ch10-arr)"/>
+        <path d="M623 396 V374" marker-end="url(#ch10-arr)"/><path d="M623 148 V124" marker-end="url(#ch10-arr)"/>
+        <path d="M695 396 V374" marker-end="url(#ch10-arr)"/><path d="M695 148 V124" marker-end="url(#ch10-arr)"/>
+        <path d="M767 396 V374" marker-end="url(#ch10-arr)"/><path d="M767 148 V124" marker-end="url(#ch10-arr)"/>
+        <path d="M887 396 V374" marker-end="url(#ch10-arr)"/><path d="M887 148 V124" marker-end="url(#ch10-arr)"/>
+      </g>
+      <!-- feedback arrows through the gaps -->
+      <g stroke="#7b5cd6" stroke-width="1.8" fill="none" stroke-dasharray="5 4">
+        <path d="M509 102 C 517 102, 515 300, 517 380 C 518 404, 519 410, 521 412" marker-end="url(#ch10-arr-m)"/>
+        <path d="M581 102 C 589 102, 587 300, 589 380 C 590 404, 591 410, 593 412" marker-end="url(#ch10-arr-m)"/>
+        <path d="M653 102 C 661 102, 659 300, 661 380 C 662 404, 663 410, 665 412" marker-end="url(#ch10-arr-m)"/>
+        <path d="M725 102 C 733 102, 731 300, 733 380 C 734 404, 735 410, 737 412" marker-end="url(#ch10-arr-m)"/>
+      </g>
+      <text x="692" y="64" text-anchor="middle" font-size="15" fill="#7b5cd6" font-weight="700">each output token becomes the next input (dashed)</text>
+    </g>
+
+    <!-- bottom summaries -->
+    <g font-size="15" fill="#1d2433">
+      <text x="212" y="470" text-anchor="middle" font-weight="700">1 pass for the answer ≈ 16 GFLOP</text>
+      <text x="212" y="494" text-anchor="middle" fill="#687084">serial depth 32 layers · ~5 ms of decode</text>
+    </g>
+    <g data-step="4" font-size="15" fill="#1d2433">
+      <rect x="440" y="446" width="505" height="58" rx="8" fill="#fcecec" stroke="#d64545"/>
+      <text x="692" y="470" text-anchor="middle" font-weight="700">500 thinking tokens ≈ 500 × 16 GFLOP ≈ 8.1 TFLOP</text>
+      <text x="692" y="494" text-anchor="middle" fill="#3a4254">serial depth 32 × 501 = 16,032 layers · KV scratch +62.5 MiB · ~2.4 s</text>
+    </g>
+  </svg>
+  <div class="step-captions">
+    <p data-step-only="1"><b>Answer immediately.</b> The prompt is processed and the very next token must be the answer. Llama 3's tokenizer splits <span class="tok">1786</span> into <span class="tok">178</span> + <span class="tok">6</span>, so the first answer token already needs the top three digits of the product. All of that must happen inside one pass: 32 layers, about 16 GFLOP.</p>
+    <p data-step-only="2"><b>Think first: pass 1.</b> The same 32 layers run, but the output is a cheap first step of a plan (<span class="tok">47</span>), not the answer.</p>
+    <p data-step-only="3"><b>Each token feeds the next pass.</b> The model writes "47 × 40 = 1880 …". Each written token is appended to the context and becomes the input of the next pass. By the time it writes <span class="tok">178</span>, it is copying a result it already computed and stored in its own context.</p>
+    <p data-step-only="4"><b>The bill.</b> 500 thinking tokens cost 500 passes: about 8.1 TFLOP (the attention part is only 0.07 TFLOP at these lengths), a serial chain 16,032 layers deep instead of 32, 62.5 MiB of extra KV cache, and about 2.4 s at the ~209 tok/s H100 batch-1 ceiling.</p>
+  </div>
+  <figcaption><span class="fig-label">Figure 10.1</span> — Same model, same weights, different amount of computation. Token chips on the right are simplified (real tokenization splits numbers and spaces differently). FLOPs use 2<var>N</var> ≈ 16.06 GFLOP per token plus the attention term 4·<var>L</var>·<var>d</var>·<var>t</var>.</figcaption>
+</figure>
+
+<h3>Two resources a token gets: compute and depth</h3>
+
+<p>It helps to separate two things a written token provides.</p>
+<ul>
+  <li><strong>Serial depth.</strong> Inside one forward pass, information climbs at most <var>L</var> = 32 layers. Attention lets a position read other positions, but only <em>at the same layer</em> (sideways, never upward). So a single pass is a computation of depth 32, however wide. When a token is emitted and fed back, the result of layer 32 re-enters at layer 1 of the next position. Depth adds up: 32 per token.</li>
+  <li><strong>Scratch memory.</strong> Each written token leaves keys and values in all 32 layers (128 KiB per token for Llama 3.1 8B in BF16). Later tokens read that memory through attention. Thinking tokens are literally the model's working storage.</li>
+</ul>
+
+<figure class="wide fig-depth">
+  <svg viewBox="0 0 960 380" role="img" aria-label="Unrolled computation: the longest dependency path climbs 32 layers per token and then re-enters at layer 1 of the next token">
+    <defs>
+      <marker id="ch10-arr-p" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#d64545"/></marker>
+    </defs>
+    <g font-size="15" fill="#687084" text-anchor="end" font-weight="700">
+      <text x="98" y="86">layer 32</text>
+      <text x="98" y="146">⋮</text>
+      <text x="98" y="206">layer 2</text>
+      <text x="98" y="266">layer 1</text>
+    </g>
+    <!-- sideways attention reads (faint) -->
+    <g stroke="#2f6fde" stroke-opacity=".35" stroke-width="1.2" fill="none">
+      <path d="M170 262 Q 215 240 260 262"/><path d="M260 262 Q 305 240 350 262"/><path d="M350 262 Q 395 240 440 262"/><path d="M440 262 Q 485 240 530 262"/><path d="M530 262 Q 575 240 620 262"/><path d="M620 262 Q 665 240 710 262"/><path d="M710 262 Q 755 240 800 262"/><path d="M800 262 Q 845 240 890 262"/>
+      <path d="M170 82 Q 215 60 260 82"/><path d="M260 82 Q 305 60 350 82"/><path d="M350 82 Q 395 60 440 82"/><path d="M440 82 Q 485 60 530 82"/><path d="M530 82 Q 575 60 620 82"/><path d="M620 82 Q 665 60 710 82"/><path d="M710 82 Q 755 60 800 82"/><path d="M800 82 Q 845 60 890 82"/>
+    </g>
+    <!-- grid cells -->
+    <g id="ch10-cells">
+      <g fill="#eceff5" stroke="#5a6b8c">
+        <rect x="152" y="64" width="36" height="34" rx="5"/><rect x="152" y="130" width="36" height="24" rx="5" fill="#f3f1ec" stroke="#ddd8ce"/><rect x="152" y="184" width="36" height="34" rx="5"/><rect x="152" y="244" width="36" height="34" rx="5"/>
+        <rect x="242" y="64" width="36" height="34" rx="5"/><rect x="242" y="130" width="36" height="24" rx="5" fill="#f3f1ec" stroke="#ddd8ce"/><rect x="242" y="184" width="36" height="34" rx="5"/><rect x="242" y="244" width="36" height="34" rx="5"/>
+        <rect x="332" y="64" width="36" height="34" rx="5"/><rect x="332" y="130" width="36" height="24" rx="5" fill="#f3f1ec" stroke="#ddd8ce"/><rect x="332" y="184" width="36" height="34" rx="5"/><rect x="332" y="244" width="36" height="34" rx="5"/>
+        <rect x="422" y="64" width="36" height="34" rx="5"/><rect x="422" y="130" width="36" height="24" rx="5" fill="#f3f1ec" stroke="#ddd8ce"/><rect x="422" y="184" width="36" height="34" rx="5"/><rect x="422" y="244" width="36" height="34" rx="5"/>
+        <rect x="512" y="64" width="36" height="34" rx="5"/><rect x="512" y="130" width="36" height="24" rx="5" fill="#f3f1ec" stroke="#ddd8ce"/><rect x="512" y="184" width="36" height="34" rx="5"/><rect x="512" y="244" width="36" height="34" rx="5"/>
+        <rect x="602" y="64" width="36" height="34" rx="5"/><rect x="602" y="130" width="36" height="24" rx="5" fill="#f3f1ec" stroke="#ddd8ce"/><rect x="602" y="184" width="36" height="34" rx="5"/><rect x="602" y="244" width="36" height="34" rx="5"/>
+        <rect x="692" y="64" width="36" height="34" rx="5"/><rect x="692" y="130" width="36" height="24" rx="5" fill="#f3f1ec" stroke="#ddd8ce"/><rect x="692" y="184" width="36" height="34" rx="5"/><rect x="692" y="244" width="36" height="34" rx="5"/>
+        <rect x="782" y="64" width="36" height="34" rx="5"/><rect x="782" y="130" width="36" height="24" rx="5" fill="#f3f1ec" stroke="#ddd8ce"/><rect x="782" y="184" width="36" height="34" rx="5"/><rect x="782" y="244" width="36" height="34" rx="5"/>
+        <rect x="872" y="64" width="36" height="34" rx="5"/><rect x="872" y="130" width="36" height="24" rx="5" fill="#f3f1ec" stroke="#ddd8ce"/><rect x="872" y="184" width="36" height="34" rx="5"/><rect x="872" y="244" width="36" height="34" rx="5"/>
+      </g>
+    </g>
+    <!-- token chips -->
+    <g font-size="15" class="mono" text-anchor="middle" fill="#1d2433">
+      <rect x="146" y="304" width="48" height="30" rx="5" fill="#fbefc5" stroke="#e5b62b"/><text x="170" y="324">47</text>
+      <rect x="236" y="304" width="48" height="30" rx="5" fill="#fbefc5" stroke="#e5b62b"/><text x="260" y="324">×</text>
+      <rect x="326" y="304" width="48" height="30" rx="5" fill="#fbefc5" stroke="#e5b62b"/><text x="350" y="324">38?</text>
+      <rect x="416" y="304" width="48" height="30" rx="5" fill="#efe9fb" stroke="#7b5cd6"/><text x="440" y="324">47</text>
+      <rect x="506" y="304" width="48" height="30" rx="5" fill="#efe9fb" stroke="#7b5cd6"/><text x="530" y="324">×</text>
+      <rect x="596" y="304" width="48" height="30" rx="5" fill="#efe9fb" stroke="#7b5cd6"/><text x="620" y="324">40</text>
+      <rect x="686" y="304" width="48" height="30" rx="5" fill="#efe9fb" stroke="#7b5cd6"/><text x="710" y="324">=</text>
+      <rect x="776" y="304" width="48" height="30" rx="5" fill="#efe9fb" stroke="#7b5cd6"/><text x="800" y="324">1880</text>
+      <rect x="866" y="304" width="48" height="30" rx="5" fill="#efe9fb" stroke="#7b5cd6"/><text x="890" y="324">…</text>
+    </g>
+    <g font-size="14" fill="#687084" text-anchor="middle">
+      <text x="260" y="360">prompt (yellow)</text>
+      <text x="665" y="360">thinking tokens written by the model (violet)</text>
+    </g>
+    <!-- the serial path -->
+    <path id="ch10-path" d="M350 300 L350 52 L395 52 L395 294 L440 294 L440 52 L485 52 L485 294 L530 294 L530 52 L575 52 L575 294 L620 294 L620 52 L665 52 L665 294 L710 294 L710 52 L755 52 L755 294 L800 294 L800 52 L845 52 L845 294 L890 294 L890 70" fill="none" stroke="#d64545" stroke-width="2.2" stroke-opacity=".75" stroke-linejoin="round" marker-end="url(#ch10-arr-p)"/>
+    <circle r="7" fill="#d64545">
+      <animateMotion dur="14s" repeatCount="indefinite" rotate="0"><mpath href="#ch10-path"/></animateMotion>
+    </circle>
+    <g font-size="15" fill="#1d2433">
+      <text x="930" y="40" text-anchor="end" font-weight="700" fill="#d64545">longest dependency path: +32 layers per token</text>
+      <text x="40" y="40" fill="#2f6fde" font-weight="700">blue arcs: attention reads earlier positions at the same layer</text>
+    </g>
+  </svg>
+  <figcaption><span class="fig-label">Figure 10.2</span> — The computation unrolled over positions (columns) and layers (rows). Attention moves information sideways; only emitting a token moves the top of the stack back to the bottom. The red dot follows the longest serial path, which grows by 32 layers for every thinking token.</figcaption>
+</figure>
+
+<p>Theory backs this up. Li et al. (2024) show that a constant-depth transformer without chain-of-thought can only solve problems in a small parallel complexity class, while the same transformer allowed <var>T</var> intermediate tokens can simulate any boolean circuit of size <var>T</var>. In plain words: without thinking tokens the model is a shallow parallel circuit; with them it is a sequential computer whose running time you pay for in tokens. Problems such as multi-digit arithmetic, tracking state through a long program, or checking a proof are inherently serial, so they benefit most.</p>
+
+<aside class="callout deep"><div class="callout-title">Low-level: a thinking token is an ordinary decode step</div><p>There is no special "thinking hardware" or mode. A thinking token is generated by exactly the same decode step as any other token (<a href="11-inference.html">Chapter 11</a>): read all 16.06 GB of weights, do ≈ 16 GFLOP of matmuls plus 4·<var>L</var>·<var>d</var>·<var>t</var> = 524,288·<var>t</var> FLOPs of attention at position <var>t</var>, append 128 KiB to the KV cache, sample. At batch 1 on an H100 the bandwidth ceiling is roughly 209 tok/s (an approximate upper bound; <a href="11-inference.html">Chapter 11</a> refines it to ≈ 223), so 500 thinking tokens take at least about 2.3 s. The only things that make a token "thinking" are its position (between <code>&lt;think&gt;</code> and <code>&lt;/think&gt;</code>, or in an <code>analysis</code> channel) and what the serving layer does with it afterwards.</p></aside>
+
+<aside class="callout key"><div class="callout-title">Key takeaway</div><p>Compute per token is fixed by the architecture. Compute per <em>answer</em> is not: it is proportional to the number of tokens generated. Reasoning models turn that observation into a product feature, and "effort" is the knob that sets how many tokens they spend.</p></aside>
+</section>
+
+<section>
+<h2>From prompt trick to trained skill</h2>
+
+<p>Reasoning started as a prompting trick and became a training target. The short version of the history:</p>
+
+<ul>
+  <li><strong>Scratchpads (2021).</strong> Nye et al. trained small transformers to emit intermediate steps of addition and program execution into a "scratchpad" before the result. Multi-step tasks that failed "in one pass" started to work.</li>
+  <li><strong>Chain-of-thought prompting (Jan 2022).</strong> Wei et al. put eight worked examples with step-by-step solutions in the prompt. A 540B model then wrote its own steps and reached state-of-the-art accuracy on GSM8K grade-school math.</li>
+  <li><strong>Self-consistency (Mar 2022).</strong> Wang et al. sampled many chains and took a majority vote over the final answers: +17.9 points on GSM8K. This is the first big "spend more inference compute" result.</li>
+  <li><strong>Zero-shot CoT (May 2022).</strong> Kojima et al. found that appending <em>"Let's think step by step"</em> was enough: GSM8K accuracy of text-davinci-002 went from 10.4% to 40.7%.</li>
+  <li><strong>RL-trained reasoning (Sep 2024).</strong> OpenAI's o1 was trained with large-scale reinforcement learning to produce a long hidden chain of thought. Accuracy improved smoothly with both more RL training and more thinking at test time.</li>
+  <li><strong>Open recipes and effort knobs (2025 →).</strong> DeepSeek-R1 published a full RL recipe; s1 showed test-time scaling from 1,000 examples plus "budget forcing"; Qwen3 and gpt-oss made thinking switchable and leveled. APIs then moved from token budgets to <em>effort levels</em> with <em>adaptive thinking</em>.</li>
+</ul>
+
+<figure class="wide fig-hist">
+  <svg viewBox="0 0 960 270" role="img" aria-label="Timeline of reasoning in LLMs from 2021 scratchpads to 2026 adaptive effort">
+    <line x1="50" y1="150" x2="925" y2="150" stroke="#1d2433" stroke-width="2"/>
+    <g font-size="14" fill="#687084" font-weight="700" text-anchor="middle">
+      <line x1="112" y1="144" x2="112" y2="156" stroke="#1d2433"/><text x="112" y="172">2022</text>
+      <line x1="284" y1="144" x2="284" y2="156" stroke="#1d2433"/><text x="284" y="172">2023</text>
+      <line x1="456" y1="144" x2="456" y2="156" stroke="#1d2433"/><text x="456" y="172">2024</text>
+      <line x1="628" y1="144" x2="628" y2="156" stroke="#1d2433"/><text x="628" y="172">2025</text>
+      <line x1="800" y1="144" x2="800" y2="156" stroke="#1d2433"/><text x="800" y="172">2026</text>
+    </g>
+    <!-- leaders -->
+    <g stroke="#9aa1b1" stroke-width="1.2">
+      <line x1="98" y1="150" x2="85" y2="106"/>
+      <line x1="118" y1="150" x2="172" y2="196"/>
+      <line x1="148" y1="150" x2="259" y2="106"/>
+      <line x1="175" y1="150" x2="346" y2="196"/>
+      <line x1="347" y1="150" x2="433" y2="106"/>
+      <line x1="476" y1="150" x2="520" y2="196"/>
+      <line x1="578" y1="150" x2="607" y2="106"/>
+      <line x1="636" y1="150" x2="694" y2="196"/>
+      <line x1="705" y1="150" x2="781" y2="106"/>
+      <line x1="851" y1="150" x2="868" y2="196"/>
+    </g>
+    <g fill="#ffffff" stroke-width="2.5">
+      <circle cx="98" cy="150" r="6" stroke="#5a6b8c"/><circle cx="118" cy="150" r="6" stroke="#5a6b8c"/><circle cx="148" cy="150" r="6" stroke="#5a6b8c"/><circle cx="175" cy="150" r="6" stroke="#5a6b8c"/>
+      <circle cx="347" cy="150" r="6" stroke="#2f9e6e"/><circle cx="476" cy="150" r="6" stroke="#2f9e6e"/>
+      <circle cx="578" cy="150" r="6" stroke="#7b5cd6"/><circle cx="636" cy="150" r="6" stroke="#7b5cd6"/><circle cx="705" cy="150" r="6" stroke="#7b5cd6"/><circle cx="851" cy="150" r="6" stroke="#d64545"/>
+    </g>
+    <!-- labels above -->
+    <g font-size="15" text-anchor="middle" fill="#1d2433">
+      <text x="85" y="62" font-weight="800">Scratchpads</text><text x="85" y="80" fill="#3a4254">2021</text><text x="85" y="98" fill="#687084">emit steps</text>
+      <text x="259" y="62" font-weight="800">Self-consistency</text><text x="259" y="80" fill="#3a4254">Mar 2022</text><text x="259" y="98" fill="#687084">sample, vote</text>
+      <text x="433" y="62" font-weight="800">Process rewards</text><text x="433" y="80" fill="#3a4254">May 2023</text><text x="433" y="98" fill="#687084">grade each step</text>
+      <text x="607" y="62" font-weight="800">OpenAI o1</text><text x="607" y="80" fill="#3a4254">Sep 2024</text><text x="607" y="98" fill="#687084">RL, hidden CoT</text>
+      <text x="781" y="62" font-weight="800">Hybrid + levels</text><text x="781" y="80" fill="#3a4254">2025</text><text x="781" y="98" fill="#687084">Qwen3, gpt-oss</text>
+    </g>
+    <!-- labels below -->
+    <g font-size="15" text-anchor="middle" fill="#1d2433">
+      <text x="172" y="214" font-weight="800">CoT prompting</text><text x="172" y="232" fill="#3a4254">Jan 2022</text><text x="172" y="250" fill="#687084">worked examples</text>
+      <text x="346" y="214" font-weight="800">Zero-shot CoT</text><text x="346" y="232" fill="#3a4254">May 2022</text><text x="346" y="250" fill="#687084">"step by step"</text>
+      <text x="520" y="214" font-weight="800">GRPO</text><text x="520" y="232" fill="#3a4254">Feb 2024</text><text x="520" y="250" fill="#687084">no value model</text>
+      <text x="694" y="214" font-weight="800">DeepSeek-R1, s1</text><text x="694" y="232" fill="#3a4254">Jan 2025</text><text x="694" y="250" fill="#687084">open recipes</text>
+      <text x="868" y="214" font-weight="800">Effort + adaptive</text><text x="868" y="232" fill="#3a4254">2026</text><text x="868" y="250" fill="#687084">model decides</text>
+    </g>
+  </svg>
+  <figcaption><span class="fig-label">Figure 10.3</span> — Grey: prompting-era ideas. Green: training ideas for verifiers and RL. Violet: reasoning models. Red: today's API shape. Dates are first arXiv versions or release announcements.</figcaption>
+</figure>
+
+<p>The important shift is from <em>asking</em> a model to show steps to <em>training</em> it so that writing steps pays off. A prompted model imitates the look of reasoning from its pretraining data. An RL-trained model has been rewarded only when its chains led to correct answers, so it keeps the habits that work (checking, backtracking, trying another approach) and drops the ones that do not.</p>
+</section>
+
+<section>
+<h2>Test-time compute: think longer or think wider</h2>
+
+<p><strong>The problem.</strong> You have a fixed model and want a better answer. You cannot change the weights at request time, so the only thing you can spend is inference compute, usually called <em>test-time compute</em>. There are two ways to spend it, and they have very different latency profiles.</p>
+
+<ul>
+  <li><strong>Sequential: think longer.</strong> One chain of thought with more tokens. The model can notice a mistake in step 3 and fix it in step 7. Cost and latency both grow with length, because decode is strictly serial.</li>
+  <li><strong>Parallel: think wider.</strong> Sample <var>N</var> independent answers and combine them. Cost grows with <var>N</var>, but latency barely grows if the <var>N</var> samples run as one batch (decode is memory-bound, so a batch of 8 costs little more wall-clock than a batch of 1; see <a href="11-inference.html">Chapter 11</a>).</li>
+</ul>
+
+<figure class="wide fig-seqpar">
+  <svg viewBox="0 0 960 330" role="img" aria-label="Sequential test-time compute uses one long chain; parallel test-time compute samples several chains and votes">
+    <defs>
+      <marker id="ch10-arr-k2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#1d2433"/></marker>
+      <pattern id="ch10-ticks" width="12" height="10" patternUnits="userSpaceOnUse"><rect width="12" height="10" fill="#efe9fb"/><line x1="11.5" y1="0" x2="11.5" y2="10" stroke="#cbbdf0" stroke-width="1"/></pattern>
+    </defs>
+    <line x1="478" y1="16" x2="478" y2="316" stroke="#ddd8ce" stroke-width="1.5" stroke-dasharray="5 5"/>
+    <text x="240" y="32" text-anchor="middle" font-size="18" font-weight="800" fill="#1d2433">Sequential: think longer</text>
+    <text x="720" y="32" text-anchor="middle" font-size="18" font-weight="800" fill="#1d2433">Parallel: think wider</text>
+
+    <!-- sequential chain -->
+    <rect x="30" y="128" width="330" height="40" rx="7" fill="url(#ch10-ticks)" stroke="#7b5cd6" stroke-width="1.5"/>
+    <rect x="72" y="138" width="246" height="22" rx="4" fill="#ffffff" fill-opacity=".85"/>
+    <text x="195" y="154" text-anchor="middle" font-size="15" font-weight="700" fill="#3a4254">one chain: 8,000 thinking tokens</text>
+    <g font-size="14" fill="#5a3fb3" text-anchor="middle">
+      <line x1="70" y1="124" x2="70" y2="100" stroke="#7b5cd6"/><text x="70" y="94">try A</text>
+      <line x1="160" y1="124" x2="160" y2="100" stroke="#7b5cd6"/><text x="160" y="94">"Wait…"</text>
+      <line x1="250" y1="124" x2="250" y2="100" stroke="#7b5cd6"/><text x="250" y="94">fix</text>
+      <line x1="330" y1="124" x2="330" y2="100" stroke="#7b5cd6"/><text x="330" y="94">verify</text>
+    </g>
+    <path d="M362 148 H384" stroke="#1d2433" stroke-width="2" marker-end="url(#ch10-arr-k2)"/>
+    <rect x="388" y="130" width="70" height="36" rx="7" fill="#fbefc5" stroke="#e5b62b" stroke-width="2"/>
+    <text x="423" y="154" text-anchor="middle" font-size="16" class="mono" font-weight="700" fill="#1d2433">1786</text>
+    <g font-size="15" fill="#1d2433">
+      <text x="34" y="216">• cost ∝ tokens: 8,000</text>
+      <text x="34" y="242">• latency ∝ tokens: strictly serial</text>
+      <text x="34" y="268">• can revise its own earlier steps</text>
+      <text x="34" y="294">• needs a model trained to think long</text>
+    </g>
+
+    <!-- parallel chains -->
+    <g>
+      <rect x="500" y="52" width="230" height="28" rx="6" fill="url(#ch10-ticks)" stroke="#7b5cd6"/>
+      <rect x="500" y="90" width="230" height="28" rx="6" fill="url(#ch10-ticks)" stroke="#7b5cd6"/>
+      <rect x="500" y="128" width="230" height="28" rx="6" fill="url(#ch10-ticks)" stroke="#7b5cd6"/>
+      <rect x="500" y="166" width="230" height="28" rx="6" fill="url(#ch10-ticks)" stroke="#7b5cd6"/>
+      <rect x="500" y="204" width="230" height="28" rx="6" fill="url(#ch10-ticks)" stroke="#7b5cd6"/>
+      <g font-size="14" fill="#3a4254" text-anchor="middle" font-weight="700">
+        <text x="615" y="71">1,600 tokens</text><text x="615" y="109">1,600 tokens</text><text x="615" y="147">1,600 tokens</text><text x="615" y="185">1,600 tokens</text><text x="615" y="223">1,600 tokens</text>
+      </g>
+      <g font-size="15" class="mono" text-anchor="middle" font-weight="700">
+        <rect x="740" y="52" width="62" height="28" rx="6" fill="#e9f6f0" stroke="#2f9e6e"/><text x="771" y="71" fill="#1f7a53">1786</text>
+        <rect x="740" y="90" width="62" height="28" rx="6" fill="#e9f6f0" stroke="#2f9e6e"/><text x="771" y="109" fill="#1f7a53">1786</text>
+        <rect x="740" y="128" width="62" height="28" rx="6" fill="#fcecec" stroke="#d64545"/><text x="771" y="147" fill="#ad2f2f">1796</text>
+        <rect x="740" y="166" width="62" height="28" rx="6" fill="#e9f6f0" stroke="#2f9e6e"/><text x="771" y="185" fill="#1f7a53">1786</text>
+        <rect x="740" y="204" width="62" height="28" rx="6" fill="#fcecec" stroke="#d64545"/><text x="771" y="223" fill="#ad2f2f">1686</text>
+      </g>
+      <path d="M808 66 C 828 66, 826 142, 842 142 M808 104 C 824 104, 826 142, 842 142 M808 142 H842 M808 180 C 824 180, 826 142, 842 142 M808 218 C 828 218, 826 142, 842 142" fill="none" stroke="#687084" stroke-width="1.5"/>
+      <rect x="846" y="112" width="104" height="60" rx="8" fill="#fbefc5" stroke="#e5b62b" stroke-width="2"/>
+      <text x="898" y="137" text-anchor="middle" font-size="15" font-weight="800" fill="#1d2433">vote: 1786</text>
+      <text x="898" y="158" text-anchor="middle" font-size="14" fill="#3a4254">3 of 5</text>
+    </g>
+    <g font-size="15" fill="#1d2433">
+      <text x="500" y="268">• cost ∝ N × tokens: 5 × 1,600</text>
+      <text x="500" y="294">• latency ≈ one chain (run as one batch)</text>
+    </g>
+  </svg>
+  <figcaption><span class="fig-label">Figure 10.4</span> — The two axes of test-time compute. Both spend 8,000 tokens here. The combiner on the right can be a majority vote (no extra model) or a verifier that scores each candidate. Numbers are illustrative.</figcaption>
+</figure>
+
+<h3>Combining parallel samples</h3>
+
+<p>Three combiners are common, from cheapest to most powerful.</p>
+<ul>
+  <li><strong>Majority vote (self-consistency).</strong> Extract each sample's final answer and return the most frequent one. It needs no extra model. It returns the <em>mode</em> of the model's answer distribution, so it helps exactly when the correct answer is the single most likely answer but has less than 100% probability. It does nothing for free-form outputs like essays, where no two samples are equal.</li>
+  <li><strong>Best-of-<var>N</var> with a verifier.</strong> Score each sample with something that can judge it: unit tests for code, a checker for math, or a learned reward model. With a perfect verifier, accuracy becomes <code>pass@N</code>, the probability that at least one sample is right (formula below).</li>
+  <li><strong>Search guided by a process verifier.</strong> Score partial solutions step by step and expand only promising ones (beam search over reasoning steps). Snell et al. (2024) found that choosing the strategy per prompt difficulty ("compute-optimal" scaling) beat plain best-of-<var>N</var> by more than 4× in compute efficiency.</li>
+</ul>
+
+<div class="formula">
+  pass@<var>N</var> = 1 − (1 − <var>p</var>)<sup><var>N</var></sup>
+  <span class="where">where <var>p</var> is the probability that a single sample is correct and samples are independent. With <var>p</var> = 0.30: one sample gives 30%, eight samples give 1 − 0.7<sup>8</sup> = 94.2%. Even <var>p</var> = 0.05 reaches 96.2% at <var>N</var> = 64, if (a big if) the verifier never picks a wrong answer.</span>
+</div>
+
+<p>Real numbers make the trade-off concrete. On the 2024 AIME math exam, OpenAI reported that GPT-4o solved 12% of problems. o1, which thinks sequentially, solved 74% with one sample, 83% with a majority vote over 64 samples, and 93% when re-ranking 1,000 samples with a learned scoring function. Sequential thinking gave the big jump; parallel sampling added the last points at 64× to 1,000× the cost.</p>
+
+<figure class="wide fig-scale">
+  <svg viewBox="0 0 960 400" role="img" aria-label="Left: illustrative accuracy versus log thinking tokens. Right: real o1 AIME 2024 accuracy for 1, 64 and 1000 samples">
+    <!-- LEFT PLOT -->
+    <text x="260" y="30" text-anchor="middle" font-size="17" font-weight="800" fill="#1d2433">Sequential: thinking tokens per answer</text>
+    <text x="260" y="50" text-anchor="middle" font-size="14" font-weight="700" fill="#ad2f2f">ILLUSTRATIVE SHAPE</text>
+    <g stroke="#ece8df" stroke-width="1">
+      <line x1="80" y1="60" x2="440" y2="60"/><line x1="80" y1="125" x2="440" y2="125"/><line x1="80" y1="190" x2="440" y2="190"/><line x1="80" y1="255" x2="440" y2="255"/>
+      <line x1="200" y1="60" x2="200" y2="320"/><line x1="320" y1="60" x2="320" y2="320"/>
+    </g>
+    <path d="M80 60 V320 H440" fill="none" stroke="#1d2433" stroke-width="1.5"/>
+    <g font-size="14" fill="#687084" text-anchor="end">
+      <text x="72" y="65">100%</text><text x="72" y="130">75%</text><text x="72" y="195">50%</text><text x="72" y="260">25%</text><text x="72" y="325">0%</text>
+    </g>
+    <g font-size="14" fill="#687084" text-anchor="middle">
+      <text x="80" y="342">100</text><text x="200" y="342">1,000</text><text x="320" y="342">10,000</text><text x="440" y="342">100,000</text>
+      <text x="260" y="368" font-weight="700" fill="#3a4254">thinking tokens (log scale)</text>
+    </g>
+    <path d="M80.0 296.6 L92.0 295.7 L104.0 294.4 L116.0 292.7 L128.0 290.4 L140.0 287.4 L152.0 283.4 L164.0 278.2 L176.0 271.5 L188.0 263.2 L200.0 252.9 L212.0 240.7 L224.0 226.7 L236.0 211.3 L248.0 195.2 L260.0 179.1 L272.0 163.7 L284.0 149.7 L296.0 137.5 L308.0 127.2 L320.0 118.9 L332.0 112.2 L344.0 107.0 L356.0 103.0 L368.0 100.0 L380.0 97.7 L392.0 96.0 L404.0 94.7 L416.0 93.8 L428.0 93.1 L440.0 92.6" fill="none" stroke="#7b5cd6" stroke-width="3"/>
+    <g font-size="14" font-weight="700" fill="#1d2433">
+      <circle cx="188" cy="263.2" r="6" fill="#7b5cd6"/><text x="196" y="285">low</text>
+      <circle cx="260" cy="179.1" r="6" fill="#7b5cd6"/><text x="268" y="200">medium</text>
+      <circle cx="332" cy="112.2" r="6" fill="#7b5cd6"/><text x="340" y="140">high</text>
+    </g>
+    <text x="150" y="168" font-size="14" fill="#5a3fb3" text-anchor="middle">roughly log-linear:</text>
+    <text x="150" y="186" font-size="14" fill="#5a3fb3" text-anchor="middle">each 10× ≈ same gain</text>
+    <text x="400" y="82" font-size="14" fill="#5a3fb3" text-anchor="middle">saturates</text>
+
+    <!-- RIGHT PLOT -->
+    <text x="730" y="30" text-anchor="middle" font-size="17" font-weight="800" fill="#1d2433">Parallel: samples per problem</text>
+    <text x="730" y="50" text-anchor="middle" font-size="14" font-weight="700" fill="#1f7a53">REAL: OpenAI o1, AIME 2024</text>
+    <g stroke="#ece8df" stroke-width="1">
+      <line x1="560" y1="60" x2="900" y2="60"/><line x1="560" y1="125" x2="900" y2="125"/><line x1="560" y1="190" x2="900" y2="190"/><line x1="560" y1="255" x2="900" y2="255"/>
+    </g>
+    <path d="M560 60 V320 H900" fill="none" stroke="#1d2433" stroke-width="1.5"/>
+    <g font-size="14" fill="#687084" text-anchor="end">
+      <text x="552" y="65">100%</text><text x="552" y="130">75%</text><text x="552" y="195">50%</text><text x="552" y="260">25%</text><text x="552" y="325">0%</text>
+    </g>
+    <g font-size="14" fill="#687084" text-anchor="middle">
+      <text x="560" y="342">1</text><text x="673" y="342">10</text><text x="787" y="342">100</text><text x="900" y="342">1,000</text>
+      <text x="730" y="368" font-weight="700" fill="#3a4254">samples (log scale)</text>
+    </g>
+    <path d="M560 127.6 L764.6 104.2 L900 78.2" fill="none" stroke="#2f9e6e" stroke-width="2" stroke-dasharray="6 5"/>
+    <circle cx="560" cy="127.6" r="7" fill="#2f9e6e"/>
+    <circle cx="764.6" cy="104.2" r="7" fill="#2f9e6e"/>
+    <circle cx="900" cy="78.2" r="7" fill="#2f9e6e"/>
+    <circle cx="560" cy="288.8" r="7" fill="#9aa1b1"/>
+    <g font-size="14" fill="#1d2433">
+      <text x="572" y="152" font-weight="700">o1, 1 sample: 74%</text>
+      <text x="764" y="132" text-anchor="middle" font-weight="700">vote of 64: 83%</text>
+      <text x="886" y="72" text-anchor="end" font-weight="700">re-rank 1,000: 93%</text>
+      <text x="574" y="284" font-weight="700" fill="#687084">GPT-4o (no RL thinking): 12%</text>
+    </g>
+  </svg>
+  <figcaption><span class="fig-label">Figure 10.5</span> — Left: the typical shape of accuracy versus thinking length (illustrative curve; the o1 announcement, the gpt-oss model card and the Qwen3 report all describe smooth, roughly log-linear gains of this kind). Right: published o1 numbers. Note the log x-axes: each step right costs 10× more tokens.</figcaption>
+</figure>
+
+<aside class="callout warn"><div class="callout-title">Common misconception</div><p>"More thinking always helps." The curve is logarithmic at best: going from 1,000 to 10,000 tokens costs 10× and might add ten points; going from 10,000 to 100,000 costs another 10× and might add two. On easy questions the curve is flat from the start, and the extra tokens are pure cost (see "How reasoning fails" below).</p></aside>
+</section>
+
+<section>
+<h2>Training reasoning with reinforcement learning</h2>
+
+<p><strong>The problem.</strong> Supervised fine-tuning (<a href="09-post-training.html">Chapter 9</a>) teaches a model to copy example outputs token by token. For reasoning that is a poor fit: we rarely have good long chains of thought to copy, and copying a human's chain does not teach the model which of <em>its own</em> habits lead to right answers. What we do have, for math and code, is a cheap way to check the final answer.</p>
+
+<p><strong>The idea: reinforcement learning with verifiable rewards (RLVR).</strong> Let the model try. Check the result with a program. Make the tokens of successful attempts more likely and the tokens of failed attempts less likely. Repeat millions of times. Nobody writes the chains; the model discovers which ones work. This is trial-and-error learning, like tuning a heuristic by running it against a test suite, except the "heuristic" is billions of weights and the gradient tells you which way to nudge each one.</p>
+
+<p>Three pieces of vocabulary, used precisely below:</p>
+<ul>
+  <li><strong>Policy</strong> π<sub>θ</sub>: the model being trained, viewed as a function that gives a probability to every next token. θ are its weights.</li>
+  <li><strong>Rollout</strong>: one complete sampled response (thinking plus answer) to a prompt.</li>
+  <li><strong>Reward</strong> <var>r</var>: a number scoring a rollout. In RLVR it comes from a rule, not a neural network: 1 if the boxed answer equals the reference (checked with a math parser such as sympy), or if the code passes the unit tests; 0 otherwise. DeepSeek-R1-Zero also used a <em>format</em> reward for putting the reasoning between <code>&lt;think&gt;</code> and <code>&lt;/think&gt;</code>.</li>
+</ul>
+
+<figure class="wide fig-rlvr">
+  <svg viewBox="0 0 960 350" role="img" aria-label="The RL with verifiable rewards loop: prompts, sampling rollouts, verifying, computing advantages, updating weights, syncing weights back to the sampler">
+    <defs>
+      <marker id="ch10-arr-f" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#3d8bd4"/></marker>
+    </defs>
+    <g font-size="15" text-anchor="middle" fill="#1d2433">
+      <rect x="20" y="40" width="220" height="100" rx="10" fill="#fbefc5" stroke="#e5b62b" stroke-width="1.5"/>
+      <text x="130" y="72" font-weight="800">Prompt pool</text>
+      <text x="130" y="96">math, code, logic</text>
+      <text x="130" y="118">with checkable answers</text>
+
+      <rect x="370" y="40" width="240" height="100" rx="10" fill="#efe9fb" stroke="#7b5cd6" stroke-width="1.5"/>
+      <text x="490" y="72" font-weight="800">Policy samples G rollouts</text>
+      <text x="490" y="96">inference engine (vLLM, SGLang)</text>
+      <text x="490" y="118">temperature 1, long outputs</text>
+
+      <rect x="720" y="40" width="220" height="100" rx="10" fill="#e9f6f0" stroke="#2f9e6e" stroke-width="1.5"/>
+      <text x="830" y="72" font-weight="800">Verifier (a program)</text>
+      <text x="830" y="96">parse \boxed{…}, compare</text>
+      <text x="830" y="118">run unit tests, check format</text>
+
+      <rect x="720" y="210" width="220" height="100" rx="10" fill="#ffffff" stroke="#687084" stroke-width="1.5"/>
+      <text x="830" y="242" font-weight="800">Rewards → advantages</text>
+      <text x="830" y="266">r ∈ {0, 1} per rollout</text>
+      <text x="830" y="288">normalized within its group</text>
+
+      <rect x="370" y="210" width="240" height="100" rx="10" fill="#fcecec" stroke="#d64545" stroke-width="1.5"/>
+      <text x="490" y="242" font-weight="800">GRPO update</text>
+      <text x="490" y="266">forward + backward + AdamW</text>
+      <text x="490" y="288">on the rollout tokens</text>
+    </g>
+    <g stroke="#3d8bd4" stroke-width="2.5" fill="none">
+      <path class="flow" d="M242 90 H362" marker-end="url(#ch10-arr-f)"/>
+      <path class="flow" d="M612 90 H712" marker-end="url(#ch10-arr-f)"/>
+      <path class="flow" d="M830 142 V202" marker-end="url(#ch10-arr-f)"/>
+      <path class="flow" d="M718 260 H618" marker-end="url(#ch10-arr-f)"/>
+      <path class="flow" d="M490 208 V148" marker-end="url(#ch10-arr-f)"/>
+    </g>
+    <g font-size="14" fill="#3d8bd4" font-weight="700">
+      <text x="302" y="80" text-anchor="middle">32 prompts</text>
+      <text x="662" y="80" text-anchor="middle">512 texts</text>
+      <text x="842" y="178">0/1 each</text>
+      <text x="500" y="182">sync new weights</text>
+    </g>
+    <g font-size="14" fill="#3a4254">
+      <text x="20" y="200" font-weight="800" fill="#1d2433">DeepSeek-R1-Zero, per step:</text>
+      <text x="20" y="222">32 questions × G = 16 = 512 rollouts</text>
+      <text x="20" y="244">max length 32,768 tokens,</text>
+      <text x="20" y="266">65,536 after step 8.2k</text>
+      <text x="20" y="288">10,400 steps in total</text>
+      <text x="20" y="310">lr 3e-6, KL coefficient 0.001</text>
+    </g>
+  </svg>
+  <figcaption><span class="fig-label">Figure 10.6</span> — The RLVR loop. Generation (top middle) is ordinary decoding and usually dominates wall-clock time; the update (bottom middle) is an ordinary training step (<a href="08-pretraining.html">Chapter 8</a>). Hyperparameters on the left are from the DeepSeek-R1 paper.</figcaption>
+</figure>
+
+<p>Why does this work at all? Because the starting model already produces a correct, well-reasoned answer <em>sometimes</em>. A strong base model sampled at temperature 1 explores many different chains. RL does not have to invent reasoning from nothing; it shifts probability mass toward chains that happen to succeed. Over thousands of steps, behaviors that raise the success rate (re-checking, decomposing, trying a second method) become common. If the model never gets a problem right, every sample earns 0 and there is nothing to learn from that problem. That is why the prompt pool is filtered to problems that are hard but not hopeless.</p>
+</section>
+
+<section>
+<h2>GRPO step by step</h2>
+
+<p><strong>The problem GRPO solves.</strong> Policy-gradient methods need to know whether a rollout was <em>better or worse than expected</em>, not just its raw reward. A reward of 1 on a trivial problem says little; a reward of 1 on a problem the model usually fails says a lot. Classic PPO (used for RLHF, <a href="09-post-training.html">Chapter 9</a>) learns a separate <em>value model</em>, a second network about as large as the policy, to predict the expected reward at each token. That doubles the trainable memory, and predicting the value in the middle of a 30,000-token chain from a single final 0/1 reward is hard.</p>
+
+<p><strong>The idea.</strong> Group Relative Policy Optimization (GRPO, from DeepSeekMath, 2024) drops the value model. For each prompt it samples a <em>group</em> of <var>G</var> rollouts and uses the group itself as the baseline: a rollout's advantage is how much better its reward is than the group average, measured in group standard deviations. Like grading on a curve.</p>
+
+<figure class="stepper wide fig-grpo" data-steps="5" data-interval="3800">
+  <svg viewBox="0 0 960 560" role="img" aria-label="GRPO with real numbers: eight sampled solutions, rewards, group-normalized advantages, clipped ratios, and the update">
+    <defs>
+      <pattern id="ch10-ticks2" width="12" height="10" patternUnits="userSpaceOnUse"><rect width="12" height="10" fill="#efe9fb"/><line x1="11.5" y1="0" x2="11.5" y2="10" stroke="#cbbdf0" stroke-width="1"/></pattern>
+    </defs>
+    <rect x="20" y="14" width="560" height="38" rx="7" fill="#fbefc5" stroke="#e5b62b"/>
+    <text x="34" y="39" font-size="15" class="mono pre" fill="#1d2433">q: What is 47 × 38? Answer in \boxed{}.</text>
+    <text x="600" y="39" font-size="15" fill="#3a4254" font-weight="700">G = 8 rollouts from π_old, temperature 1.0</text>
+
+    <g font-size="14" fill="#687084" font-weight="700">
+      <text x="64" y="84">rollout o_i (thinking + answer)</text>
+      <text x="596" y="84" text-anchor="middle">answer</text>
+      <g data-step="2"><text x="700" y="84" text-anchor="middle">reward r_i</text></g>
+      <g data-step="3"><text x="850" y="84" text-anchor="middle">advantage Â_i</text></g>
+    </g>
+
+    <!-- rows -->
+    <g font-size="15" fill="#1d2433">
+      <g font-weight="700" fill="#687084" text-anchor="end">
+        <text x="54" y="120">o1</text><text x="54" y="160">o2</text><text x="54" y="200">o3</text><text x="54" y="240">o4</text>
+        <text x="54" y="280">o5</text><text x="54" y="320">o6</text><text x="54" y="360">o7</text><text x="54" y="400">o8</text>
+      </g>
+      <g stroke="#7b5cd6">
+        <rect x="64" y="100" width="246" height="30" rx="5" fill="url(#ch10-ticks2)"/>
+        <rect x="64" y="140" width="414" height="30" rx="5" fill="url(#ch10-ticks2)"/>
+        <rect x="64" y="180" width="312" height="30" rx="5" fill="url(#ch10-ticks2)"/>
+        <rect x="64" y="220" width="228" height="30" rx="5" fill="url(#ch10-ticks2)"/>
+        <rect x="64" y="260" width="456" height="30" rx="5" fill="url(#ch10-ticks2)"/>
+        <rect x="64" y="300" width="360" height="30" rx="5" fill="url(#ch10-ticks2)"/>
+        <rect x="64" y="340" width="270" height="30" rx="5" fill="url(#ch10-ticks2)"/>
+        <rect x="64" y="380" width="492" height="30" rx="5" fill="url(#ch10-ticks2)"/>
+      </g>
+      <g font-size="14" fill="#3a4254" font-weight="700">
+        <text x="74" y="120">410 tokens</text><text x="74" y="160">690 tokens</text><text x="74" y="200">520 tokens</text><text x="74" y="240">380 tokens</text>
+        <text x="74" y="280">760 tokens</text><text x="74" y="320">600 tokens</text><text x="74" y="360">450 tokens</text><text x="74" y="400">820 tokens</text>
+      </g>
+      <g class="mono" text-anchor="middle" font-weight="700">
+        <rect x="566" y="100" width="60" height="30" rx="5" fill="#fbefc5" stroke="#e5b62b"/><text x="596" y="120">1786</text>
+        <rect x="566" y="140" width="60" height="30" rx="5" fill="#fbefc5" stroke="#e5b62b"/><text x="596" y="160">1796</text>
+        <rect x="566" y="180" width="60" height="30" rx="5" fill="#fbefc5" stroke="#e5b62b"/><text x="596" y="200">1686</text>
+        <rect x="566" y="220" width="60" height="30" rx="5" fill="#fbefc5" stroke="#e5b62b"/><text x="596" y="240">1786</text>
+        <rect x="566" y="260" width="60" height="30" rx="5" fill="#fbefc5" stroke="#e5b62b"/><text x="596" y="280">1776</text>
+        <rect x="566" y="300" width="60" height="30" rx="5" fill="#fbefc5" stroke="#e5b62b"/><text x="596" y="320">2786</text>
+        <rect x="566" y="340" width="60" height="30" rx="5" fill="#fbefc5" stroke="#e5b62b"/><text x="596" y="360">1786</text>
+        <rect x="566" y="380" width="60" height="30" rx="5" fill="#fbefc5" stroke="#e5b62b"/><text x="596" y="400">1886</text>
+      </g>
+    </g>
+
+    <!-- step 2: rewards -->
+    <g data-step="2" font-size="16" font-weight="800" text-anchor="middle">
+      <text x="700" y="121" fill="#1f7a53">✓ 1</text><text x="700" y="161" fill="#ad2f2f">✗ 0</text><text x="700" y="201" fill="#ad2f2f">✗ 0</text><text x="700" y="241" fill="#1f7a53">✓ 1</text>
+      <text x="700" y="281" fill="#ad2f2f">✗ 0</text><text x="700" y="321" fill="#ad2f2f">✗ 0</text><text x="700" y="361" fill="#1f7a53">✓ 1</text><text x="700" y="401" fill="#ad2f2f">✗ 0</text>
+    </g>
+
+    <!-- step 3: advantages -->
+    <g data-step="3">
+      <line x1="830" y1="94" x2="830" y2="416" stroke="#1d2433" stroke-width="1.5"/>
+      <g>
+        <rect class="advbar" x="830" y="102" width="90" height="26" rx="3" fill="#2f9e6e"/>
+        <rect class="advbar neg" x="776" y="142" width="54" height="26" rx="3" fill="#d64545"/>
+        <rect class="advbar neg" x="776" y="182" width="54" height="26" rx="3" fill="#d64545"/>
+        <rect class="advbar" x="830" y="222" width="90" height="26" rx="3" fill="#2f9e6e"/>
+        <rect class="advbar neg" x="776" y="262" width="54" height="26" rx="3" fill="#d64545"/>
+        <rect class="advbar neg" x="776" y="302" width="54" height="26" rx="3" fill="#d64545"/>
+        <rect class="advbar" x="830" y="342" width="90" height="26" rx="3" fill="#2f9e6e"/>
+        <rect class="advbar neg" x="776" y="382" width="54" height="26" rx="3" fill="#d64545"/>
+      </g>
+      <g font-size="14" font-weight="800" fill="#ffffff" text-anchor="middle">
+        <text x="875" y="120">+1.29</text><text x="803" y="160">−0.77</text><text x="803" y="200">−0.77</text><text x="875" y="240">+1.29</text>
+        <text x="803" y="280">−0.77</text><text x="803" y="320">−0.77</text><text x="875" y="360">+1.29</text><text x="803" y="400">−0.77</text>
+      </g>
+    </g>
+    <g data-step="3">
+      <rect x="20" y="424" width="920" height="36" rx="7" fill="#f3f1ec" stroke="#ddd8ce"/>
+      <text x="480" y="448" text-anchor="middle" font-size="15" fill="#1d2433">mean(r) = 3/8 = 0.375 · std(r) = 0.484 · Â_i = (r_i − 0.375) / 0.484 → <tspan fill="#1f7a53" font-weight="800">+1.29</tspan> for ✓, <tspan fill="#ad2f2f" font-weight="800">−0.77</tspan> for ✗ · ΣÂ = 0</text>
+    </g>
+
+    <!-- step 4: ratio and clipping -->
+    <g data-step-only="4">
+      <g font-size="15" fill="#1d2433">
+        <text x="24" y="492" font-weight="800">Per token t of rollout i:</text>
+        <text x="24" y="514">ρ = π_new(token) / π_old(token)</text>
+        <text x="24" y="536">term = min(ρ·Â, clip(ρ, 0.8, 1.2)·Â)</text>
+      </g>
+      <rect x="520" y="486" width="400" height="22" fill="#e9f6f0"/>
+      <rect x="620" y="486" width="200" height="22" fill="#cdebdc" stroke="#2f9e6e"/>
+      <line x1="520" y1="508" x2="920" y2="508" stroke="#1d2433" stroke-width="1.5"/>
+      <g font-size="14" fill="#687084" text-anchor="middle">
+        <text x="520" y="526">0.6</text><text x="620" y="526">0.8</text><text x="720" y="526">1.0</text><text x="820" y="526">1.2</text><text x="920" y="526">1.4</text>
+      </g>
+      <text x="720" y="480" text-anchor="middle" font-size="14" font-weight="700" fill="#1f7a53">trust region 1 ± ε (ε = 0.2)</text>
+      <circle cx="795" cy="497" r="7" fill="#2f9e6e"/>
+      <circle cx="870" cy="497" r="7" fill="#ffffff" stroke="#2f9e6e" stroke-width="2.5"/>
+      <circle cx="570" cy="497" r="7" fill="#ffffff" stroke="#d64545" stroke-width="2.5"/>
+      <g font-size="14" fill="#1d2433">
+        <text x="735" y="548" text-anchor="middle">✓ token ρ = 1.15: term 1.48, gradient flows</text>
+        <text x="944" y="476" text-anchor="end" fill="#1f7a53">1.30: clipped</text>
+        <text x="526" y="476" fill="#ad2f2f">✗ 0.70: clipped</text>
+      </g>
+    </g>
+
+    <!-- step 5: update -->
+    <g data-step="5">
+      <g font-size="22" font-weight="800" text-anchor="middle">
+        <text x="646" y="123" fill="#2f9e6e">↑</text><text x="646" y="163" fill="#d64545">↓</text><text x="646" y="203" fill="#d64545">↓</text><text x="646" y="243" fill="#2f9e6e">↑</text>
+        <text x="646" y="283" fill="#d64545">↓</text><text x="646" y="323" fill="#d64545">↓</text><text x="646" y="363" fill="#2f9e6e">↑</text><text x="646" y="403" fill="#d64545">↓</text>
+      </g>
+    </g>
+    <g data-step-only="5" font-size="15" fill="#1d2433">
+      <text x="24" y="492" font-weight="800">Gradient step on all 8 rollouts at once:</text>
+      <text x="24" y="514">every token of a ✓ rollout: log-prob pushed up, weight +1.29</text>
+      <text x="24" y="536">every token of a ✗ rollout: log-prob pushed down, weight −0.77</text>
+      <text x="560" y="492" font-weight="800">minus β·KL(π_θ ‖ π_ref), β = 0.001 in R1:</text>
+      <text x="560" y="514">keeps the policy near a reference copy</text>
+      <text x="560" y="536">next round: P(correct) above 3/8</text>
+    </g>
+  </svg>
+  <div class="step-captions">
+    <p data-step-only="1"><b>Step 1: sample a group.</b> One prompt, <var>G</var> = 8 rollouts from the current policy (frozen as π<sub>old</sub> for this step). Temperature 1 keeps them diverse: different lengths, different arithmetic slips. (DeepSeek-R1 used <var>G</var> = 16; 8 keeps the figure readable. Token counts are illustrative.)</p>
+    <p data-step-only="2"><b>Step 2: verify.</b> A program parses each boxed answer and compares it with 1786. Three of eight are right. No neural network is involved, so the reward cannot be fooled by persuasive text.</p>
+    <p data-step-only="3"><b>Step 3: normalize within the group.</b> Subtract the group mean (0.375) and divide by the group standard deviation (0.484). Correct rollouts get +1.29, wrong ones −0.77. Advantages sum to zero. Rare successes get a bigger push than common failures get a pull, because 3 winners share the same total as 5 losers.</p>
+    <p data-step-only="4"><b>Step 4: per-token ratio, clipped.</b> Every token of rollout <var>i</var> gets the same Â<sub><var>i</var></sub>. The update multiplies it by how much the new policy already changed that token's probability. Once the ratio leaves [0.8, 1.2] in the helpful direction, the term goes flat and stops pushing. This is PPO's clipping trick: small, safe steps.</p>
+    <p data-step-only="5"><b>Step 5: update.</b> One optimizer step raises the probability of every token in the three correct rollouts and lowers it for the five wrong ones. A small KL penalty keeps the model close to a reference copy. Repeat with fresh prompts for thousands of steps.</p>
+  </div>
+  <figcaption><span class="fig-label">Figure 10.7</span> — GRPO on one prompt with real arithmetic. Advantages use the population standard deviation; implementations differ in such details.</figcaption>
+</figure>
+
+<h3>The objective, symbol by symbol</h3>
+
+<div class="formula">
+  <var>J</var>(θ) = 𝔼 [ <span class="frac"><span>1</span><span><var>G</var></span></span> Σ<sub><var>i</var>=1..<var>G</var></sub> <span class="frac"><span>1</span><span>|<var>o</var><sub><var>i</var></sub>|</span></span> Σ<sub><var>t</var></sub> ( min( ρ<sub><var>i</var>,<var>t</var></sub> Â<sub><var>i</var></sub>, clip(ρ<sub><var>i</var>,<var>t</var></sub>, 1−ε, 1+ε) Â<sub><var>i</var></sub> ) − β · D<sub>KL</sub> ) ]
+  <span class="where">
+  ρ<sub><var>i</var>,<var>t</var></sub> = π<sub>θ</sub>(<var>o</var><sub><var>i</var>,<var>t</var></sub> | <var>q</var>, <var>o</var><sub><var>i</var>,&lt;<var>t</var></sub>) / π<sub>old</sub>(<var>o</var><sub><var>i</var>,<var>t</var></sub> | <var>q</var>, <var>o</var><sub><var>i</var>,&lt;<var>t</var></sub>) — how much the new weights changed the probability of the token that was actually sampled.<br>
+  Â<sub><var>i</var></sub> = (<var>r</var><sub><var>i</var></sub> − mean(<var>r</var><sub>1..<var>G</var></sub>)) / std(<var>r</var><sub>1..<var>G</var></sub>) — the group-relative advantage, shared by all tokens of rollout <var>i</var>.<br>
+  |<var>o</var><sub><var>i</var></sub>| — rollout length in tokens (averaging per rollout). ε — clip range, 0.2 is typical. β — KL weight (0.04 in DeepSeekMath, 0.001 in DeepSeek-R1).<br>
+  D<sub>KL</sub> per token ≈ π<sub>ref</sub>/π<sub>θ</sub> − ln(π<sub>ref</sub>/π<sub>θ</sub>) − 1, an estimator that is always ≥ 0.</span>
+</div>
+
+<p>Work one token through it. A token in a correct rollout had π<sub>old</sub> = 0.20 and after some updates π<sub>θ</sub> = 0.23, so ρ = 1.15. With Â = +1.29: ρ·Â = 1.48 and clip(1.15)·Â = 1.48, the minimum is 1.48, and the gradient flows. If ρ had reached 1.30, the clipped term 1.2 × 1.29 = 1.55 would be the minimum, and it does not depend on θ, so that token contributes no more push. The KL term for this token with π<sub>ref</sub> = 0.20: 0.870 − ln 0.870 − 1 = 0.0093, times β = 0.001: negligible early on, but it accumulates over thousands of tokens and steps. DeepSeek also notes that a KL penalty summed over very long outputs implicitly penalizes length, and they periodically reset the reference model to the current policy (every 400 steps in R1) so the policy can travel further.</p>
+
+<p>Why does raising "log-probability of the sampled tokens" improve the model? The gradient of the unclipped term is Â<sub><var>i</var></sub> · ρ · ∇<sub>θ</sub> ln π<sub>θ</sub>(<var>o</var><sub><var>i</var>,<var>t</var></sub>). The ∇ ln π part is the same gradient as in pretraining's cross-entropy loss for that token (<a href="08-pretraining.html">Chapter 8</a>). So GRPO is "supervised training on your own samples", weighted by +1.29 for winners and −0.77 for losers. Credit assignment is coarse: every token in a winning chain is reinforced, including a useless detour. It works because, averaged over many rollouts, tokens that actually help appear more often in winners than in losers.</p>
+
+<aside class="callout deep"><div class="callout-title">Low-level: what one RL step costs (8B model)</div>
+<p><strong>Memory.</strong> PPO-style RLHF keeps four 8B networks, ≈ 288 GB before activations (<a href="09-post-training.html">Chapter 9</a>, Figure 9.4). GRPO with a rule-based verifier keeps two: the trainable policy (128 GB) and the frozen reference (16 GB): ≈ 144 GB. The verifier is a Python function.</p>
+<p><strong>Compute.</strong> Take an R1-sized step: 512 rollouts, and suppose they average 8,000 tokens (illustrative): 4.1 M tokens. Generating them costs 2<var>N</var> per token ≈ 6.6 × 10<sup>16</sup> FLOPs; reference log-probs another 2<var>N</var> (6.6 × 10<sup>16</sup>, a prefill-like pass); the training forward + backward 6<var>N</var> (2.0 × 10<sup>17</sup>). About 3.3 × 10<sup>17</sup> FLOPs per step.</p>
+<p><strong>Why generation dominates anyway.</strong> The generation FLOPs are the smallest item, but they run as memory-bound decode, one token at a time per sequence. Holding all 512 sequences at 8,000 tokens needs 512 × 8,000 × 128 KiB ≈ 500 GiB of KV cache (<a href="12-kv-cache.html">Chapter 12</a>), and the longest rollout in the batch decides when the step can finish. RL frameworks therefore pair an inference engine for rollouts with a training engine for updates and copy weights between them every step (16 GB for 8B in BF16).</p>
+</aside>
+
+<details class="deep-dive"><summary>Optional deep dive: known biases in GRPO and later fixes</summary>
+<p><strong>Zero-variance groups.</strong> If all <var>G</var> rollouts get the same reward (all right or all wrong), the standard deviation is 0 and every advantage is 0: the prompt contributes no gradient but still costs a full group of rollouts. DAPO (2025) adds <em>dynamic sampling</em>, which drops such groups and refills the batch, and a <em>decoupled clip</em> with a larger upper bound so low-probability tokens can rise faster.</p>
+<p><strong>Length bias.</strong> The 1/|<var>o</var><sub><var>i</var></sub>| factor averages the loss within each rollout. For a wrong rollout (negative advantage), a longer chain spreads the same penalty over more tokens, so each token is punished less. Dr. GRPO (2025) shows this artificially inflates response length, especially of incorrect outputs, and removes the per-rollout length normalization and the std division.</p>
+<p><strong>Difficulty weighting.</strong> Dividing by the group std up-weights prompts where nearly all rollouts agree (very easy or very hard), because a small std makes advantages large. Whether that is desirable is debated.</p>
+</details>
+</section>
+
+<section>
+<h2>The DeepSeek-R1 recipe, and distillation</h2>
+
+<p>DeepSeek-R1 (paper January 2025, extended version January 2026) is the best-documented recipe for a frontier reasoning model, so it is worth following end to end. It has two parts: an experiment that shows RL alone can create reasoning, and a practical pipeline that makes the result usable.</p>
+
+<h3>R1-Zero: RL straight on a base model</h3>
+
+<p>The DeepSeek team took DeepSeek-V3-Base (671B-parameter MoE, 37B active, <a href="07-mixture-of-experts.html">Chapter 7</a>), skipped supervised fine-tuning entirely, and ran GRPO with only two rule-based rewards: <em>accuracy</em> (is the final answer right?) and <em>format</em> (is the reasoning inside <code>&lt;think&gt;…&lt;/think&gt;</code> and the answer inside <code>&lt;answer&gt;…&lt;/answer&gt;</code>?). The prompt template simply said the assistant "first thinks about the reasoning process in the mind and then provides the user with the answer."</p>
+
+<p>What happened is the most cited result in this area:</p>
+<ul>
+  <li>AIME 2024 accuracy (pass@1) rose from 15.6% to 77.9% over training, and to 86.7% with self-consistency voting.</li>
+  <li>The average response length grew steadily on its own, from hundreds to thousands of tokens. Nobody asked for longer answers; longer answers earned more reward.</li>
+  <li>Reflective behavior emerged: the frequency of words like "wait", "verify", "mistake" and "check" rose 5–7× during training. The paper shows an "aha moment" where the model writes "Wait, wait. Wait. That's an aha moment I can flag here" and re-derives a step.</li>
+  <li>The downsides: poor readability and language mixing (English and Chinese inside one chain), and weak general skills such as writing. Instruction-following (IF-Eval) was only 46.6%.</li>
+</ul>
+
+<h3>R1: four stages to make it usable</h3>
+
+<figure class="wide fig-r1">
+  <svg viewBox="0 0 960 420" role="img" aria-label="The DeepSeek-R1-Zero and DeepSeek-R1 training pipelines and distillation into smaller models">
+    <defs>
+      <marker id="ch10-arr-r1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#1d2433"/></marker>
+    </defs>
+    <!-- lane 1 -->
+    <text x="20" y="28" font-size="16" font-weight="800" fill="#1d2433">R1-Zero: pure RL</text>
+    <g font-size="15" text-anchor="middle" fill="#1d2433">
+      <rect x="20" y="40" width="170" height="70" rx="8" fill="#eceff5" stroke="#5a6b8c" stroke-width="1.5"/>
+      <text x="105" y="70" font-weight="800">DeepSeek-V3-Base</text><text x="105" y="92">671B MoE, 37B active</text>
+      <rect x="240" y="40" width="320" height="70" rx="8" fill="#fcecec" stroke="#d64545" stroke-width="1.5"/>
+      <text x="400" y="70" font-weight="800">GRPO, rule rewards only</text><text x="400" y="92">accuracy + format · no SFT at all</text>
+      <rect x="610" y="40" width="330" height="70" rx="8" fill="#efe9fb" stroke="#7b5cd6" stroke-width="1.5"/>
+      <text x="775" y="66" font-weight="800">R1-Zero: AIME 15.6% → 77.9%</text><text x="775" y="88">long CoT, "aha", self-checks</text><text x="775" y="104" font-size="14" fill="#ad2f2f">hard to read, mixes languages</text>
+    </g>
+    <g stroke="#1d2433" stroke-width="2"><path d="M192 75 H232" marker-end="url(#ch10-arr-r1)"/><path d="M562 75 H602" marker-end="url(#ch10-arr-r1)"/></g>
+
+    <!-- lane 2 -->
+    <text x="20" y="160" font-size="16" font-weight="800" fill="#1d2433">DeepSeek-R1: four stages</text>
+    <g font-size="15" text-anchor="middle" fill="#1d2433">
+      <rect x="20" y="172" width="110" height="96" rx="8" fill="#eceff5" stroke="#5a6b8c" stroke-width="1.5"/>
+      <text x="75" y="214" font-weight="800">V3-Base</text><text x="75" y="236" font-size="14">671B MoE</text>
+      <rect x="160" y="172" width="180" height="96" rx="8" fill="#fbefc5" stroke="#e5b62b" stroke-width="1.5"/>
+      <text x="250" y="198" font-weight="800">① Cold-start SFT</text><text x="250" y="220">thousands of readable</text><text x="250" y="240">long-CoT examples</text><text x="250" y="258" font-size="14" fill="#687084">(Dev1)</text>
+      <rect x="360" y="172" width="180" height="96" rx="8" fill="#fcecec" stroke="#d64545" stroke-width="1.5"/>
+      <text x="450" y="198" font-weight="800">② Reasoning RL</text><text x="450" y="220">GRPO + language-</text><text x="450" y="240">consistency reward</text><text x="450" y="258" font-size="14" fill="#687084">(Dev2)</text>
+      <rect x="560" y="172" width="190" height="96" rx="8" fill="#fbefc5" stroke="#e5b62b" stroke-width="1.5"/>
+      <text x="655" y="198" font-weight="800">③ Rejection sampling</text><text x="655" y="220">~600k correct traces</text><text x="655" y="240">+ ~200k general → SFT</text><text x="655" y="258" font-size="14" fill="#687084">(Dev3)</text>
+      <rect x="770" y="172" width="170" height="96" rx="8" fill="#fcecec" stroke="#d64545" stroke-width="1.5"/>
+      <text x="855" y="198" font-weight="800">④ RL, all tasks</text><text x="855" y="220">rules + reward</text><text x="855" y="240">models (helpful,</text><text x="855" y="258">safe)</text>
+    </g>
+    <g stroke="#1d2433" stroke-width="2"><path d="M132 220 H152" marker-end="url(#ch10-arr-r1)"/><path d="M342 220 H352" marker-end="url(#ch10-arr-r1)"/><path d="M542 220 H552" marker-end="url(#ch10-arr-r1)"/><path d="M752 220 H762" marker-end="url(#ch10-arr-r1)"/><path d="M855 270 V296" marker-end="url(#ch10-arr-r1)"/></g>
+    <rect x="770" y="300" width="170" height="40" rx="8" fill="#7b5cd6"/>
+    <text x="855" y="326" text-anchor="middle" font-size="16" font-weight="800" fill="#ffffff">DeepSeek-R1</text>
+
+    <!-- lane 3 -->
+    <text x="20" y="312" font-size="16" font-weight="800" fill="#1d2433">Distillation: plain SFT on R1's outputs</text>
+    <g font-size="15" text-anchor="middle" fill="#1d2433">
+      <rect x="20" y="326" width="200" height="72" rx="8" fill="#fbefc5" stroke="#e5b62b" stroke-width="1.5"/>
+      <text x="120" y="356" font-weight="800">800k samples</text><text x="120" y="378">from the R1 pipeline</text>
+      <rect x="270" y="326" width="200" height="72" rx="8" fill="#ffffff" stroke="#687084" stroke-width="1.5"/>
+      <text x="370" y="356" font-weight="800">SFT, 2–3 epochs</text><text x="370" y="378">no RL at all</text>
+      <rect x="520" y="326" width="230" height="72" rx="8" fill="#efe9fb" stroke="#7b5cd6" stroke-width="1.5"/>
+      <text x="635" y="352" font-weight="800">R1-Distill models</text><text x="635" y="372">Qwen2.5 1.5B–32B,</text><text x="635" y="390">Llama 3.1 8B, 3.3 70B</text>
+    </g>
+    <g stroke="#1d2433" stroke-width="2"><path d="M222 362 H262" marker-end="url(#ch10-arr-r1)"/><path d="M472 362 H512" marker-end="url(#ch10-arr-r1)"/></g>
+  </svg>
+  <figcaption><span class="fig-label">Figure 10.8</span> — The two DeepSeek pipelines and distillation. Stage labels Dev1–Dev3 are the paper's names for intermediate checkpoints. Yellow boxes are supervised steps, red boxes are RL steps.</figcaption>
+</figure>
+
+<ol>
+  <li><strong>Cold start.</strong> Fine-tune the base model on a few thousand long chains of thought written in a clean, conversational style. This gives RL a readable starting point.</li>
+  <li><strong>Reasoning RL.</strong> GRPO on math, code and logic with rule-based rewards, plus a <em>language-consistency reward</em> (the fraction of words in the target language). The paper's ablation shows this costs a little accuracy but makes the chains readable.</li>
+  <li><strong>Rejection sampling and SFT.</strong> Sample many answers from the RL checkpoint, keep only correct and readable ones (about 600k reasoning samples), add about 200k non-reasoning samples (writing, factual QA, translation) and fine-tune on all 800k. For a simple query like "hello", the training target has no chain of thought at all.</li>
+  <li><strong>RL for all scenarios.</strong> A final GRPO round mixing rule-based rewards for reasoning with neural reward models for helpfulness and harmlessness (<a href="09-post-training.html">Chapter 9</a>).</li>
+</ol>
+
+<p>The whole RL effort was cheap relative to pretraining. The paper reports 512 H800 GPUs for about 198 hours for R1-Zero (101K GPU-hours), 41K GPU-hours for R1 and 5K for building the SFT data: 147K H800 GPU-hours, about $294K at $2/hour. DeepSeek-V3's full training run took about 2.79M H800 GPU-hours, so the reasoning stage added roughly 5% (<a href="08-pretraining.html">Chapter 8</a> has the pretraining numbers).</p>
+
+<h3>Distillation: the cheap way to a small reasoning model</h3>
+
+<p><strong>Distillation</strong> here means plain supervised fine-tuning of a smaller model on the big model's outputs (full chain of thought plus answer); see <a href="09-post-training.html">Chapter 9</a> for the general technique. DeepSeek fine-tuned Qwen2.5 and Llama models on the same 800k samples for 2–3 epochs. One of the bases was Llama 3.1 8B, this blog's running model. In the table, pass@1 is the accuracy of a single sample and cons@64 the accuracy of a majority vote over 64 samples.</p>
+
+<div class="table-wrap">
+<table class="data">
+  <tr><th>Model (AIME 2024)</th><th>How it was trained</th><th class="num">pass@1</th><th class="num">cons@64</th></tr>
+  <tr><td>DeepSeek-R1-Distill-Qwen-1.5B</td><td>SFT on 800k R1 samples</td><td class="num">28.9%</td><td class="num">52.7%</td></tr>
+  <tr><td>DeepSeek-R1-Distill-Qwen-7B</td><td>SFT on 800k R1 samples</td><td class="num">55.5%</td><td class="num">83.3%</td></tr>
+  <tr><td>DeepSeek-R1-Distill-Llama-8B (base: Llama 3.1 8B)</td><td>SFT on 800k R1 samples</td><td class="num">50.4%</td><td class="num">80.0%</td></tr>
+  <tr><td>DeepSeek-R1-Distill-Qwen-32B</td><td>SFT on 800k R1 samples</td><td class="num">72.6%</td><td class="num">83.3%</td></tr>
+  <tr><td>Qwen2.5-32B-Zero</td><td>large-scale RL directly on the 32B base</td><td class="num">47.0%</td><td class="num">60.0%</td></tr>
+</table>
+</div>
+
+<p>The last two rows are the key comparison. Running the R1-Zero recipe directly on a 32B base reached 47.0%; copying R1's chains reached 72.6%, for a tiny fraction of the compute. The interpretation: RL can only reinforce strategies the model sometimes finds on its own, and a small model finds good strategies too rarely. A big model discovers them; distillation hands them down. Qwen3 used the same idea ("strong-to-weak distillation", from the teacher's logits rather than sampled text) for its small models and reported needing about 1/10 of the GPU-hours of running its full four-stage pipeline on each one.</p>
+
+<aside class="callout key"><div class="callout-title">Key takeaway</div><p>Reasoning ability is mostly created by RL on large models with verifiable rewards, then copied into smaller models by supervised fine-tuning on their chains of thought. The chains themselves are the valuable artifact, which is one reason commercial vendors hide them (next section but one).</p></aside>
+</section>
+
+<section>
+<h2>Outcome rewards vs process rewards</h2>
+
+<p><strong>The problem.</strong> A 0/1 reward on the final answer is sparse. A 5,000-token chain that makes one arithmetic slip at token 4,900 gets the same 0 as total nonsense, and a chain that reaches the right answer by luck gets full credit for its wrong steps.</p>
+
+<ul>
+  <li>An <strong>outcome reward model (ORM)</strong> scores only the final result. Rule-based verifiers are perfect ORMs for checkable tasks.</li>
+  <li>A <strong>process reward model (PRM)</strong> is a neural network that scores each intermediate step. OpenAI's "Let's Verify Step by Step" (2023) collected PRM800K, 800,000 human labels of individual steps of MATH solutions, and found that a process-supervised reward model, used to pick the best of many sampled solutions, solved 78% of a representative subset of the MATH test set, clearly beating outcome supervision.</li>
+</ul>
+
+<figure class="wide fig-prm">
+  <svg viewBox="0 0 960 300" role="img" aria-label="Outcome reward scores only the final answer; a process reward model scores each step and pinpoints the first wrong step">
+    <text x="24" y="30" font-size="16" font-weight="800" fill="#1d2433">Solution (sampled): solve 3x + 7 = 25, then give x²</text>
+    <g font-size="15" class="mono pre" fill="#1d2433">
+      <rect x="20" y="46" width="560" height="38" rx="6" fill="#ffffff" stroke="#ddd8ce"/><text x="34" y="71">1. 3x + 7 = 25  →  3x = 18</text>
+      <rect x="20" y="92" width="560" height="38" rx="6" fill="#ffffff" stroke="#ddd8ce"/><text x="34" y="117">2. x = 18 / 3 = 6</text>
+      <rect x="20" y="138" width="560" height="38" rx="6" fill="#fcecec" stroke="#d64545"/><text x="34" y="163">3. x² = 6 × 2 = 12</text>
+      <rect x="20" y="184" width="560" height="38" rx="6" fill="#ffffff" stroke="#ddd8ce"/><text x="34" y="209">4. so x² = 12</text>
+      <rect x="20" y="230" width="560" height="38" rx="6" fill="#ffffff" stroke="#ddd8ce"/><text x="34" y="255">5. Answer: \boxed{12}</text>
+    </g>
+    <text x="700" y="30" text-anchor="middle" font-size="16" font-weight="800" fill="#1d2433">Outcome (ORM)</text>
+    <text x="860" y="30" text-anchor="middle" font-size="16" font-weight="800" fill="#1d2433">Process (PRM)</text>
+    <g font-size="15" text-anchor="middle" fill="#687084">
+      <text x="700" y="71">–</text><text x="700" y="117">–</text><text x="700" y="163">–</text><text x="700" y="209">–</text>
+    </g>
+    <rect x="645" y="230" width="110" height="38" rx="6" fill="#fcecec" stroke="#d64545"/>
+    <text x="700" y="255" text-anchor="middle" font-size="15" font-weight="800" fill="#ad2f2f">0 (wrong)</text>
+    <g font-size="15" text-anchor="middle" font-weight="800">
+      <rect x="810" y="46" width="100" height="38" rx="6" fill="#e9f6f0" stroke="#2f9e6e"/><text x="860" y="71" fill="#1f7a53">0.97</text>
+      <rect x="810" y="92" width="100" height="38" rx="6" fill="#e9f6f0" stroke="#2f9e6e"/><text x="860" y="117" fill="#1f7a53">0.95</text>
+      <rect x="810" y="138" width="100" height="38" rx="6" fill="#d64545" stroke="#d64545"/><text x="860" y="163" fill="#ffffff">0.06</text>
+      <rect x="810" y="184" width="100" height="38" rx="6" fill="#fcecec" stroke="#d64545"/><text x="860" y="209" fill="#ad2f2f">0.10</text>
+      <rect x="810" y="230" width="100" height="38" rx="6" fill="#fcecec" stroke="#d64545"/><text x="860" y="255" fill="#ad2f2f">0.09</text>
+    </g>
+    <text x="700" y="290" text-anchor="middle" font-size="14" fill="#687084">"something is wrong"</text>
+    <text x="860" y="290" text-anchor="middle" font-size="14" fill="#687084">"step 3 is wrong"</text>
+  </svg>
+  <figcaption><span class="fig-label">Figure 10.9</span> — The same flawed solution under two kinds of supervision. PRM scores are illustrative probabilities that each step is correct. The ORM can only say the result is wrong; the PRM localizes the error (x² was computed as 2x).</figcaption>
+</figure>
+
+<p>PRMs look strictly better, so why did DeepSeek-R1 not use them? The paper lists them as an unsuccessful attempt, for three reasons: it is hard to define what a "step" is in free-form reasoning; it is hard to label step correctness at scale (humans are expensive, models are unreliable); and any neural reward model can be <em>reward-hacked</em> (the policy learns to produce text the reward model likes rather than text that is correct), which forces retraining the reward model. Rule-based outcome rewards cannot be flattered. The current consensus is: outcome rewards for RL training on checkable tasks, and PRMs (or other learned verifiers) for <em>test-time</em> search and re-ranking, where they guide which partial solutions to expand.</p>
+</section>
+
+<section>
+<h2>What a reasoning response looks like, token by token</h2>
+
+<p>A reasoning response is one flat token stream (<a href="03-tokens.html">Chapter 3</a> covers chat templates and special tokens). The model writes a delimited thinking region, then a closing delimiter, then the answer. Everything else (hiding, summarizing, billing, dropping old thinking) is done by the code around the model. Here is a real example in the Qwen3 chat format, with token counts from the actual Qwen3 tokenizer.</p>
+
+<figure class="stepper wide fig-stream" data-steps="6" data-interval="3800">
+  <svg viewBox="0 0 1000 545" role="img" aria-label="A reasoning response as a token stream: prompt, think block, answer; which tokens are billed, shown and kept for the next turn">
+    <text x="20" y="28" font-size="16" font-weight="800" fill="#1d2433">Turn 1: what the model reads and writes</text>
+    <!-- chunks -->
+    <g font-size="15" class="mono pre" text-anchor="middle" fill="#1d2433">
+      <rect x="20" y="44" width="190" height="44" rx="7" fill="#fbefc5" stroke="#e5b62b" stroke-width="1.5"/><text x="115" y="72">What is 47 × 38?</text>
+    </g>
+    <text x="115" y="108" text-anchor="middle" font-size="14" fill="#687084">prompt · 18 tokens</text>
+    <g data-step="2">
+      <g font-size="15" class="mono pre" text-anchor="middle" fill="#1d2433">
+        <rect x="222" y="44" width="90" height="44" rx="7" fill="#efe9fb" stroke="#7b5cd6" stroke-width="2"/><text x="267" y="72">&lt;think&gt;</text>
+        <rect x="324" y="44" width="250" height="44" rx="7" fill="#efe9fb" stroke="#7b5cd6" stroke-width="1.5"/><text x="449" y="72">47 × 40 = 1880 … 1786.</text>
+        <rect x="586" y="44" width="100" height="44" rx="7" fill="#efe9fb" stroke="#7b5cd6" stroke-width="2"/><text x="636" y="72">&lt;/think&gt;</text>
+      </g>
+      <g font-size="14" fill="#687084" text-anchor="middle">
+        <text x="267" y="108">id 151667</text><text x="449" y="108">thinking · 62 tokens</text><text x="636" y="108">id 151668</text>
+      </g>
+    </g>
+    <g data-step="3">
+      <g font-size="15" class="mono pre" text-anchor="middle" fill="#1d2433">
+        <rect x="698" y="44" width="160" height="44" rx="7" fill="#fff6d6" stroke="#e5b62b" stroke-width="2"/><text x="778" y="72">… = **1786**.</text>
+        <rect x="868" y="44" width="122" height="44" rx="7" fill="#f3f1ec" stroke="#687084" stroke-width="1.5"/><text x="929" y="72">&lt;|im_end|&gt;</text>
+      </g>
+      <g font-size="14" fill="#687084" text-anchor="middle">
+        <text x="778" y="108">answer · 15 tokens</text><text x="929" y="108">id 151645</text>
+      </g>
+    </g>
+    <g data-step-only="2"><text x="449" y="134" text-anchor="middle" font-size="15" font-weight="700" fill="#5a3fb3">generated one decode step at a time, like any other text<tspan class="blink" fill="#7b5cd6"> ▌</tspan></text></g>
+
+    <!-- row: billed -->
+    <g data-step="4">
+      <text x="20" y="152" font-size="14" font-weight="800" fill="#687084" letter-spacing=".06em">BILLED AS</text>
+      <text x="988" y="152" text-anchor="end" font-size="14" font-weight="700" fill="#1d2433">usage: input 18 · output 80 = 64 thinking + 16 answer</text>
+      <rect x="20" y="160" width="190" height="34" rx="6" fill="#eaf1fd" stroke="#3d8bd4"/>
+      <text x="115" y="182" text-anchor="middle" font-size="15" fill="#1d2433" font-weight="700">input</text>
+      <rect x="222" y="160" width="768" height="34" rx="6" fill="#fcecec" stroke="#d64545"/>
+      <text x="606" y="182" text-anchor="middle" font-size="15" fill="#ad2f2f" font-weight="700">output: all 80 generated tokens, thinking included</text>
+    </g>
+    <!-- row: shown -->
+    <g data-step="5">
+      <text x="20" y="226" font-size="14" font-weight="800" fill="#687084" letter-spacing=".06em">SHOWN TO THE USER</text>
+      <rect x="20" y="234" width="190" height="34" rx="6" fill="#f3f1ec" stroke="#ddd8ce"/>
+      <text x="115" y="256" text-anchor="middle" font-size="15" fill="#3a4254">their own text</text>
+      <rect x="222" y="234" width="464" height="34" rx="6" fill="#f3f1ec" stroke="#687084" stroke-dasharray="5 4"/>
+      <text x="454" y="256" text-anchor="middle" font-size="15" fill="#3a4254">hidden: raw text, a summary, or nothing</text>
+      <rect x="698" y="234" width="160" height="34" rx="6" fill="#e9f6f0" stroke="#2f9e6e"/>
+      <text x="778" y="256" text-anchor="middle" font-size="15" fill="#1f7a53" font-weight="700">yes</text>
+      <rect x="868" y="234" width="122" height="34" rx="6" fill="#f3f1ec" stroke="#ddd8ce"/>
+      <text x="929" y="256" text-anchor="middle" font-size="15" fill="#3a4254">no (stop)</text>
+    </g>
+    <!-- row: kept -->
+    <g data-step="6">
+      <text x="20" y="300" font-size="14" font-weight="800" fill="#687084" letter-spacing=".06em">IN TURN 2's CONTEXT</text>
+      <rect x="20" y="308" width="190" height="34" rx="6" fill="#e9f6f0" stroke="#2f9e6e"/>
+      <text x="115" y="330" text-anchor="middle" font-size="15" fill="#1f7a53" font-weight="700">yes</text>
+      <rect x="222" y="308" width="464" height="34" rx="6" fill="#fcecec" stroke="#d64545" stroke-dasharray="5 4"/>
+      <text x="454" y="330" text-anchor="middle" font-size="15" fill="#ad2f2f" font-weight="700">dropped by the chat template*</text>
+      <rect x="698" y="308" width="160" height="34" rx="6" fill="#e9f6f0" stroke="#2f9e6e"/>
+      <text x="778" y="330" text-anchor="middle" font-size="15" fill="#1f7a53" font-weight="700">yes</text>
+      <rect x="868" y="308" width="122" height="34" rx="6" fill="#e9f6f0" stroke="#2f9e6e"/>
+      <text x="929" y="330" text-anchor="middle" font-size="15" fill="#1f7a53" font-weight="700">yes</text>
+
+      <text x="20" y="384" font-size="16" font-weight="800" fill="#1d2433">Turn 2 input: 51 tokens. The old thinking is gone; only the answer remains.</text>
+      <g font-size="15" class="mono pre" fill="#1d2433">
+        <rect x="20" y="398" width="232" height="40" rx="7" fill="#fbefc5" stroke="#e5b62b"/><text x="34" y="424">user: What is 47 × 38?</text>
+        <rect x="264" y="398" width="300" height="40" rx="7" fill="#fff6d6" stroke="#e5b62b" stroke-width="2"/><text x="278" y="424">assistant: 47 × 38 = **1786**.</text>
+        <rect x="576" y="398" width="212" height="40" rx="7" fill="#fbefc5" stroke="#e5b62b"/><text x="590" y="424">user: And 47 × 39?</text>
+        <rect x="800" y="398" width="180" height="40" rx="7" fill="#efe9fb" stroke="#7b5cd6"/><text x="814" y="424">assistant: <tspan class="blink">▌</tspan></text>
+      </g>
+      <g font-size="14" fill="#3a4254">
+        <text x="20" y="470">* Qwen3 and gpt-oss templates strip past thinking (and so do older OpenAI and Claude models by default).</text>
+        <text x="20" y="490">Newer Claude models (Opus 4.5+, Sonnet 4.6+) keep it, and OpenAI's reasoning.context = all_turns renders it;</text>
+        <text x="20" y="510">then the old thinking is re-read on every later turn and billed as input tokens.</text>
+      </g>
+    </g>
+  </svg>
+  <div class="step-captions">
+    <p data-step-only="1"><b>The prompt.</b> The chat template turns the user message into 18 tokens: <code>&lt;|im_start|&gt;user\nWhat is 47 × 38?&lt;|im_end|&gt;\n&lt;|im_start|&gt;assistant\n</code>. Generation starts after the last newline.</p>
+    <p data-step-only="2"><b>The thinking block.</b> The model emits <code>&lt;think&gt;</code> (one token, ID 151667), 62 tokens of scratch work ("47 × 38 = 47 × 40 − 47 × 2. 47 × 40 = 1880. 47 × 2 = 94. 1880 − 94 = 1786."), then <code>&lt;/think&gt;</code> (ID 151668). Nothing about these tokens is special to the GPU.</p>
+    <p data-step-only="3"><b>The answer.</b> Two newlines and 13 tokens of visible answer, then <code>&lt;|im_end|&gt;</code>, which the serving loop treats as a stop token.</p>
+    <p data-step-only="4"><b>Billing.</b> Every generated token is an output token, so this request bills 80 output tokens, of which only 16 are the answer. APIs report the split: OpenAI as <code>output_tokens_details.reasoning_tokens</code>, Anthropic as <code>output_tokens_details.thinking_tokens</code>, Gemini as <code>total_thought_tokens</code>.</p>
+    <p data-step-only="5"><b>Display.</b> A self-hosted open model returns the raw thinking text (a server can split it into a separate <code>reasoning_content</code> field). Commercial APIs return a summary, an empty block, or nothing.</p>
+    <p data-step-only="6"><b>The next turn.</b> Qwen3's Jinja template keeps reasoning only for assistant messages after the latest user query (the current tool loop) and strips it from older turns. Turn 2 is 51 input tokens instead of about 115.</p>
+  </div>
+  <figcaption><span class="fig-label">Figure 10.10</span> — One reasoning exchange in the Qwen3 format. Token IDs and counts are real (Qwen3 tokenizer and chat template); the thinking text is a short hand-written example, real chains are usually far longer.</figcaption>
+</figure>
+
+<h3>The same thing in other formats</h3>
+
+<p>gpt-oss uses OpenAI's <strong>harmony</strong> format. Instead of think tags it has <em>channels</em>: the chain of thought goes to the <code>analysis</code> channel, tool calls usually to <code>commentary</code>, and the user-facing answer to <code>final</code>. The reasoning level is a line in the system message:</p>
+
+<pre><code><span class="k">&lt;|start|&gt;</span>system<span class="k">&lt;|message|&gt;</span>You are ChatGPT, a large language model trained by OpenAI.
+Knowledge cutoff: 2024-06
+Current date: 2026-10-31
+
+<span class="f">Reasoning: high</span>
+
+# Valid channels: analysis, commentary, final. Channel must be included for every message.<span class="k">&lt;|end|&gt;</span>
+<span class="k">&lt;|start|&gt;</span>user<span class="k">&lt;|message|&gt;</span>What is 47 × 38?<span class="k">&lt;|end|&gt;</span>
+<span class="k">&lt;|start|&gt;</span>assistant<span class="c">  ← generation starts here</span>
+<span class="k">&lt;|channel|&gt;</span><span class="s">analysis</span><span class="k">&lt;|message|&gt;</span>47×38 = 47×40 − 47×2 = 1880 − 94 = 1786.<span class="k">&lt;|end|&gt;</span>
+<span class="k">&lt;|start|&gt;</span>assistant<span class="k">&lt;|channel|&gt;</span><span class="s">final</span><span class="k">&lt;|message|&gt;</span>1786<span class="k">&lt;|return|&gt;</span></code></pre>
+
+<p>Each <code>&lt;|…|&gt;</code> marker is a single special token in the <code>o200k_harmony</code> encoding (<code>&lt;|start|&gt;</code> = 200006, <code>&lt;|end|&gt;</code> = 200007, <code>&lt;|message|&gt;</code> = 200008, <code>&lt;|channel|&gt;</code> = 200005, <code>&lt;|return|&gt;</code> = 200002). The harmony spec gives the same history rule as Qwen3: drop previous chain-of-thought once a turn has ended with a <code>final</code> message, but keep it while the model is in the middle of tool calls. It also warns that the <code>analysis</code> channel is not trained to the same safety standard as <code>final</code> and should not be shown to end users.</p>
+
+<p>Qwen3's "no thinking" mode is a neat trick: with <code>enable_thinking=False</code> the chat template simply pre-fills an empty block, <code>&lt;think&gt;\n\n&lt;/think&gt;\n\n</code>, right after <code>assistant\n</code>. The model sees that thinking is already over and starts answering. The soft switches <code>/think</code> and <code>/no_think</code> in a user message do the same thing from inside the conversation, because the model was trained on data where those flags decide whether the think block is filled.</p>
+
+<h3>Commercial APIs: hidden, summarized, encrypted</h3>
+
+<p>Closed models generate the same kind of stream, but the API changes what you receive. Three mechanisms recur across vendors:</p>
+<ul>
+  <li><strong>Hidden raw thinking.</strong> OpenAI does not expose raw reasoning tokens at all. Anthropic's docs state that no setting returns the raw chain of thought. You pay for the thinking tokens either way.</li>
+  <li><strong>Summaries.</strong> You can ask for a readable summary instead: OpenAI <code>reasoning.summary</code> (<code>auto</code>, <code>concise</code>, <code>detailed</code>), Anthropic <code>thinking.display: "summarized"</code> (the default on newer Claude models is <code>"omitted"</code>, an empty block), Gemini <code>thinking_summaries: "auto"</code>. Anthropic notes the summary is written by a different model, and you are billed for the full thinking, not the summary. So the billed output can be much larger than what you see.</li>
+  <li><strong>Encrypted reasoning for round trips.</strong> In a tool-use loop the model must see its own earlier thinking when it resumes. The provider does not want to give you the plaintext, so it gives you an opaque ciphertext to send back: OpenAI's reasoning items carry <code>encrypted_content</code> (returned by default when <code>store</code> is false), Anthropic's thinking blocks carry a <code>signature</code> containing the encrypted full thinking, and Gemini returns <em>thought signatures</em>. The server decrypts it and splices the original thinking back into the prompt. You must pass these blocks back unchanged; Anthropic rejects modified thinking blocks with a 400 error.</li>
+</ul>
+
+<h3>Thinking between tool calls</h3>
+
+<p>Agents call tools in a loop (<a href="09-post-training.html">Chapter 9</a>). <strong>Interleaved thinking</strong> means the model can think again after each tool result, inside the same assistant turn, instead of planning everything up front. OpenAI's current reasoning models and Anthropic's adaptive-thinking models do this by default; older Claude models needed the <code>interleaved-thinking-2025-05-14</code> beta header.</p>
+
+<figure class="wide fig-tools">
+  <svg viewBox="0 0 1000 260" role="img" aria-label="Interleaved thinking: think, call a tool, receive the result, think again, answer, all in one assistant turn spanning two API calls">
+    <defs>
+      <marker id="ch10-arr-t" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#1d2433"/></marker>
+    </defs>
+    <g font-size="14" fill="#687084" text-anchor="middle" font-weight="700">
+      <text x="95" y="40">model</text><text x="300" y="40">model</text><text x="515" y="40">your code</text><text x="705" y="40">model</text><text x="895" y="40">model</text>
+    </g>
+    <g font-size="15" text-anchor="middle" fill="#1d2433">
+      <rect x="20" y="52" width="150" height="56" rx="8" fill="#efe9fb" stroke="#7b5cd6" stroke-width="1.5"/><text x="95" y="76" font-weight="800">thinking</text><text x="95" y="96" font-size="14">plan: run tests</text>
+      <rect x="200" y="52" width="200" height="56" rx="8" fill="#f3f1ec" stroke="#687084" stroke-width="1.5"/><text x="300" y="76" font-weight="800">tool call</text><text x="300" y="96" font-size="14" class="mono">run_tests()</text>
+      <rect x="430" y="52" width="170" height="56" rx="8" fill="#eaf1fd" stroke="#3d8bd4" stroke-width="1.5"/><text x="515" y="76" font-weight="800">tool result</text><text x="515" y="96" font-size="14">2 failed: auth.py</text>
+      <rect x="630" y="52" width="150" height="56" rx="8" fill="#efe9fb" stroke="#7b5cd6" stroke-width="1.5"/><text x="705" y="76" font-weight="800">thinking</text><text x="705" y="96" font-size="14">why it failed</text>
+      <rect x="810" y="52" width="170" height="56" rx="8" fill="#fff6d6" stroke="#e5b62b" stroke-width="2"/><text x="895" y="76" font-weight="800">answer / next call</text><text x="895" y="96" font-size="14">visible text</text>
+    </g>
+    <g stroke="#1d2433" stroke-width="1.8"><path d="M172 80 H192" marker-end="url(#ch10-arr-t)"/><path d="M402 80 H422" marker-end="url(#ch10-arr-t)"/><path d="M602 80 H622" marker-end="url(#ch10-arr-t)"/><path d="M782 80 H802" marker-end="url(#ch10-arr-t)"/></g>
+    <!-- API call brackets -->
+    <g stroke="#3a4254" stroke-width="1.5" fill="none">
+      <path d="M22 124 V132 H398 V124"/><path d="M432 124 V132 H978 V124"/>
+      <path d="M22 168 V176 H978 V168"/>
+    </g>
+    <g font-size="15" fill="#1d2433" text-anchor="middle">
+      <text x="210" y="154">API call 1 → stops with a tool call</text>
+      <text x="705" y="154">API call 2: history + thinking block + tool result</text>
+      <text x="500" y="200" font-weight="800">one assistant turn</text>
+    </g>
+    <text x="500" y="230" text-anchor="middle" font-size="15" fill="#ad2f2f">call 2 must include call 1's thinking block unchanged (encrypted), or the model loses its plan</text>
+  </svg>
+  <figcaption><span class="fig-label">Figure 10.11</span> — Interleaved thinking. From the API's point of view the tool result is an input message, but from the model's point of view it is the middle of one continuous turn. That is why all three providers insist the earlier thinking travels with the tool result.</figcaption>
+</figure>
+
+<aside class="callout warn"><div class="callout-title">Common misconception</div><p>"Thinking is free because I never see it." It is billed as output at the full output price, it occupies the context window (a request can hit <code>max_output_tokens</code> during thinking and return an empty answer that you still pay for), and on models that keep past thinking it is re-billed as input on every later turn.</p></aside>
+</section>
+
+<section>
+<h2>Effort controls in today's APIs</h2>
+
+<p><strong>The problem.</strong> One model serves both "classify this email" and "find the race condition in this kernel". Thinking 20,000 tokens on the first is waste; thinking 200 on the second is failure. Every major interface now exposes a knob for how much the model should think. The names differ, and so do the semantics: some are <em>soft</em> (a request the model was trained to honor approximately), some are <em>hard</em> (a limit enforced by the serving code).</p>
+
+<div class="table-wrap">
+<table class="data">
+  <tr><th>Interface</th><th>Knob</th><th>Values (model-dependent)</th><th>Soft or hard</th><th>How you see the thinking</th></tr>
+  <tr><td>OpenAI Responses API</td><td><code>reasoning.effort</code> (<code>reasoning_effort</code> in Chat Completions)</td><td><code>none</code>, <code>minimal</code>, <code>low</code>, <code>medium</code>, <code>high</code>, <code>xhigh</code>, <code>max</code>; default often <code>medium</code></td><td>soft; hard cap is <code>max_output_tokens</code></td><td>hidden; optional summary; <code>reasoning_tokens</code> in usage</td></tr>
+  <tr><td>Anthropic Messages API (current)</td><td><code>output_config.effort</code> + <code>thinking: {type: "adaptive"}</code></td><td><code>low</code>, <code>medium</code>, <code>high</code>, <code>xhigh</code>, <code>max</code>; default <code>high</code> on most models</td><td>soft ("a behavioral signal, not a strict token budget"); hard cap is <code>max_tokens</code></td><td>summarized or omitted thinking blocks with an encrypted <code>signature</code></td></tr>
+  <tr><td>Anthropic (legacy)</td><td><code>thinking: {type: "enabled", budget_tokens: N}</code></td><td><var>N</var> ≥ 1,024 and &lt; <code>max_tokens</code></td><td>a target, "not a strict cap"; rejected by Claude 4.7 and later</td><td>as above</td></tr>
+  <tr><td>Google Gemini</td><td><code>thinking_level</code> (Gemini 2.5 used a numeric <code>thinkingBudget</code>)</td><td><code>minimal</code>, <code>low</code>, <code>medium</code>, <code>high</code>; dynamic by default</td><td>soft; hard cap is <code>max_output_tokens</code></td><td>thought summaries, thought signatures, <code>total_thought_tokens</code></td></tr>
+  <tr><td>Qwen3 (open weights)</td><td><code>enable_thinking</code> in the chat template; <code>/think</code>, <code>/no_think</code> in messages</td><td>on / off, plus any budget your server enforces</td><td>on/off is trained; budget is hard (you cut it)</td><td>raw <code>&lt;think&gt;</code> text</td></tr>
+  <tr><td>gpt-oss (open weights)</td><td><code>Reasoning: low|medium|high</code> in the system message</td><td><code>low</code>, <code>medium</code> (default), <code>high</code></td><td>soft (trained)</td><td>raw <code>analysis</code> channel</td></tr>
+</table>
+</div>
+
+<p>Three details matter in practice. First, the levels are <strong>not portable</strong>: Anthropic's docs warn that a level on one model does not produce the same amount of thinking as the same level on another, and OpenAI's supported values and defaults change per model. Second, modern effort settings are <strong>adaptive</strong>: OpenAI says models "reason adaptively across reasoning efforts, using fewer tokens for simpler tasks", and Anthropic's adaptive thinking may skip thinking entirely on easy inputs at lower effort. Effort sets a posture, not a token count. Third, effort can affect <strong>more than thinking</strong>: Anthropic applies it to all output, so lower effort also means fewer and terser tool calls.</p>
+
+<figure class="wide fig-dial">
+  <svg viewBox="0 0 1000 430" role="img" aria-label="An effort dial from none to max mapped to illustrative thinking-token budgets on a log scale, plus real gpt-oss accuracy per reasoning level">
+    <!-- dial -->
+    <g fill="none" stroke-width="26" stroke-linecap="butt">
+      <path d="M92.0 250.0 A158 158 0 0 1 113.2 171.0" stroke="#2f9e6e"/>
+      <path d="M113.2 171.0 A158 158 0 0 1 171.0 113.2" stroke="#6fae5a"/>
+      <path d="M171.0 113.2 A158 158 0 0 1 250.0 92.0" stroke="#b9b23f"/>
+      <path d="M250.0 92.0 A158 158 0 0 1 329.0 113.2" stroke="#e5b62b"/>
+      <path d="M329.0 113.2 A158 158 0 0 1 386.8 171.0" stroke="#e3893a"/>
+      <path d="M386.8 171.0 A158 158 0 0 1 408.0 250.0" stroke="#d64545"/>
+    </g>
+    <g stroke="#1d2433" stroke-width="2">
+      <line x1="112.0" y1="250.0" x2="74.0" y2="250.0"/><line x1="130.5" y1="181.0" x2="97.6" y2="162.0"/><line x1="181.0" y1="130.5" x2="162.0" y2="97.6"/>
+      <line x1="250.0" y1="112.0" x2="250.0" y2="74.0"/><line x1="319.0" y1="130.5" x2="338.0" y2="97.6"/><line x1="369.5" y1="181.0" x2="402.4" y2="162.0"/><line x1="388.0" y1="250.0" x2="426.0" y2="250.0"/>
+    </g>
+    <g font-size="15" font-weight="700" fill="#1d2433">
+      <text x="58" y="255" text-anchor="end">none</text>
+      <text x="80" y="154" text-anchor="end">minimal</text>
+      <text x="152" y="80" text-anchor="end">low</text>
+      <text x="250" y="52" text-anchor="middle">medium</text>
+      <text x="348" y="80">high</text>
+      <text x="420" y="154">xhigh</text>
+      <text x="442" y="255">max</text>
+    </g>
+    <line x1="250" y1="250" x2="250" y2="122" stroke="#1d2433" stroke-width="5" stroke-linecap="round">
+      <animateTransform attributeName="transform" type="rotate" values="-30 250 250;-30 250 250;0 250 250;0 250 250;30 250 250;30 250 250;-30 250 250" keyTimes="0;0.15;0.3;0.45;0.6;0.8;1" dur="12s" repeatCount="indefinite"/>
+    </line>
+    <circle cx="250" cy="250" r="13" fill="#1d2433"/>
+    <g font-size="15" fill="#3a4254" text-anchor="middle">
+      <text x="250" y="292">turning right: more thinking tokens,</text>
+      <text x="250" y="312">more latency, more KV cache, more cost,</text>
+      <text x="250" y="332">usually higher accuracy on hard prompts</text>
+    </g>
+
+    <!-- token budget bars -->
+    <text x="740" y="30" text-anchor="middle" font-size="16" font-weight="800" fill="#1d2433">Thinking tokens on a hard prompt</text>
+    <text x="740" y="50" text-anchor="middle" font-size="14" font-weight="700" fill="#ad2f2f">ILLUSTRATIVE ORDERS OF MAGNITUDE</text>
+    <g stroke="#ece8df"><line x1="670" y1="74" x2="670" y2="318"/><line x1="740" y1="74" x2="740" y2="318"/><line x1="810" y1="74" x2="810" y2="318"/><line x1="880" y1="74" x2="880" y2="318"/></g>
+    <g font-size="15" font-weight="700" fill="#1d2433" text-anchor="end">
+      <text x="590" y="101">none</text><text x="590" y="135">minimal</text><text x="590" y="169">low</text><text x="590" y="203">medium</text><text x="590" y="237">high</text><text x="590" y="271">xhigh</text><text x="590" y="305">max</text>
+    </g>
+    <g>
+      <rect x="600" y="152" width="140" height="24" rx="3" fill="#b9b23f"/>
+      <rect x="600" y="118" width="70" height="24" rx="3" fill="#6fae5a"/>
+      <rect x="600" y="186" width="182" height="24" rx="3" fill="#e5b62b"/>
+      <rect x="600" y="220" width="222" height="24" rx="3" fill="#e3893a"/>
+      <rect x="600" y="254" width="252" height="24" rx="3" fill="#d6603f"/>
+      <rect x="600" y="288" width="280" height="24" rx="3" fill="#d64545"/>
+    </g>
+    <g font-size="14" fill="#3a4254">
+      <text x="604" y="101">0 (no thinking block)</text>
+      <text x="678" y="135">~100</text><text x="748" y="169">~1,000</text><text x="790" y="203">~4,000</text>
+      <text x="830" y="237">~15,000</text><text x="860" y="271">~40,000</text><text x="888" y="305">100,000+</text>
+    </g>
+    <line x1="600" y1="318" x2="880" y2="318" stroke="#1d2433" stroke-width="1.5"/>
+    <g font-size="14" fill="#687084" text-anchor="middle">
+      <text x="600" y="336">10</text><text x="670" y="336">100</text><text x="740" y="336">1k</text><text x="810" y="336">10k</text><text x="880" y="336">100k</text>
+    </g>
+
+    <!-- real data strip -->
+    <rect x="20" y="356" width="960" height="62" rx="8" fill="#e9f6f0" stroke="#2f9e6e"/>
+    <text x="36" y="380" font-size="15" font-weight="800" fill="#1f7a53">Real data, gpt-oss-120b model card (no tools):</text>
+    <text x="36" y="404" font-size="15" fill="#1d2433" class="pre">AIME 2025: low 50.4% · medium 80.0% · high 92.5%      GPQA Diamond: low 67.1% · medium 73.1% · high 80.1%</text>
+  </svg>
+  <figcaption><span class="fig-label">Figure 10.12</span> — The effort dial. Vendors do not publish fixed token counts per level, and adaptive models spend far less on easy prompts; the bars only convey that each step is a multiplicative jump. The green strip shows real accuracies for the three levels of one open model.</figcaption>
+</figure>
+
+<p>The gpt-oss numbers show what a level buys on hard math: about 30 points from low to medium and 12 more from medium to high on AIME 2025. On GPQA (graduate science questions, more knowledge than search) the steps are 6 and 7 points. The model card summarizes it as "log-linear returns on most tasks, where longer CoTs provide higher accuracy at a relatively large increase in final response latency and cost."</p>
+</section>
+
+<section>
+<h2>How effort is implemented</h2>
+
+<p>An effort setting has to turn into a different number of generated tokens. There are four mechanisms, and real systems combine them.</p>
+
+<h3>1. Conditioning: effort is text in the prompt</h3>
+
+<p>The simplest and most common mechanism: the effort level is rendered into the context as tokens, and the model was trained to behave differently depending on those tokens. gpt-oss is explicit about it: the model card says the three levels "are configured in the system prompt by inserting keywords such as <code>Reasoning: low</code>" and that the models were trained to support them. Anthropic's docs say the resolved effort value (and the legacy <code>budget_tokens</code>) "is rendered into the prompt", which is exactly why changing it between requests breaks the prompt cache: the prefix tokens changed (<a href="12-kv-cache.html">Chapter 12</a>). Qwen3's <code>/think</code> and <code>/no_think</code> flags work the same way.</p>
+
+<p>How is a model trained to respect such a tag? The vendors do not publish details, but the general approach is straightforward: during RL, sample the effort tag along with the prompt, and make the reward depend on both correctness and length relative to what that tag allows (for example, a penalty for exceeding a target length at low effort). The model learns a conditional policy: a different length distribution per tag. Because this is learned behavior, it is approximate. That is why every vendor calls effort "soft".</p>
+
+<h3>2. Budget forcing: the serving loop edits the stream</h3>
+
+<p>The second mechanism needs no training at all. The decode loop counts thinking tokens and intervenes at the token level. The s1 paper (2025) named it <em>budget forcing</em>:</p>
+<ul>
+  <li><strong>To cap thinking:</strong> when the count reaches the budget, append the end-of-thinking delimiter yourself (and optionally a phrase like "Final Answer:"). The model, seeing its thinking is over, writes the answer. Qwen3 documents its own version: insert <em>"Considering the limited time by the user, I have to give the solution based on the thinking directly now.\n&lt;/think&gt;.\n\n"</em>.</li>
+  <li><strong>To extend thinking:</strong> when the model tries to emit the end-of-thinking delimiter too early, suppress it and append <em>"Wait"</em> instead. The model, reading "Wait", re-examines its work. s1-32B went from 50% to 57% on AIME 2024 this way.</li>
+</ul>
+
+<figure class="stepper wide fig-force" data-steps="4" data-interval="3600">
+  <svg viewBox="0 0 1000 440" role="img" aria-label="Budget forcing in a decode loop: suppressing an early end-of-thinking with Wait, forcing end-of-thinking at the maximum budget, then the answer">
+    <text x="20" y="26" font-size="16" font-weight="800" fill="#1d2433">One response, positions 0 → 2,400 tokens</text>
+    <rect x="60" y="44" width="880" height="40" rx="6" fill="#f3f1ec" stroke="#ddd8ce"/>
+    <rect class="fill" x="60" y="44" width="733" height="40" rx="6" fill="#efe9fb" stroke="#7b5cd6" stroke-width="1.5"/>
+    <text x="70" y="69" font-size="15" class="mono" fill="#5a3fb3" font-weight="700">&lt;think&gt; …</text>
+    <!-- markers -->
+    <g stroke-width="2">
+      <line x1="427" y1="38" x2="427" y2="92" stroke="#2f9e6e" stroke-dasharray="5 3"/>
+      <line x1="793" y1="38" x2="793" y2="92" stroke="#d64545" stroke-dasharray="5 3"/>
+      <line x1="940" y1="38" x2="940" y2="92" stroke="#1d2433"/>
+    </g>
+    <g font-size="14" font-weight="700" text-anchor="middle">
+      <text x="427" y="110" fill="#1f7a53">min budget 1,000</text>
+      <text x="793" y="110" fill="#ad2f2f">max budget 2,000</text>
+      <text x="925" y="110" fill="#1d2433">max_tokens</text>
+    </g>
+    <g data-step-only="1"><text x="300" y="141" font-size="15" text-anchor="middle" fill="#5a3fb3" font-weight="700">thinking: 600 tokens so far</text></g>
+    <g data-step-only="2">
+      <line x1="317" y1="40" x2="317" y2="90" stroke="#d64545" stroke-width="3"/>
+      <rect x="276" y="122" width="82" height="28" rx="6" fill="#fbefc5" stroke="#e5b62b" stroke-width="2"/>
+      <text x="317" y="141" text-anchor="middle" font-size="15" class="mono" font-weight="700" fill="#1d2433">Wait</text>
+      <text x="370" y="141" font-size="15" fill="#1d2433">forced at token 700 (below the minimum)</text>
+    </g>
+    <g data-step="3">
+      <rect x="752" y="122" width="88" height="28" rx="6" fill="#efe9fb" stroke="#7b5cd6" stroke-width="2"/>
+      <text x="796" y="141" text-anchor="middle" font-size="15" class="mono" font-weight="700" fill="#1d2433">&lt;/think&gt;</text>
+    </g>
+    <g data-step-only="3"><text x="740" y="141" text-anchor="end" font-size="15" fill="#1d2433">forced at 2,000</text></g>
+    <g data-step="4">
+      <rect x="793" y="44" width="66" height="40" fill="#fbefc5" stroke="#e5b62b" stroke-width="1.5"/>
+      <text x="826" y="69" text-anchor="middle" font-size="14" font-weight="700" fill="#1d2433">answer</text>
+    </g>
+
+    <!-- logits panel -->
+    <g data-step-only="2">
+      <text x="20" y="190" font-size="15" font-weight="800" fill="#1d2433">Next-token probabilities at position 700 (illustrative)</text>
+      <g font-size="15" class="mono" text-anchor="end" fill="#1d2433">
+        <text x="150" y="226">&lt;/think&gt;</text><text x="150" y="260">\n\n</text><text x="150" y="294">So</text><text x="150" y="328">Therefore</text><text x="150" y="362">Wait</text>
+      </g>
+      <rect x="160" y="210" width="270" height="22" rx="3" fill="#f6d5d5" stroke="#d64545"/>
+      <line x1="160" y1="221" x2="430" y2="221" stroke="#d64545" stroke-width="3"/>
+      <rect x="160" y="244" width="46" height="22" rx="3" fill="#9aa1b1"/>
+      <rect x="160" y="278" width="30" height="22" rx="3" fill="#9aa1b1"/>
+      <rect x="160" y="312" width="11" height="22" rx="3" fill="#9aa1b1"/>
+      <rect x="160" y="346" width="8" height="22" rx="3" fill="#e5b62b"/>
+      <g font-size="14" fill="#3a4254">
+        <text x="440" y="226" fill="#ad2f2f" font-weight="700">0.71 → masked (logit = −∞)</text>
+        <text x="214" y="260">0.12</text><text x="198" y="294">0.08</text><text x="179" y="328">0.03</text>
+        <text x="176" y="362">0.02, but appended by the server, not sampled</text>
+      </g>
+    </g>
+    <!-- rule panel -->
+    <rect x="20" y="390" width="960" height="40" rx="8" fill="#f3f1ec" stroke="#ddd8ce"/>
+    <text x="36" y="415" class="mono pre" font-size="14" fill="#1d2433">if n &lt; MIN and wants END_THINK: emit "Wait"     if n ≥ MAX: emit END_THINK     always stop at max_tokens</text>
+    <g data-step-only="1" font-size="15" fill="#1d2433">
+      <text x="20" y="200" font-weight="800">The serving loop counts tokens since &lt;think&gt;.</text>
+      <text x="20" y="226">Below the minimum, it will refuse to let thinking end.</text>
+      <text x="20" y="252">Above the maximum, it will end thinking itself.</text>
+      <text x="20" y="278">In between, the model decides.</text>
+    </g>
+    <g data-step-only="3" font-size="15" fill="#1d2433">
+      <text x="20" y="200" font-weight="800">At the max budget the server does not ask the model.</text>
+      <text x="20" y="226">It appends the end-of-thinking token (Qwen3 appends a whole sentence ending in &lt;/think&gt;).</text>
+      <text x="20" y="252">The model's next forward pass sees a closed think block and starts the answer.</text>
+      <text x="20" y="278">Whatever the model was in the middle of is cut off: it answers from partial work.</text>
+    </g>
+    <g data-step-only="4" font-size="15" fill="#1d2433">
+      <text x="20" y="200" font-weight="800">The answer phase is ordinary decoding until an end-of-turn token.</text>
+      <text x="20" y="226">max_tokens (max_output_tokens) is the only true hard limit and counts thinking + answer.</text>
+      <text x="20" y="252" fill="#ad2f2f">If max_tokens arrives while still thinking: no answer at all, and the thinking is still billed.</text>
+      <text x="20" y="278">Commercial APIs report this as status "incomplete" or stop_reason "max_tokens".</text>
+    </g>
+  </svg>
+  <div class="step-captions">
+    <p data-step-only="1"><b>Counting.</b> Budget forcing is a few lines in the sampler. It needs the token IDs of the thinking delimiters and a counter.</p>
+    <p data-step-only="2"><b>Too early.</b> At token 700 the model's most likely next token is <code>&lt;/think&gt;</code>. The sampler sets that logit to −∞ (see <a href="14-sampling.html">Chapter 14</a> for logit masking) and appends "Wait". The model reads "Wait" and keeps checking.</p>
+    <p data-step-only="3"><b>Too long.</b> At 2,000 thinking tokens the server appends <code>&lt;/think&gt;</code> itself, whatever the model wanted.</p>
+    <p data-step-only="4"><b>The answer.</b> Normal decoding until <code>&lt;|im_end|&gt;</code>. Only <code>max_tokens</code> is absolute, and it includes the thinking.</p>
+  </div>
+  <figcaption><span class="fig-label">Figure 10.13</span> — Budget forcing as done by s1 and Qwen3's thinking budget. Budgets and probabilities are illustrative. This is a hard control on length, but cutting the model off mid-thought costs accuracy compared with a model that learned to be brief.</figcaption>
+</figure>
+
+<p>In code, the whole mechanism is a wrapper around the ordinary decode loop:</p>
+
+<pre><code><span class="k">def</span> <span class="f">generate_with_budget</span>(model, prompt_ids, min_think, max_think, max_tokens):
+    out, n_think, thinking = [], <span class="n">0</span>, <span class="k">True</span>      <span class="c"># prompt already ends in "&lt;think&gt;\n"</span>
+    kv = model.<span class="f">prefill</span>(prompt_ids)                  <span class="c"># Chapter 11</span>
+    <span class="k">while</span> <span class="f">len</span>(out) &lt; max_tokens:
+        logits = model.<span class="f">decode_step</span>(kv)               <span class="c"># one forward pass</span>
+        <span class="k">if</span> thinking <span class="k">and</span> n_think &gt;= max_think:
+            forced = tok(<span class="s">"\n&lt;/think&gt;\n\n"</span>)                <span class="c"># too long: hard stop</span>
+        <span class="k">elif</span> thinking <span class="k">and</span> n_think &lt; min_think <span class="k">and</span> <span class="f">argmax</span>(logits) == END_THINK:
+            forced = tok(<span class="s">" Wait"</span>)                         <span class="c"># too early: extend</span>
+        <span class="k">else</span>:
+            <span class="k">if</span> thinking <span class="k">and</span> n_think &lt; min_think:
+                logits[END_THINK] = -<span class="f">float</span>(<span class="s">"inf"</span>)      <span class="c"># never sample a stop yet</span>
+            forced = [<span class="f">sample</span>(logits)]                    <span class="c"># normal path (Chapter 14)</span>
+        <span class="k">for</span> t <span class="k">in</span> forced:                                 <span class="c"># append + extend KV cache</span>
+            out.<span class="f">append</span>(t); model.<span class="f">feed</span>(kv, t)
+            <span class="k">if</span> t == END_THINK: thinking = <span class="k">False</span>
+            <span class="k">elif</span> thinking: n_think += <span class="n">1</span>
+            <span class="k">if</span> t == END_OF_TURN: <span class="k">return</span> out
+    <span class="k">return</span> out                                          <span class="c"># truncated: "incomplete"</span></code></pre>
+
+<p>Note what the forced tokens cost: each one still goes through a forward pass to extend the KV cache (it is just not <em>sampled</em>). Forcing a 30-token sentence like Qwen3's costs 30 decode steps, or one small prefill if the engine batches them.</p>
+
+<h3>3. Hard caps: max_tokens</h3>
+
+<p><code>max_tokens</code> (Anthropic), <code>max_output_tokens</code> (OpenAI, Gemini) is the crudest control: generation simply stops. It is the only limit every provider guarantees, and it counts thinking and answer together. OpenAI's guide warns that a response can end with status <code>incomplete</code> before any visible text and recommends reserving at least 25,000 tokens for reasoning and output when you start. Use it as a safety net for cost, not as an effort control.</p>
+
+<h3>4. Adaptive thinking: the model decides</h3>
+
+<p>The newest mechanism moves the decision into the model. Qwen3's "thinking mode fusion" stage trained one model on a mix of samples with full think blocks and samples with empty ones, so the same weights can do both; the Qwen3 report notes that the ability to answer from <em>incomplete</em> thinking, which their budget mechanism relies on, emerged from this mix without being trained directly. Commercial adaptive modes (Anthropic's <code>type: "adaptive"</code>, Gemini's dynamic thinking, OpenAI's adaptive reasoning within an effort level) go further: the model judges each request's difficulty and may emit no thinking block at all. Effort then sets the threshold: at <code>low</code> it skips thinking on most easy prompts, at <code>max</code> it thinks readily and deeply. Anthropic also notes that in a tool loop the first request after new user input usually carries most of the reasoning, and later requests that only process tool results may skip it.</p>
+
+<aside class="callout intuition"><div class="callout-title">Intuition: four layers of control</div><p>Think of a process scheduler. Prompt conditioning is the <code>nice</code> value: a hint the process was written to respect. Adaptive thinking is the process deciding how long to run based on its workload. Budget forcing is a supervisor that sends signals at fixed points ("not yet", "stop now"). <code>max_tokens</code> is <code>SIGKILL</code>.</p></aside>
+
+<p>One more knob is orthogonal to all of this: <strong>parallel effort</strong>. OpenAI's <code>reasoning.mode: "pro"</code> (on GPT-5.6 and GPT-6 models) "performs more model work" for the same effort level and bills all of those tokens. The documentation does not describe the method; sampling several candidates and combining them is the classic way to spend extra compute without adding latency (the parallel axis of Figure 10.4).</p>
+</section>
+
+<section>
+<h2>What thinking costs</h2>
+
+<p>Thinking tokens are output tokens in every sense that matters to the machine: one decode step each, 128 KiB of KV cache each (for our 8B model), and output-token pricing. Work through one request on the running model to see the size of each effect.</p>
+
+<aside class="callout math"><div class="callout-title">Worked example: Llama 3.1 8B, one H100, batch 1</div>
+<p>A 500-token prompt, a 300-token visible answer, and either no thinking or 4,000 thinking tokens. Decode runs at the ≈ 209 tok/s bandwidth ceiling (<a href="11-inference.html">Chapter 11</a>); prefill of 500 tokens is ≈ 8 TFLOP, about 0.02 s. Price is an illustrative $10 per million output tokens (real prices: <a href="15-serving.html">Chapter 15</a>).</p>
+</aside>
+
+<div class="table-wrap">
+<table class="data">
+  <tr><th></th><th class="num">No thinking</th><th class="num">4,000 thinking tokens</th><th>Why</th></tr>
+  <tr><td>Billed output tokens</td><td class="num">300</td><td class="num">4,300</td><td>thinking is output (14.3×)</td></tr>
+  <tr><td>Time to first <em>visible</em> token</td><td class="num">≈ 0.02 s</td><td class="num">≈ 19.2 s</td><td>0.02 + 4,000 / 209</td></tr>
+  <tr><td>Total time</td><td class="num">≈ 1.5 s</td><td class="num">≈ 20.6 s</td><td>0.02 + 4,300 / 209</td></tr>
+  <tr><td>Decode FLOPs</td><td class="num">≈ 4.9 TFLOP</td><td class="num">≈ 75 TFLOP</td><td>≈ 16.06 GFLOP per token + attention</td></tr>
+  <tr><td>KV cache at the end</td><td class="num">100 MiB</td><td class="num">600 MiB</td><td>(500 + output) × 128 KiB</td></tr>
+  <tr><td>Concurrent sequences in ~60 GB of KV space</td><td class="num">≈ 572</td><td class="num">≈ 95</td><td>60 × 10<sup>9</sup> B ÷ 131,072 B = 457,764 tokens</td></tr>
+  <tr><td>Cost at $10 / M output</td><td class="num">$0.003</td><td class="num">$0.043</td><td>4,300 × 10 / 10<sup>6</sup></td></tr>
+</table>
+</div>
+
+<p>Three consequences follow. <strong>Latency:</strong> the user waits for the whole hidden chain before the first visible word, which is why streaming summaries or short "preambles" before deep thinking exist. <strong>Capacity:</strong> long chains hold KV-cache blocks for longer, so a server fits about 6× fewer concurrent reasoning requests and its throughput per GPU drops (<a href="12-kv-cache.html">Chapter 12</a>, <a href="15-serving.html">Chapter 15</a>). <strong>Multi-turn growth:</strong> on models that keep past thinking, those 4,000 tokens become input on every later turn (cheaper if prompt-cached, but still context).</p>
+
+<div class="widget wide" id="ch10-sim">
+  <div class="widget-title">Try it: effort simulator <span class="badge-ill">accuracy is illustrative</span></div>
+  <div class="sim-grid">
+    <label>Effort level <input type="range" id="ch10-eff" min="0" max="6" step="1" value="3"> <span class="readout" id="ch10-eff-out">medium</span></label>
+    <label>Task difficulty
+      <select id="ch10-diff"><option value="0">easy (lookup, rewrite)</option><option value="1" selected>medium (multi-step)</option><option value="2">hard (competition math)</option></select>
+    </label>
+    <label>Decode speed <input type="range" id="ch10-tps" min="20" max="400" step="10" value="100"> <span class="readout" id="ch10-tps-out">100 tok/s</span></label>
+    <label>Price, $ per 1M output tokens <input type="number" id="ch10-price" min="0" step="0.5" value="10"></label>
+    <label>Visible answer tokens <input type="range" id="ch10-ans" min="50" max="2000" step="50" value="300"> <span class="readout" id="ch10-ans-out">300</span></label>
+    <label>Prompt tokens <input type="range" id="ch10-prompt" min="100" max="20000" step="100" value="1000"> <span class="readout" id="ch10-prompt-out">1,000</span></label>
+  </div>
+  <div class="sim-row">
+    <div id="ch10-chart"></div>
+    <table class="res" id="ch10-res"></table>
+  </div>
+  <div class="tl" id="ch10-tl"></div>
+  <div class="legend"><span><i style="background:#c9cfdc"></i>time to first token (prefill + queue, fixed 0.5 s)</span><span><i style="background:#b9a6ec"></i>hidden thinking</span><span><i style="background:#f1d57a"></i>visible answer</span></div>
+  <div class="note">Thinking-token counts per level and the accuracy curves are made up to show the shape of the trade-off (log-like gains, adaptive spending: easy tasks use about 6% and medium tasks about 30% of the hard-task budget; tiny budgets on easy tasks are skipped entirely). Time, cost and KV memory are computed exactly from the token counts. KV memory uses Llama 3.1 8B in BF16 (128 KiB per token).</div>
+</div>
+</section>
+
+<section>
+<h2>How reasoning fails</h2>
+
+<p>Reasoning models fail in ways that ordinary chat models do not. Knowing the patterns tells you what to watch in logs and evals.</p>
+
+<ul>
+  <li><strong>Overthinking.</strong> Spending thousands of tokens on "what is 2 + 3?", re-verifying an answer that was right the first time. A <a href="https://arxiv.org/abs/2412.21187">2024 study of o1-like models</a> named the problem and measured large token waste on easy questions. It hurts cost and latency, rarely accuracy. Fix: lower effort, adaptive thinking.</li>
+  <li><strong>Truncation.</strong> Hitting <code>max_tokens</code> during thinking. The visible answer is empty or cut off and the tokens are still billed. Fix: a generous <code>max_tokens</code>, lower effort, or a server-side budget that forces an answer.</li>
+  <li><strong>Repetition loops.</strong> Long chains under greedy decoding can fall into cycles ("Wait, let me re-check… Wait, let me re-check…"). Qwen3's model card says explicitly not to use greedy decoding in thinking mode; use the vendor's recommended sampling settings (<a href="14-sampling.html">Chapter 14</a>).</li>
+  <li><strong>Unfaithful chains of thought.</strong> The visible reasoning is not guaranteed to be the reasoning that produced the answer. Anthropic researchers planted hints in prompts (for example, a note that a professor thinks the answer is C) and checked whether models that used the hint said so. Claude 3.7 Sonnet mentioned the hint 25% of the time and DeepSeek-R1 39% of the time; unfaithful chains were on average <em>longer</em> than faithful ones. With commercial APIs there is a second layer: the text you see is a summary written by another model.</li>
+  <li><strong>Reward hacking.</strong> RL optimizes the reward, not your intent. With unit-test rewards a model can learn to special-case the tests; with a neural reward model it can learn to please the grader. This is why R1 avoided neural rewards for reasoning, and why chain-of-thought monitoring (reading the thinking during training to spot hacking) is an active safety topic; a 2025 position paper argues that this <a href="https://arxiv.org/abs/2507.11473">monitorability</a> is valuable and fragile.</li>
+  <li><strong>Narrow skills.</strong> RL on math and code does not automatically help writing or instruction-following. R1-Zero scored 46.6% on IF-Eval; the full R1 pipeline with SFT and general RL raised it to 83.3%. R1-Zero also mixed English and Chinese mid-chain.</li>
+</ul>
+
+<aside class="callout warn"><div class="callout-title">Common misconception</div><p>"The chain of thought is the model's explanation." It is generated text that helped the model reach an answer, shaped by a reward that looked only at the answer. It is often informative and sometimes misleading. Treat it as a debugging aid, not as a proof or an audit log.</p></aside>
+</section>
+
+<section>
+<h2>Choosing an effort level</h2>
+
+<p>Start from the workload, then measure. A sensible default table:</p>
+
+<div class="table-wrap">
+<table class="data">
+  <tr><th>Workload</th><th>Start at</th><th>Reason</th></tr>
+  <tr><td>Classification, extraction, routing, autocomplete, voice</td><td><code>none</code> / <code>minimal</code> / <code>low</code></td><td>latency-bound; the answer is one short step</td></tr>
+  <tr><td>Chat, drafting, summarization, simple Q&amp;A</td><td><code>low</code> / <code>medium</code></td><td>some planning helps; long chains mostly add delay</td></tr>
+  <tr><td>Agentic coding, multi-step tool use, data analysis</td><td><code>medium</code> / <code>high</code></td><td>planning and recovering from tool errors pay off</td></tr>
+  <tr><td>Hard math, proofs, deep debugging, research, long agent runs</td><td><code>high</code> / <code>xhigh</code> / <code>max</code></td><td>accuracy still rising with tokens; run asynchronously if you can</td></tr>
+</table>
+</div>
+
+<ol>
+  <li><strong>Sweep, do not guess.</strong> Run your eval set at two or three levels and plot accuracy against cost and latency. Levels are recalibrated between model versions, so redo it when you switch models.</li>
+  <li><strong>Lower effort before prompt tricks.</strong> Effort is a trained, calibrated control; "answer briefly, do not deliberate" in the prompt is wording-sensitive.</li>
+  <li><strong>Size <code>max_tokens</code> for thinking plus answer.</strong> It is the only hard cap. Too small and you pay for truncated thoughts with no answer.</li>
+  <li><strong>Keep effort stable inside a cached conversation.</strong> The request-level setting is part of the prompt prefix; changing it restarts the cache. Some newer models accept a per-message effort change (Anthropic, beta) that keeps the cached prefix.</li>
+  <li><strong>Prefer parallel compute when you have a verifier.</strong> If you can check answers (tests, a solver), several medium-effort samples plus a check often beat one max-effort chain, at lower latency.</li>
+  <li><strong>Watch the usage fields.</strong> <code>reasoning_tokens</code> / <code>thinking_tokens</code> / <code>total_thought_tokens</code> tell you what you actually paid for.</li>
+</ol>
+
+<aside class="callout key"><div class="callout-title">Key takeaway</div><p>A reasoning model buys accuracy with tokens. Every effort level is a point on a curve where each extra 10× of thinking costs 10× in output tokens, latency and KV-cache time, and returns a shrinking gain. Pick the point per workload, verify it with evals, and remember that the thinking you do not see is still on the bill.</p></aside>
+</section>
+
+<section>
+<h2>Further reading</h2>
+<ul>
+  <li>DeepSeek-AI, <a href="https://arxiv.org/abs/2501.12948">DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning</a> (2025, extended 2026). R1-Zero, GRPO details, the multi-stage pipeline, distillation, failed attempts.</li>
+  <li>Shao et al., <a href="https://arxiv.org/abs/2402.03300">DeepSeekMath</a> (2024). Where GRPO was introduced.</li>
+  <li>OpenAI, <a href="https://openai.com/index/learning-to-reason-with-llms/">Learning to reason with LLMs</a> (2024). The o1 announcement: train-time and test-time compute scaling.</li>
+  <li>Muennighoff et al., <a href="https://arxiv.org/abs/2501.19393">s1: Simple test-time scaling</a> (2025). 1,000 examples and budget forcing.</li>
+  <li>Lightman et al., <a href="https://arxiv.org/abs/2305.20050">Let's Verify Step by Step</a> (2023). Process vs outcome supervision, PRM800K.</li>
+  <li>Wang et al., <a href="https://arxiv.org/abs/2203.11171">Self-Consistency Improves Chain of Thought Reasoning</a> (2022).</li>
+  <li>Snell et al., <a href="https://arxiv.org/abs/2408.03314">Scaling LLM Test-Time Compute Optimally</a> (2024).</li>
+  <li>Li et al., <a href="https://arxiv.org/abs/2402.12875">Chain of Thought Empowers Transformers to Solve Inherently Serial Problems</a> (2024). The depth argument, formally.</li>
+  <li>Chen et al., <a href="https://arxiv.org/abs/2505.05410">Reasoning Models Don't Always Say What They Think</a> (2025). CoT faithfulness measurements.</li>
+  <li>Qwen Team, <a href="https://arxiv.org/abs/2505.09388">Qwen3 Technical Report</a> (2025). Thinking mode fusion, thinking budgets, strong-to-weak distillation.</li>
+  <li>OpenAI, <a href="https://cookbook.openai.com/articles/openai-harmony">The harmony response format</a>, and the <a href="https://arxiv.org/abs/2508.10925">gpt-oss model card</a>. Channels, reasoning levels, per-level results.</li>
+  <li>Vendor docs on effort: <a href="https://platform.openai.com/docs/guides/reasoning">OpenAI reasoning models</a>, <a href="https://docs.claude.com/docs/en/build-with-claude/effort">Anthropic effort</a> and <a href="https://docs.claude.com/en/docs/build-with-claude/extended-thinking">extended thinking</a>, <a href="https://ai.google.dev/gemini-api/docs/thinking">Gemini thinking</a>.</li>
+</ul>
+</section>
+
+<footer id="chapter-nav"></footer>
+</main>
+</div>
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+  /* ---------- effort simulator (illustrative model) ---------- */
+  var LEVELS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+  var BUDGET = [0, 120, 1000, 4000, 15000, 40000, 100000];      // thinking tokens on a hard prompt (illustrative)
+  var MULT = [0.06, 0.3, 1.0];                                     // adaptive spending by difficulty
+  var CURVE = [                                                    // acc = lo + (hi-lo) * sigmoid((log10(T+10) - c) / w)
+    { name: "easy", lo: 0.88, hi: 0.985, c: 1.6, w: 0.3, color: "#2f9e6e" },
+    { name: "medium", lo: 0.45, hi: 0.93, c: 2.6, w: 0.35, color: "#e3893a" },
+    { name: "hard", lo: 0.04, hi: 0.82, c: 3.7, w: 0.4, color: "#d64545" }
+  ];
+  var KV_PER_TOKEN = 131072, TTFT = 0.5;
+  var $ = function (id) { return document.getElementById("ch10-" + id); };
+  var eff = $("eff"), diff = $("diff"), tps = $("tps"), price = $("price"), ans = $("ans"), prompt = $("prompt");
+  if (!eff) return;
+
+  function thinkTokens(level, d) {
+    var t = Math.round(BUDGET[level] * MULT[d]);
+    return t < 50 ? 0 : t;                      // adaptive: tiny budgets on easy prompts are skipped
+  }
+  function acc(T, d) {
+    var c = CURVE[d], z = (Math.log10(T + 10) - c.c) / c.w;
+    return c.lo + (c.hi - c.lo) / (1 + Math.exp(-z));
+  }
+  function fmtInt(n) { return Math.round(n).toLocaleString("en-US"); }
+  function fmtTime(s) { return s < 10 ? s.toFixed(2) + " s" : s < 120 ? s.toFixed(1) + " s" : (s / 60).toFixed(1) + " min"; }
+  function fmtUsd(x) { return x < 0.01 ? "$" + x.toFixed(4) : x < 1 ? "$" + x.toFixed(3) : "$" + x.toFixed(2); }
+
+  var NS = "http://www.w3.org/2000/svg";
+  function mk(tag, attrs, text) {
+    var n = document.createElementNS(NS, tag);
+    for (var k in attrs) n.setAttribute(k, attrs[k]);
+    if (text != null) n.textContent = text;
+    return n;
+  }
+  // chart geometry
+  var W = 560, H = 330, X0 = 60, X1 = 540, Y0 = 28, Y1 = 268;
+  var LMIN = 1, LMAX = 5.2;                     // log10 tokens range (10 .. ~160k)
+  function xOf(T) { var l = Math.log10(Math.max(T, 0) + 10); return X0 + (l - LMIN) / (LMAX - LMIN) * (X1 - X0); }
+  function yOf(a) { return Y1 - a * (Y1 - Y0); }
+
+  function drawChart(d, level) {
+    var host = $("chart");
+    host.innerHTML = "";
+    var svg = mk("svg", { viewBox: "0 0 " + W + " " + H, role: "img", "aria-label": "Illustrative accuracy versus thinking tokens", style: "width:100%;height:auto;display:block" });
+    // grid
+    [0, 0.25, 0.5, 0.75, 1].forEach(function (a) {
+      svg.appendChild(mk("line", { x1: X0, x2: X1, y1: yOf(a), y2: yOf(a), stroke: "#ece8df" }));
+      svg.appendChild(mk("text", { x: X0 - 6, y: yOf(a) + 4, "text-anchor": "end", "font-size": 13, fill: "#687084" }, Math.round(a * 100) + "%"));
+    });
+    [0, 100, 1000, 10000, 100000].forEach(function (T, i) {
+      svg.appendChild(mk("line", { x1: xOf(T), x2: xOf(T), y1: Y0, y2: Y1, stroke: "#ece8df" }));
+      svg.appendChild(mk("text", { x: xOf(T), y: Y1 + 16, "text-anchor": "middle", "font-size": 13, fill: "#687084" }, ["0", "100", "1k", "10k", "100k"][i]));
+    });
+    svg.appendChild(mk("path", { d: "M" + X0 + " " + Y0 + " V" + Y1 + " H" + X1, fill: "none", stroke: "#1d2433", "stroke-width": 1.2 }));
+    svg.appendChild(mk("text", { x: (X0 + X1) / 2, y: Y1 + 36, "text-anchor": "middle", "font-size": 14, "font-weight": 700, fill: "#3a4254" }, "thinking tokens (log scale)"));
+    svg.appendChild(mk("text", { x: X0, y: 14, "font-size": 14, "font-weight": 700, fill: "#ad2f2f" }, "accuracy (illustrative)"));
+    // curves
+    CURVE.forEach(function (c, k) {
+      var p = "";
+      for (var i = 0; i <= 60; i++) {
+        var l = LMIN + (LMAX - LMIN) * i / 60, T = Math.pow(10, l) - 10;
+        p += (i ? " L" : "M") + xOf(T).toFixed(1) + " " + yOf(acc(Math.max(T, 0), k)).toFixed(1);
+      }
+      svg.appendChild(mk("path", { d: p, fill: "none", stroke: c.color, "stroke-width": k === d ? 3 : 1.5, "stroke-opacity": k === d ? 1 : 0.35 }));
+      var lT = k === 0 ? 12 : 120000, lx = xOf(lT), ly = yOf(acc(lT, k)) + (k === 0 ? 18 : -8);
+      svg.appendChild(mk("text", { x: k === 0 ? lx + 4 : lx, y: ly, "text-anchor": k === 0 ? "start" : "end", "font-size": 13, "font-weight": 700, fill: c.color, "fill-opacity": k === d ? 1 : 0.55 }, c.name));
+    });
+    // effort points on the selected curve
+    for (var lv = 0; lv < LEVELS.length; lv++) {
+      var T = thinkTokens(lv, d), x = xOf(T), y = yOf(acc(T, d)), on = lv === level;
+      svg.appendChild(mk("circle", { cx: x, cy: y, r: on ? 7 : 4, fill: on ? "#1d2433" : "#ffffff", stroke: "#1d2433", "stroke-width": 1.5 }));
+      if (on) {
+        var right = x < X1 - 150;
+        svg.appendChild(mk("text", { x: right ? x + 10 : x - 10, y: y + 18, "text-anchor": right ? "start" : "end", "font-size": 14, "font-weight": 800, fill: "#1d2433" }, LEVELS[lv] + ": " + fmtInt(T) + " tok, " + Math.round(acc(T, d) * 100) + "%"));
+      }
+    }
+    host.appendChild(svg);
+  }
+
+  function row(label, value, hint) {
+    return "<tr><td>" + label + (hint ? "<br><span class='h'>" + hint + "</span>" : "") + "</td><td class='v'>" + value + "</td></tr>";
+  }
+
+  function update() {
+    var level = +eff.value, d = +diff.value, speed = +tps.value, pr = Math.max(0, +price.value || 0);
+    var answer = +ans.value, P = +prompt.value;
+    $("eff-out").textContent = LEVELS[level];
+    $("tps-out").textContent = speed + " tok/s";
+    $("ans-out").textContent = fmtInt(answer);
+    $("prompt-out").textContent = fmtInt(P);
+
+    var T = thinkTokens(level, d), out = T + answer, a = acc(T, d);
+    var tFirst = TTFT + T / speed, tTotal = TTFT + out / speed;
+    var cost = out * pr / 1e6;
+    var base = acc(0, d), baseCost = answer * pr / 1e6;
+    var kv = (P + out) * KV_PER_TOKEN;
+
+    $("res").innerHTML =
+      row("Thinking tokens", fmtInt(T), T === 0 ? "no thinking block" : "hidden, billed as output") +
+      row("Billed output tokens", fmtInt(out), (out / answer).toFixed(1) + "× the visible answer") +
+      row("First visible token", fmtTime(tFirst), "0.5 s + thinking ÷ speed") +
+      row("Total time", fmtTime(tTotal), "") +
+      row("Output cost", fmtUsd(cost), "vs " + fmtUsd(baseCost) + " without thinking") +
+      row("Accuracy (illustrative)", Math.round(a * 100) + "%", "vs " + Math.round(base * 100) + "% without thinking") +
+      row("Cost per correct answer", fmtUsd(cost / a), "") +
+      row("KV cache at the end", Blog.fmtBytesBin(kv), "Llama 3.1 8B, (prompt + output) × 128 KiB");
+
+    var tl = $("tl"), sum = tTotal;
+    function seg(w, color, label) {
+      var pct = Math.max(0.4, 100 * w / sum);
+      return "<span style='flex:0 0 " + pct.toFixed(2) + "%;background:" + color + "'>" + (pct > 9 ? label : "") + "</span>";
+    }
+    tl.innerHTML = seg(TTFT, "#c9cfdc", "TTFT") + (T > 0 ? seg(T / speed, "#b9a6ec", "thinking " + fmtTime(T / speed)) : "") + seg(answer / speed, "#f1d57a", "answer " + fmtTime(answer / speed));
+    drawChart(d, level);
+  }
+  [eff, diff, tps, price, ans, prompt].forEach(function (el) { el.addEventListener("input", update); el.addEventListener("change", update); });
+  update();
+});
+</script>
+</body>
+</html>

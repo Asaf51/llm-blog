@@ -1,0 +1,1932 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>08 · Pretraining — How LLMs Really Work</title>
+<link rel="stylesheet" href="assets/style.css">
+<script src="assets/blog.js" defer></script>
+<style>
+  /* ---- Chapter 8 styles (all scoped to #ch08) ---- */
+  /* let .wide figures actually use the wide width (sections are otherwise capped at the text width) */
+  #ch08 > section { max-width: var(--wide-w); }
+  #ch08 figure svg .mono text { font-family: var(--mono); }
+  #ch08 .fig-funnel .drop { animation-duration: 9s; animation-timing-function: linear; animation-iteration-count: infinite; }
+  #ch08 .fig-funnel .k1 { animation-name: ch08-die1; }
+  #ch08 .fig-funnel .k2 { animation-name: ch08-die2; }
+  #ch08 .fig-funnel .k3 { animation-name: ch08-die3; }
+  #ch08 .fig-funnel .k4 { animation-name: ch08-die4; }
+  #ch08 .fig-funnel .k5 { animation-name: ch08-die5; }
+  #ch08 .fig-funnel .k6 { animation-name: ch08-live; }
+  @keyframes ch08-die1 { 0% { transform: translateY(0); opacity: 0 } 3% { opacity: .9 } 15% { transform: translateY(62px); opacity: .9; fill: #687084 } 19% { transform: translateY(78px); opacity: 0; fill: #d64545 } 100% { transform: translateY(78px); opacity: 0 } }
+  @keyframes ch08-die2 { 0% { transform: translateY(0); opacity: 0 } 3% { opacity: .9 } 31% { transform: translateY(130px); opacity: .9; fill: #687084 } 35% { transform: translateY(146px); opacity: 0; fill: #d64545 } 100% { transform: translateY(146px); opacity: 0 } }
+  @keyframes ch08-die3 { 0% { transform: translateY(0); opacity: 0 } 3% { opacity: .9 } 47% { transform: translateY(198px); opacity: .9; fill: #687084 } 51% { transform: translateY(214px); opacity: 0; fill: #d64545 } 100% { transform: translateY(214px); opacity: 0 } }
+  @keyframes ch08-die4 { 0% { transform: translateY(0); opacity: 0 } 3% { opacity: .9 } 63% { transform: translateY(266px); opacity: .9; fill: #687084 } 67% { transform: translateY(282px); opacity: 0; fill: #d64545 } 100% { transform: translateY(282px); opacity: 0 } }
+  @keyframes ch08-die5 { 0% { transform: translateY(0); opacity: 0 } 3% { opacity: .9 } 79% { transform: translateY(334px); opacity: .9; fill: #687084 } 83% { transform: translateY(350px); opacity: 0; fill: #d64545 } 100% { transform: translateY(350px); opacity: 0 } }
+  @keyframes ch08-live { 0% { transform: translateY(0); opacity: 0 } 3% { opacity: .9 } 92% { transform: translateY(400px); opacity: 1; fill: #e5b62b } 100% { transform: translateY(418px); opacity: 0; fill: #e5b62b } }
+
+  #ch08 .fig-anatomy .cursor { animation: ch08-sweep 9s linear infinite; }
+  @keyframes ch08-sweep { 0% { transform: translateX(0) } 92% { transform: translateX(780px) } 100% { transform: translateX(780px) } }
+  #ch08 .flow { stroke-dasharray: 7 6; animation: ch08-dash 1.1s linear infinite; }
+  @keyframes ch08-dash { to { stroke-dashoffset: -26; } }
+  #ch08 .pulse { animation: ch08-pulse 1.8s ease-in-out infinite; }
+  @keyframes ch08-pulse { 0%, 100% { opacity: .45 } 50% { opacity: 1 } }
+
+  #ch08 .gd-controls { display: flex; flex-wrap: wrap; gap: 10px 22px; align-items: center; font-family: var(--sans); font-size: 15px; margin: 10px 0 2px; }
+  #ch08 .gd-controls label { display: inline-flex; gap: 8px; align-items: center; color: var(--ink-2); font-weight: 600; }
+  #ch08 .gd-controls input[type=range] { width: 160px; accent-color: var(--q); }
+  #ch08 .gd-controls .readout { font-family: var(--mono); font-weight: 700; color: var(--q); }
+
+  #ch08 .wgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px 18px; margin-bottom: 14px; }
+  #ch08 .wgrid label { display: flex; flex-direction: column; align-items: stretch; gap: 4px; font-size: 13.5px; }
+  #ch08 .wgrid input[type=number], #ch08 .wgrid select { width: 100%; }
+  #ch08 .wgrid input[type=range] { width: 100%; }
+  #ch08 .res { width: 100%; border-collapse: collapse; font-size: 14.5px; margin-top: 4px; }
+  #ch08 .res td { padding: 5px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  #ch08 .res td.v { font-family: var(--mono); font-weight: 700; text-align: right; white-space: nowrap; color: var(--ink); }
+  #ch08 .res tr:last-child td { border-bottom: 0; }
+  #ch08 .res .h { color: var(--muted); font-size: 13px; }
+  #ch08 .membar span { color: #fff; font-family: var(--mono); font-size: 12px; font-weight: 700; text-align: center; line-height: 26px; overflow: hidden; white-space: nowrap; }
+  #ch08 .membar { display: flex; height: 26px; border-radius: 5px; overflow: hidden; border: 1px solid var(--line); margin: 6px 0 4px; }
+  #ch08 .membar span { display: block; height: 100%; }
+  #ch08 .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 13px; color: var(--ink-2); }
+  #ch08 .legend i { display: inline-block; width: 11px; height: 11px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+  #ch08 .note { font-size: 13px; color: var(--muted); margin-top: 8px; }
+</style>
+</head>
+<body data-chapter="08">
+<div class="layout">
+<nav id="sidebar"></nav>
+<main class="article" id="ch08">
+
+<header class="chapter-head">
+  <div class="kicker">Part III · Chapter 8</div>
+  <h1>Pretraining</h1>
+  <p class="lede">Pretraining turns about fifteen trillion tokens of text into the eight billion (or four hundred billion) numbers that make up a model. This chapter follows the whole process: how the data is built, what exactly is optimized, how gradients are computed, how the work is split over thousands of GPUs, and what it costs.</p>
+</header>
+
+<div class="tldr">
+  <div class="tldr-title">In this chapter</div>
+  <ul>
+    <li>How a raw web crawl becomes trillions of clean tokens: extraction, filtering, MinHash deduplication, quality classifiers, decontamination, mixtures, synthetic data.</li>
+    <li>The objective: one sequence of <var>n</var> tokens yields <var>n</var> next-token losses in a single pass (teacher forcing + the causal mask). Cross-entropy, perplexity, and the gradient <var>p</var> − <var>y</var>.</li>
+    <li>Backpropagation on a tiny graph with real numbers, the three matmuls behind every linear layer, and why training costs <strong>6<var>N</var> FLOPs per token</strong>.</li>
+    <li>Optimizers (SGD, momentum, AdamW), learning-rate schedules (warmup, cosine, WSD), clipping, batch size, gradient accumulation.</li>
+    <li>Mixed precision (BF16, FP32 master weights, FP8) and why training needs <strong>~16 bytes per parameter</strong> plus activations.</li>
+    <li>Data, ZeRO/FSDP, tensor, pipeline, context and expert parallelism, and how Llama 3 405B was laid out on 16,384 GPUs.</li>
+    <li><strong>C ≈ 6ND</strong>, MFU, GPU-hours and dollars (with a calculator), failures at scale, scaling laws, and why today's small models are deliberately "over-trained".</li>
+  </ul>
+</div>
+
+<section>
+<h2>What pretraining is</h2>
+
+<p>A freshly built model is a stack of matrices filled with small random numbers. Its output is noise. Pretraining is the process that fills those matrices with useful values. The recipe is short: show the model real text, ask it to predict every next token, measure how wrong it was, and nudge every weight a tiny bit in the direction that would have made it less wrong. Then repeat this a million times over trillions of tokens.</p>
+
+<p>Nobody writes rules into the weights. The only signal is "this was the next token". To predict well across code, math, law, recipes and chat logs, the model has to build internal machinery for grammar, facts, and some reasoning. <a href="01-big-picture.html">Chapter 1</a> explains why next-token prediction can lead to capability. Here we look at the machine that does the nudging, and at its bill.</p>
+
+<aside class="callout intuition"><div class="callout-title">Intuition</div>
+<p>Think of pretraining as fitting a giant lossy compressor. The training text is ~60 TB of token IDs. The result is a 16 GB file of weights (for an 8B model in BF16). The weights cannot store the text. They store the <em>regularities</em> that let the model guess the text well. A better guess means a lower "loss", which is exactly what training minimizes.</p>
+</aside>
+
+<p>The scale is hard to picture, so here are real runs. "Active" parameters matter for mixture-of-experts models (<a href="07-mixture-of-experts.html">Chapter 7</a>): only the active ones do work for a given token.</p>
+
+<div class="table-wrap">
+<table class="data">
+  <tr><th>Model</th><th class="num">Params (active)</th><th class="num">Training tokens</th><th class="num">Compute ≈ 6·N·D</th><th>Reported hardware / time</th></tr>
+  <tr><td>Llama 3.1 8B</td><td class="num">8.03 B</td><td class="num">~15 T</td><td class="num">7.2 × 10<sup>23</sup></td><td>1.46 M H100-hours (model card, all training)</td></tr>
+  <tr><td>Llama 3.1 405B</td><td class="num">405 B</td><td class="num">15.6 T</td><td class="num">3.8 × 10<sup>25</sup></td><td>up to 16,384 H100s; 30.84 M H100-hours</td></tr>
+  <tr><td>DeepSeek-V3</td><td class="num">671 B (37 B)</td><td class="num">14.8 T</td><td class="num">≈ 3.3 × 10<sup>24</sup></td><td>2,048 H800s; 2.664 M GPU-hours for pretraining</td></tr>
+  <tr><td>Kimi K2</td><td class="num">~1 T (32 B)</td><td class="num">15.5 T</td><td class="num">≈ 3.0 × 10<sup>24</sup></td><td>not stated in the report</td></tr>
+  <tr><td>Qwen3-235B-A22B</td><td class="num">235 B (22 B)</td><td class="num">~36 T</td><td class="num">≈ 4.8 × 10<sup>24</sup></td><td>not stated in the report</td></tr>
+</table>
+</div>
+<p class="small muted">Compute column: Llama 3 405B's figure is from its paper; the others are this chapter's 6·N·D estimates using active parameters. Sources are in Further reading.</p>
+</section>
+
+<section>
+<h2>The data: from web crawl to trillions of tokens</h2>
+
+<p>The model can only learn what is in its data. Data work is the least glamorous part of pretraining and, by most accounts, the part that matters most. Two models with the same architecture and compute can differ a lot just because of data quality.</p>
+
+<h3>Where the text comes from</h3>
+<p>Most tokens come from the public web. The usual starting point is <strong>Common Crawl</strong>, a non-profit that publishes regular crawls of billions of pages, with the raw HTML stored as WARC files. On top of the web, labs add code (public repositories), books, scientific papers (arXiv, PubMed), Wikipedia, math sites, forums, and multilingual sources. Llama 3's data has a knowledge cutoff at the end of 2023. Some labs also license data or use their own products' public data; Meta, for example, says Llama 4 used public Facebook and Instagram posts.</p>
+
+<p>The raw pool is enormous and mostly junk. The DCLM project re-extracted all Common Crawl data before 2023: <strong>200 billion documents, 370 TB gzipped, about 240 trillion tokens</strong>. Their best filtered set kept 3.8T tokens, about 1.6%. Figure 8.1 shows the typical stages, with numbers from the open FineWeb pipeline.</p>
+
+<figure class="wide fig-funnel">
+  <svg viewBox="0 0 960 520" role="img" aria-label="Data pipeline funnel from raw web crawl to tokenized training data, with dots falling through and being filtered at each stage">
+    <defs>
+      <linearGradient id="ch08-fun-g" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#eef1f6"/>
+        <stop offset="1" stop-color="#dfe6f1"/>
+      </linearGradient>
+    </defs>
+    <polygon points="20,40 520,40 485,108 55,108" fill="url(#ch08-fun-g)" stroke="#c9cfdb"/>
+    <polygon points="55,112 485,112 450,176 90,176" fill="url(#ch08-fun-g)" stroke="#c9cfdb"/>
+    <polygon points="90,180 450,180 415,244 125,244" fill="url(#ch08-fun-g)" stroke="#c9cfdb"/>
+    <polygon points="125,248 415,248 380,312 160,312" fill="url(#ch08-fun-g)" stroke="#c9cfdb"/>
+    <polygon points="160,316 380,316 345,380 195,380" fill="url(#ch08-fun-g)" stroke="#c9cfdb"/>
+    <polygon points="195,384 345,384 325,448 215,448" fill="#fbefc5" stroke="#e5b62b"/>
+    <!-- drops -->
+    <g fill="#687084">
+      <circle class="drop k1" cx="160" cy="80" r="5" style="animation-delay:-0.5s"/>
+      <circle class="drop k1" cx="380" cy="80" r="5" style="animation-delay:-3.4s"/>
+      <circle class="drop k1" cx="230" cy="80" r="5" style="animation-delay:-6.1s"/>
+      <circle class="drop k2" cx="300" cy="80" r="5" style="animation-delay:-1.7s"/>
+      <circle class="drop k2" cx="200" cy="80" r="5" style="animation-delay:-5.2s"/>
+      <circle class="drop k3" cx="330" cy="80" r="5" style="animation-delay:-2.6s"/>
+      <circle class="drop k3" cx="215" cy="80" r="5" style="animation-delay:-7.4s"/>
+      <circle class="drop k4" cx="250" cy="80" r="5" style="animation-delay:-4.3s"/>
+      <circle class="drop k4" cx="300" cy="80" r="5" style="animation-delay:-8.2s"/>
+      <circle class="drop k5" cx="240" cy="80" r="5" style="animation-delay:-0.9s"/>
+      <circle class="drop k5" cx="290" cy="80" r="5" style="animation-delay:-6.6s"/>
+      <circle class="drop k6" cx="262" cy="80" r="5" style="animation-delay:-3.0s"/>
+      <circle class="drop k6" cx="278" cy="80" r="5" style="animation-delay:-7.9s"/>
+    </g>
+    <g font-size="16" font-weight="700" fill="#1d2433" text-anchor="middle">
+      <text x="270" y="68">1 · Raw crawl</text>
+      <text x="270" y="138">2 · Extract + language ID</text>
+      <text x="270" y="206">3 · Heuristic filters</text>
+      <text x="270" y="274">4 · Deduplicate</text>
+      <text x="270" y="342">5 · Quality model</text>
+      <text x="270" y="410">6 · Mix</text>
+    </g>
+    <!-- right labels -->
+    <g stroke="#ddd8ce" stroke-dasharray="3 4">
+      <line x1="522" y1="62" x2="545" y2="62"/><line x1="487" y1="132" x2="545" y2="132"/>
+      <line x1="452" y1="200" x2="545" y2="200"/><line x1="417" y1="268" x2="545" y2="268"/>
+      <line x1="382" y1="336" x2="545" y2="336"/><line x1="347" y1="404" x2="545" y2="404"/>
+    </g>
+    <g font-size="15" fill="#3a4254">
+      <text x="552" y="60"><tspan font-weight="700">96 Common Crawl snapshots</tspan> of raw HTML</text>
+      <text x="552" y="80" fill="#687084">(DCLM pool: 200 B docs, 370 TB gzipped, 240 T tokens)</text>
+      <text x="552" y="128">HTML &#8594; main text; URL blocklist</text>
+      <text x="552" y="148" fill="#687084">fastText language ID: keep English score &#8805; 0.65</text>
+      <text x="552" y="196">Rules: length, symbol ratio, repetition</text>
+      <text x="552" y="216" fill="#687084">&#8776; <tspan font-weight="700" fill="#1d2433">36 T tokens</tspan> left after base filtering</text>
+      <text x="552" y="264">MinHash near-duplicate removal (+ C4 rules)</text>
+      <text x="552" y="284" fill="#687084">FineWeb: <tspan font-weight="700" fill="#1d2433">15 T tokens</tspan></text>
+      <text x="552" y="332">Classifier scores "educational value" 0&#8211;5</text>
+      <text x="552" y="352" fill="#687084">FineWeb-Edu (score &#8805; 3): <tspan font-weight="700" fill="#1d2433">1.3 T tokens</tspan></text>
+      <text x="552" y="400">Decontaminate, scrub PII, weight sources</text>
+      <text x="552" y="420" fill="#687084">&#8594; token-ID shards (Llama 3: ~15 T tokens)</text>
+    </g>
+    <!-- output tokens -->
+    <g font-size="15" class="mono" text-anchor="middle">
+      <rect x="150" y="470" width="58" height="30" rx="5" fill="#fbefc5" stroke="#e5b62b"/><text x="179" y="490">791</text>
+      <rect x="214" y="470" width="58" height="30" rx="5" fill="#fbefc5" stroke="#e5b62b"/><text x="243" y="490">8415</text>
+      <rect x="278" y="470" width="58" height="30" rx="5" fill="#fbefc5" stroke="#e5b62b"/><text x="307" y="490">7731</text>
+      <rect x="342" y="470" width="58" height="30" rx="5" fill="#fbefc5" stroke="#e5b62b"/><text x="371" y="490">389</text>
+    </g>
+    <text x="410" y="490" font-size="15" fill="#687084">&#8230; trillions of token IDs (illustrative)</text>
+    <line x1="270" y1="450" x2="270" y2="466" stroke="#e5b62b" stroke-width="2"/>
+  </svg>
+  <figcaption><span class="fig-label">Figure 8.1</span> — The data funnel. Each dot is a document. Most die on the way down (red); the survivors become token IDs. Numbers from FineWeb (Penedo et al., 2024; GPT-2 tokenizer) and DCLM (Li et al., 2024). Every lab's pipeline differs in details, but the stages are the same.</figcaption>
+</figure>
+
+<h3>Extraction and language ID</h3>
+<p>Common Crawl also ships pre-extracted text (WET files), but it keeps menus, cookie banners and footers. Better pipelines re-parse the raw HTML with a boilerplate remover (FineWeb used <code>trafilatura</code>; DCLM used <code>resiliparse</code>; Meta built its own parser that keeps math and code formatting). This step alone measurably improves the trained model. Then a tiny <strong>fastText</strong> classifier (a bag-of-n-grams linear model, microseconds per document) assigns a language. Llama 3 sorts documents into 176 languages this way.</p>
+
+<h3>Heuristic filters</h3>
+<p>Cheap rules remove obvious junk: pages that are too short or too long, have too many symbols per word, too few lines ending in punctuation, too many repeated lines or n-grams (log spam, error dumps), or contain "dirty words" missed by URL blocklists. These rules come from the Gopher and C4 papers and are tuned by training small models on filtered vs unfiltered data and comparing benchmark scores. Llama 3 also drops documents whose token distribution is far from the corpus average (measured by KL divergence, a standard distance between probability distributions), which catches pages full of outlier tokens.</p>
+
+<h3>Deduplication with MinHash</h3>
+<p>The web is full of copies: mirrors, templates, syndicated news, boilerplate licenses. Duplicates waste compute and make the model memorize. Exact duplicates are easy: hash each document (or each line) and keep one per hash. Llama 3 removes lines that appear more than 6 times in each bucket of 30M documents, which kills leftover navigation menus and cookie warnings. The hard case is <em>near</em>-duplicates: the same article with a different date line. Comparing every pair of 10<sup>10</sup> documents is impossible (10<sup>20</sup> pairs). <strong>MinHash with locality-sensitive hashing (LSH)</strong> solves it in near-linear time. Each document becomes a set of <em>shingles</em> (overlapping word 5-grams), and two documents A and B count as similar when their <strong>Jaccard similarity</strong> <var>J</var> = |A ∩ B| / |A ∪ B|, the share of shingles they have in common, is high.</p>
+
+<figure class="wide">
+  <svg viewBox="0 0 960 440" role="img" aria-label="MinHash deduplication: shingles, min-hash signatures, banding into buckets, and the probability curve of being flagged as a duplicate">
+    <g font-size="16" font-weight="700" fill="#1d2433">
+      <text x="20" y="28">1 · Shingle</text>
+      <text x="350" y="28">2 · Min-hash signature</text>
+      <text x="650" y="28">3 · Band &#8594; bucket</text>
+    </g>
+    <rect x="20" y="44" width="300" height="56" rx="8" fill="#f3f1ec" stroke="#ddd8ce"/>
+    <text x="32" y="66" font-size="15" font-weight="700" fill="#2f6fde">Doc A</text>
+    <text x="32" y="89" font-size="15" class="mono" fill="#1d2433">the cat sat on the mat today</text>
+    <rect x="20" y="112" width="300" height="56" rx="8" fill="#f3f1ec" stroke="#ddd8ce"/>
+    <text x="32" y="134" font-size="15" font-weight="700" fill="#e8833a">Doc B</text>
+    <text x="32" y="157" font-size="15" class="mono" fill="#1d2433">the cat sat on the mat again</text>
+    <g font-size="15" fill="#3a4254">
+      <text x="20" y="200">Word 3-grams (FineWeb uses 5-grams):</text>
+      <text x="20" y="222">shared: <tspan class="mono">"the cat sat" "cat sat on"</tspan></text>
+      <text x="80" y="242" class="mono">"sat on the" "on the mat"</text>
+      <text x="20" y="262">A only: <tspan class="mono">"the mat today"</tspan></text>
+      <text x="20" y="282">B only: <tspan class="mono">"the mat again"</tspan></text>
+      <text x="20" y="314">Jaccard J = |A &#8745; B| / |A &#8746; B| = 4/6 &#8776; 0.67</text>
+    </g>
+    <!-- signatures -->
+    <g font-size="15" fill="#3a4254">
+      <text x="350" y="62">For each hash function h&#7522;, keep</text>
+      <text x="350" y="82">the minimum h&#7522; over all shingles.</text>
+      <text x="350" y="102">P(min-hashes match) = J.</text>
+    </g>
+    <g font-size="15" class="mono" text-anchor="middle">
+      <text x="338" y="146" text-anchor="end" font-weight="700" fill="#2f6fde">A</text>
+      <text x="338" y="186" text-anchor="end" font-weight="700" fill="#e8833a">B</text>
+      <g fill="#ffffff" stroke="#c9cfdb">
+        <rect x="350" y="126" width="34" height="30"/><rect x="384" y="126" width="34" height="30"/><rect x="418" y="126" width="34" height="30"/><rect x="452" y="126" width="34" height="30"/>
+        <rect x="490" y="126" width="34" height="30"/><rect x="524" y="126" width="34" height="30"/><rect x="558" y="126" width="34" height="30"/><rect x="592" y="126" width="34" height="30"/>
+        <rect x="350" y="166" width="34" height="30"/><rect x="384" y="166" width="34" height="30"/><rect x="418" y="166" width="34" height="30"/><rect x="452" y="166" width="34" height="30"/>
+        <rect x="490" y="166" width="34" height="30"/><rect x="524" y="166" width="34" height="30"/><rect x="558" y="166" width="34" height="30"/><rect x="592" y="166" width="34" height="30"/>
+      </g>
+      <g fill="#e9f6f0" stroke="#2f9e6e"><rect x="350" y="126" width="136" height="30" fill-opacity="0.5"/><rect x="350" y="166" width="136" height="30" fill-opacity="0.5"/></g>
+      <g fill="#1d2433">
+        <text x="367" y="147">12</text><text x="401" y="147">41</text><text x="435" y="147">7</text><text x="469" y="147">88</text>
+        <text x="507" y="147">23</text><text x="541" y="147">5</text><text x="575" y="147">61</text><text x="609" y="147">30</text>
+        <text x="367" y="187">12</text><text x="401" y="187">41</text><text x="435" y="187">7</text><text x="469" y="187">88</text>
+        <text x="507" y="187">23</text><text x="541" y="187" fill="#d64545" font-weight="700">9</text><text x="575" y="187">61</text><text x="609" y="187">30</text>
+      </g>
+    </g>
+    <g font-size="15" fill="#687084" text-anchor="middle">
+      <text x="418" y="218">band 1</text><text x="558" y="218">band 2</text>
+    </g>
+    <g font-size="15" fill="#3a4254">
+      <text x="350" y="256">Values illustrative. FineWeb: 112 hashes</text>
+      <text x="350" y="276">= 14 bands &#215; 8 hashes. A pair whose</text>
+      <text x="350" y="296">band matches exactly lands in the same</text>
+      <text x="350" y="316">bucket &#8594; flagged as near-duplicates.</text>
+      <text x="350" y="346">Cost: one pass per document plus a</text>
+      <text x="350" y="366">hash-table insert per band. No pairs.</text>
+    </g>
+    <!-- bucket table -->
+    <g font-size="15">
+      <rect x="650" y="44" width="290" height="150" rx="8" fill="#ffffff" stroke="#ddd8ce"/>
+      <text x="664" y="68" fill="#687084">hash(band) &#8594; bucket</text>
+      <g class="mono" fill="#1d2433">
+        <rect x="664" y="80" width="262" height="26" fill="#f3f1ec"/><text x="672" y="99">0x1f3a: [ doc 9921 ]</text>
+        <rect x="664" y="110" width="262" height="26" fill="#e9f6f0" stroke="#2f9e6e"/><text x="672" y="129">0x7c02: [ <tspan fill="#2f6fde" font-weight="700">A</tspan>, <tspan fill="#e8833a" font-weight="700">B</tspan> ]  &#8592; match</text>
+        <rect x="664" y="140" width="262" height="26" fill="#f3f1ec"/><text x="672" y="159">0x90be: [ doc 77, doc 503 ]</text>
+      </g>
+      <text x="664" y="186" fill="#687084">keep one doc per cluster</text>
+    </g>
+    <path d="M490 141 C 560 110, 600 100, 660 123" fill="none" stroke="#2f9e6e" stroke-width="2" class="flow"/>
+    <!-- S-curve -->
+    <text x="650" y="236" font-size="15" font-weight="700" fill="#1d2433">P(flagged) = 1 &#8722; (1 &#8722; J&#8312;)&#185;&#8308;</text>
+    <line x1="650" y1="386" x2="912" y2="386" stroke="#687084"/>
+    <line x1="650" y1="386" x2="650" y2="258" stroke="#687084"/>
+    <line x1="650" y1="266" x2="910" y2="266" stroke="#ddd8ce" stroke-dasharray="3 3"/>
+    <path d="M650.0 386.0 L715.0 386.0 L741.0 385.6 L760.5 384.2 L773.5 381.7 L786.5 376.7 L799.5 367.4 L812.5 352.3 L825.5 330.8 L838.5 305.5 L851.5 283.0 L864.5 270.1 L877.5 266.3 L910.0 266.0" fill="none" stroke="#7b5cd6" stroke-width="3"/>
+    <g fill="#d64545"><circle cx="780" cy="379.6" r="4.5"/><circle cx="845" cy="293.4" r="4.5"/><circle cx="884" cy="266" r="4.5"/></g>
+    <g font-size="15" fill="#3a4254">
+      <text x="728" y="372" text-anchor="end">J=0.5: 5%</text>
+      <text x="856" y="304">J=0.75: 77%</text>
+      <text x="880" y="256" text-anchor="end">J=0.9: &#8776;100%</text>
+      <text x="650" y="406" fill="#687084">0</text><text x="912" y="406" fill="#687084" text-anchor="end">1</text>
+      <text x="781" y="426" fill="#687084" text-anchor="middle">Jaccard similarity J</text>
+    </g>
+  </svg>
+  <figcaption><span class="fig-label">Figure 8.2</span> — MinHash + LSH in three steps. (1) Turn each document into a set of shingles. (2) For each of <var>k</var> hash functions, keep the minimum hash over the set; two documents agree on each min-hash with probability equal to their Jaccard similarity. (3) Cut the signature into bands and hash each band into a table. The banding turns "similarity ≥ ~0.75" into a sharp threshold (curve for FineWeb's 14 bands × 8 hashes).</figcaption>
+</figure>
+
+<p>Why does the min-hash trick work? Apply a random hash to every shingle in A ∪ B. The shingle with the overall smallest hash is equally likely to be any element of the union. Both documents report that same minimum only if that element is in both sets, which happens with probability <var>J</var>. Each extra hash function is an independent coin flip with bias <var>J</var>. Banding then amplifies: a band of 8 hashes matches with probability <var>J</var><sup>8</sup>, and at least one of 14 bands matches with probability 1 − (1 − <var>J</var><sup>8</sup>)<sup>14</sup>. For FineWeb's settings that is 5% at <var>J</var> = 0.5, 77% at 0.75, and essentially 100% at 0.9. A systems person will recognize this as a hash join with deliberately "fuzzy" keys. FineWeb also found a subtle trap: deduplicating <em>globally</em> across all 96 snapshots made results worse, because it disproportionately kept low-quality leftovers; they deduplicate each snapshot separately.</p>
+
+<h3>Model-based quality filtering</h3>
+<p>After rules and dedup, the text is clean but often useless (product listings, SEO filler). The modern fix is a learned quality score:</p>
+<ol>
+  <li>Label a sample. FineWeb-Edu asked Llama-3-70B-Instruct to rate 460,000 pages for "educational value" on a 0–5 scale. DCLM used "positive" examples from instruction data (OpenHermes 2.5) and the ELI5 subreddit, against random web pages as negatives.</li>
+  <li>Train a cheap classifier on those labels (a small BERT-style model for FineWeb-Edu, a fastText model for DCLM) so it can run over billions of documents.</li>
+  <li>Keep the top slice. FineWeb-Edu keeps score ≥ 3 (1.3T of 15T tokens). DCLM keeps the top 10%.</li>
+</ol>
+<p>Llama 3 did the same with fastText (trained to recognize text "that would be referenced by Wikipedia") and RoBERTa-based classifiers trained on Llama 2's judgments, plus separate DistilRoBERTa classifiers that find math and code pages. A 7B model trained on DCLM-Baseline reached 64% on the MMLU benchmark with 2.6T tokens, close to Llama 3 8B's 66% with roughly 6.6× less compute. That is how much quality filtering buys.</p>
+
+<aside class="callout warn"><div class="callout-title">Common misconception</div>
+<p>"More data is always better." Not at a fixed compute budget. Every token you train on costs 6<var>N</var> FLOPs. Spending them on duplicated boilerplate is pure waste. The best pipelines throw away 95–99% of the crawl.</p>
+</aside>
+
+<h3>Decontamination, safety and PII</h3>
+<p>If benchmark questions leak into training data, scores become memorization tests. <strong>Decontamination</strong> removes training documents that share long n-grams with evaluation sets (8- to 13-gram overlap checks are common). Labs also drop domains with lots of personal data (PII) or unsafe content, and some anonymize emails and IP addresses (FineWeb does). None of this is perfect, which is why evaluation (<a href="09-post-training.html">Chapter 9</a>) treats contamination as a standing risk.</p>
+
+<h3>The mixture</h3>
+<p>The cleaned sources are not used in proportion to their size. A <strong>data mixture</strong> sets the fraction of each batch that comes from each source. Llama 3's final mix was roughly <strong>50% general knowledge, 25% math and reasoning, 17% code, and 8% multilingual</strong> tokens. Mixtures are chosen by training small "proxy" models on candidate mixes and checking benchmark results, then confirming on a bigger model. Mixtures also change over time: Llama 3 increased the non-English and math share during training, and every modern run ends with a high-quality phase (covered later under <a href="#ch08-anneal">annealing</a>).</p>
+
+<h3>Synthetic data</h3>
+<p>High-quality human text is finite, so labs now generate more with existing models. Qwen3's report describes using earlier Qwen2.5 models to synthesize "trillions" of tokens of textbooks, question–answer pairs, instructions and code, and using a vision model to extract text from PDFs. Kimi K2 rephrases high-quality documents into new wordings to get more learning out of each fact. The risk is quality drift and homogeneity, so synthetic data is filtered like everything else.</p>
+
+<h3>How much data, and how it is stored</h3>
+<p>Modern runs use 15–36T tokens (table above). If you run out of unique data you can repeat it; studies of data-constrained training found that up to about four epochs of repetition is nearly as good as fresh data, with diminishing returns after that.</p>
+
+<aside class="callout deep"><div class="callout-title">Low-level deep dive: the data loader</div>
+<p>Tokenization (<a href="03-tokens.html">Chapter 3</a>) is done once, offline. Llama 3's vocabulary has 128,256 entries, which does not fit in 16 bits, so token IDs are stored as <code>uint32</code>: 15T tokens × 4 B = <strong>60 TB</strong> of binary shards. Documents are concatenated with an end-of-text token between them and cut into fixed-length rows (8,192 tokens for most of Llama 3's run). This <strong>packing</strong> wastes no compute on padding. Llama 3 adds a <strong>document mask</strong> so tokens cannot attend across a document boundary inside a row.</p>
+<p>Bandwidth is not the problem. The 405B run consumed about 2.7M tokens/s across the whole cluster, which is only ~11 MB/s of token IDs. The real requirements are determinism and resumability: after a crash, every data-parallel rank must resume at exactly the right sample of a pre-shuffled stream, or the run silently trains on some data twice and some never.</p>
+</aside>
+
+<aside class="callout key"><div class="callout-title">Key takeaway</div>
+<p>Pretraining data is a manufactured product: crawl → extract → filter → dedup → classify → decontaminate → mix → tokenize. The pipeline keeps a few percent of the raw web, and the choice of what to keep moves benchmarks as much as a large increase in model size.</p>
+</aside>
+</section>
+
+<section>
+<h2>The objective: predict every next token at once</h2>
+
+<p>Training needs one number that says how wrong the model is, so we can push it down. For language models that number is the <strong>cross-entropy loss</strong>: the negative log of the probability the model gave to the token that actually came next. <a href="04-neural-net-toolkit.html">Chapter 4</a> defines it: if the model gave the right token probability <var>p</var>, the loss is −ln <var>p</var>. This section shows how training computes it for a whole batch at once.</p>
+
+<h3>One sequence, n predictions</h3>
+<p>Here is the trick that makes pretraining efficient. Take a training row of <var>n</var> + 1 tokens. Feed the first <var>n</var> as input. The model outputs a probability distribution at <em>every</em> position, and the target at position <var>t</var> is simply the input token at <var>t</var> + 1. So one forward pass produces <var>n</var> predictions and <var>n</var> losses. The causal mask (<a href="05-attention.html">Chapter 5</a>) makes this honest: position <var>t</var> cannot see positions after <var>t</var>, so it cannot peek at its own answer.</p>
+
+<p>This is called <strong>teacher forcing</strong>: every position is conditioned on the <em>true</em> previous tokens, not on what the model would have generated. The model never sees its own mistakes during pretraining. A systems analogy: it is one test run that executes <var>n</var> unit tests at once, where each test only has access to the fixtures before it.</p>
+
+<figure class="stepper wide fig-tf" data-steps="4" data-interval="3200">
+  <svg viewBox="0 0 960 450" role="img" aria-label="Teacher forcing: one sequence produces six next-token predictions and six losses in one pass">
+    <defs>
+      <marker id="ch08-arr-g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#2f9e6e"/></marker>
+      <marker id="ch08-arr-r" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#d64545"/></marker>
+      <marker id="ch08-arr-k" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#687084"/></marker>
+    </defs>
+    <g font-size="15" fill="#687084" font-weight="700">
+      <text x="20" y="64">input x&#8348;</text>
+      <text x="20" y="156">model</text>
+      <text x="20" y="262">p(target)</text>
+      <text x="20" y="330">target x&#8348;&#8330;&#8321;</text>
+      <text x="20" y="384">loss &#8722;ln p</text>
+    </g>
+    <g font-size="13" fill="#687084" text-anchor="middle">
+      <text x="175" y="30">t = 0</text><text x="305" y="30">t = 1</text><text x="435" y="30">t = 2</text><text x="565" y="30">t = 3</text><text x="695" y="30">t = 4</text><text x="825" y="30">t = 5</text>
+    </g>
+    <!-- inputs -->
+    <g font-size="16" class="mono" text-anchor="middle" fill="#1d2433">
+      <rect x="123" y="40" width="104" height="36" rx="6" fill="#f3f1ec" stroke="#687084"/><text x="175" y="64">BOS</text>
+      <rect x="253" y="40" width="104" height="36" rx="6" fill="#fbefc5" stroke="#e5b62b"/><text x="305" y="64">The</text>
+      <rect x="383" y="40" width="104" height="36" rx="6" fill="#fbefc5" stroke="#e5b62b"/><text x="435" y="64">&#9251;cat</text>
+      <rect x="513" y="40" width="104" height="36" rx="6" fill="#fbefc5" stroke="#e5b62b"/><text x="565" y="64">&#9251;sat</text>
+      <rect x="643" y="40" width="104" height="36" rx="6" fill="#fbefc5" stroke="#e5b62b"/><text x="695" y="64">&#9251;on</text>
+      <rect x="773" y="40" width="104" height="36" rx="6" fill="#fbefc5" stroke="#e5b62b"/><text x="825" y="64">&#9251;the</text>
+    </g>
+    <!-- step 1: shift arrows -->
+    <g data-step-only="1" stroke="#687084" stroke-width="1.6" stroke-dasharray="5 4" fill="none">
+      <path d="M305 78 L180 304" marker-end="url(#ch08-arr-k)"/>
+      <path d="M435 78 L310 304" marker-end="url(#ch08-arr-k)"/>
+      <path d="M565 78 L440 304" marker-end="url(#ch08-arr-k)"/>
+      <path d="M695 78 L570 304" marker-end="url(#ch08-arr-k)"/>
+      <path d="M825 78 L700 304" marker-end="url(#ch08-arr-k)"/>
+      <path d="M918 78 L832 304" marker-end="url(#ch08-arr-k)"/>
+    </g>
+    <g data-step-only="1" font-size="15" fill="#3a4254">
+      <rect x="884" y="40" width="72" height="36" rx="6" fill="#ffffff" stroke="#ddd8ce" stroke-dasharray="4 3"/>
+      <text x="920" y="64" text-anchor="middle" class="mono" fill="#687084">&#9251;mat</text>
+      <rect x="290" y="180" width="380" height="28" rx="5" fill="#ffffff" stroke="#ddd8ce"/>
+      <text x="480" y="200" text-anchor="middle" font-weight="700">targets = the same row shifted left by one token</text>
+    </g>
+    <!-- model box -->
+    <g data-step="2">
+      <rect x="115" y="96" width="770" height="110" rx="10" fill="#f2eefc" stroke="#7b5cd6"/>
+      <text x="900" y="140" font-size="15" fill="#5a3fb3">one</text>
+      <text x="900" y="158" font-size="15" fill="#5a3fb3">pass</text>
+    </g>
+    <g data-step-only="2" stroke-width="2" fill="none">
+      <path d="M175 100 L558 196" stroke="#2f9e6e" marker-end="url(#ch08-arr-g)"/>
+      <path d="M305 100 L560 196" stroke="#2f9e6e" marker-end="url(#ch08-arr-g)"/>
+      <path d="M435 100 L562 196" stroke="#2f9e6e" marker-end="url(#ch08-arr-g)"/>
+      <path d="M565 100 L565 196" stroke="#2f9e6e" marker-end="url(#ch08-arr-g)"/>
+      <path d="M695 100 L572 190" stroke="#d64545" stroke-dasharray="5 4"/>
+      <path d="M825 100 L578 192" stroke="#d64545" stroke-dasharray="5 4"/>
+    </g>
+    <g data-step="3" font-size="16" text-anchor="middle" fill="#5a3fb3">
+      <text x="500" y="144" font-weight="700">Transformer (32 layers, causal mask)</text>
+      <text x="500" y="168">6 positions in parallel &#8594; 6 softmax outputs, each over V = 128,256 tokens</text>
+    </g>
+    <g data-step-only="2" font-size="15">
+      <text x="700" y="192" fill="#d64545" font-weight="700">&#215; future tokens masked</text>
+      <text x="130" y="190" fill="#1f7a53" font-weight="700">position 3 sees 0&#8230;3 only</text>
+    </g>
+    <!-- step 3: probability bars -->
+    <g data-step="3">
+      <line x1="120" y1="296" x2="880" y2="296" stroke="#ddd8ce"/>
+      <g fill="#7b5cd6">
+        <rect x="150" y="291" width="50" height="5"/>
+        <rect x="280" y="295" width="50" height="1"/>
+        <rect x="410" y="281" width="50" height="15"/>
+        <rect x="540" y="241" width="50" height="55"/>
+        <rect x="670" y="236" width="50" height="60"/>
+        <rect x="800" y="266" width="50" height="30"/>
+      </g>
+      <g font-size="15" class="mono" text-anchor="middle" fill="#1d2433">
+        <text x="175" y="285">0.05</text><text x="305" y="289">0.01</text><text x="435" y="275">0.15</text>
+        <text x="565" y="235">0.55</text><text x="695" y="230">0.60</text><text x="825" y="260">0.30</text>
+      </g>
+    </g>
+    <!-- targets -->
+    <g font-size="16" class="mono" text-anchor="middle" fill="#1d2433">
+      <rect x="123" y="306" width="104" height="36" rx="6" fill="#fbefc5" stroke="#e5b62b"/><text x="175" y="330">The</text>
+      <rect x="253" y="306" width="104" height="36" rx="6" fill="#fbefc5" stroke="#e5b62b"/><text x="305" y="330">&#9251;cat</text>
+      <rect x="383" y="306" width="104" height="36" rx="6" fill="#fbefc5" stroke="#e5b62b"/><text x="435" y="330">&#9251;sat</text>
+      <rect x="513" y="306" width="104" height="36" rx="6" fill="#fbefc5" stroke="#e5b62b"/><text x="565" y="330">&#9251;on</text>
+      <rect x="643" y="306" width="104" height="36" rx="6" fill="#fbefc5" stroke="#e5b62b"/><text x="695" y="330">&#9251;the</text>
+      <rect x="773" y="306" width="104" height="36" rx="6" fill="#fbefc5" stroke="#e5b62b"/><text x="825" y="330">&#9251;mat</text>
+    </g>
+    <!-- step 4: losses -->
+    <g data-step="4" font-size="16" class="mono" text-anchor="middle" fill="#d64545" font-weight="700">
+      <text x="175" y="384">3.00</text><text x="305" y="384">4.61</text><text x="435" y="384">1.90</text>
+      <text x="565" y="384">0.60</text><text x="695" y="384">0.51</text><text x="825" y="384">1.20</text>
+    </g>
+    <g data-step="4" font-size="16" fill="#1d2433">
+      <text x="480" y="428" text-anchor="middle">mean loss = 11.81 / 6 = <tspan font-weight="700">1.97 nats</tspan>   &#8594;   perplexity = e<tspan baseline-shift="super" font-size="12">1.97</tspan> &#8776; <tspan font-weight="700">7.2</tspan></text>
+    </g>
+  </svg>
+  <div class="step-captions">
+    <p data-step-only="1"><b>Step 1.</b> A training row: <span class="tok">BOS</span> The cat sat on the mat. The inputs are tokens 0–5; the targets are tokens 1–6. Each target is just the next input.</p>
+    <p data-step-only="2"><b>Step 2.</b> One forward pass runs all six positions in parallel. The causal mask lets position 3 (<span class="tok">&#9251;sat</span>) use tokens 0–3 and blocks 4–5, so it must genuinely predict <span class="tok">&#9251;on</span>.</p>
+    <p data-step-only="3"><b>Step 3.</b> Each position outputs a full distribution over all 128,256 tokens. We only read one entry: the probability of the true next token (illustrative values).</p>
+    <p data-step-only="4"><b>Step 4.</b> Six losses from one pass. Their mean is the number we minimize. Backward then sends a gradient from all six positions at once.</p>
+  </div>
+  <figcaption><span class="fig-label">Figure 8.3</span> — Teacher forcing. A row of <var>n</var> + 1 tokens gives <var>n</var> training examples for the price of one forward and one backward pass. Probabilities are illustrative; real rows are 4,096–8,192 tokens long, not 7.</figcaption>
+</figure>
+
+<p>Over a batch of <var>B</var> rows, the loss is the average over all <var>B</var> · <var>n</var> positions:</p>
+
+<div class="formula">
+  <var>L</var>(<var>&#952;</var>) = &#8722;<span class="frac"><span>1</span><span><var>B</var>&#183;<var>n</var></span></span> &#8721;<sub><var>b</var></sub> &#8721;<sub><var>t</var></sub> ln <var>p</var><sub><var>&#952;</var></sub>(<var>x</var><sub><var>b</var>,<var>t</var>+1</sub> | <var>x</var><sub><var>b</var>,0</sub> &#8230; <var>x</var><sub><var>b</var>,<var>t</var></sub>)
+  <span class="where"><var>&#952;</var> = all the weights. <var>p</var><sub><var>&#952;</var></sub>(&#183; | prefix) = the model's softmax output at position <var>t</var>. The sums run over the <var>B</var> rows and the <var>n</var> positions in each row. Nothing else is in the objective: no labels, no rules, just "make the real next token more likely".</span>
+</div>
+
+<h3>Perplexity: the loss in friendlier units</h3>
+<p>Loss in nats is abstract. <strong>Perplexity</strong> is e<sup><var>L</var></sup>: the size of a uniform choice that would be equally uncertain. In Figure 8.3, the mean loss is 1.97 nats, so the perplexity is e<sup>1.97</sup> ≈ 7.2: on average the model is as unsure as if it were picking fairly among about 7 tokens. Two anchor points:</p>
+<ul>
+  <li><strong>At initialization</strong> the loss is ln 128,256 ≈ <strong>11.76 nats</strong> (uniform guessing, <a href="04-neural-net-toolkit.html">Chapter 4</a>), so the perplexity is 128,256. If your first training step does not show a loss near 11.8 for a Llama-3-sized vocabulary, something is wrong with the setup. This is a standard sanity check.</li>
+  <li><strong>Bits per token</strong> = loss / ln 2. 1.97 nats = 2.84 bits. With arithmetic coding, a model with that loss could compress the text to 2.84 bits per token. This is the precise sense in which a language model is a compressor.</li>
+</ul>
+<p>Perplexities are only comparable for the same tokenizer and the same test text. A model with a bigger vocabulary packs more text per token, so its per-token loss is not directly comparable to a model with a smaller one.</p>
+
+<h3>Where the gradient starts: p − y</h3>
+<p>Backpropagation (next sections) starts at the loss and works backwards. The first step has a beautiful closed form. With logits <var>z</var>, probabilities <var>p</var> = softmax(<var>z</var>) and a one-hot target <var>y</var>:</p>
+<div class="formula">
+  <span class="frac"><span>&#8706;<var>L</var></span><span>&#8706;<var>z</var><sub><var>i</var></sub></span></span> = <var>p</var><sub><var>i</var></sub> &#8722; <var>y</var><sub><var>i</var></sub>
+  <span class="where">For every vocabulary entry <var>i</var>: the gradient on its logit is "how much probability it got" minus "how much it should have got" (1 for the true token, 0 for the rest).</span>
+</div>
+<p>Worked example with a 4-token toy vocabulary and logits <var>z</var> = [2, 1, 0, −1], where the true token is index 1. Softmax gives <var>p</var> = [0.644, 0.237, 0.087, 0.032]. Loss = −ln 0.237 = 1.44. Gradient = [0.644, 0.237 − 1, 0.087, 0.032] = [0.644, <strong>−0.763</strong>, 0.087, 0.032]. Gradient descent subtracts the gradient, so the true token's logit goes up and every other logit goes down in proportion to the probability it stole. The gradient entries sum to zero, as they must.</p>
+
+<aside class="callout deep"><div class="callout-title">Low-level deep dive: the logits tensor is huge</div>
+<p>For one 8,192-token row and <var>V</var> = 128,256, the logits tensor has 8,192 × 128,256 ≈ 1.05 × 10<sup>9</sup> entries: 2.1 GB in BF16, 4.2 GB in FP32, and the same again for its gradient. Training frameworks therefore use <strong>fused, chunked cross-entropy</strong> kernels: compute the LM-head matmul for a chunk of positions, do softmax, loss and <var>p</var> − <var>y</var> in registers/shared memory, write only the gradient, and move on. The full logits tensor never exists in HBM.</p>
+</aside>
+</section>
+
+<section>
+<h2>Anatomy of one training step</h2>
+
+<p>A training run is one loop executed about a million times. Each iteration is a <strong>step</strong>, and each step has four phases:</p>
+<ol>
+  <li><strong>Forward.</strong> Run the batch through all layers, as at inference. Unlike inference, keep the intermediate results ("activations") that the backward pass will need.</li>
+  <li><strong>Loss.</strong> Compare the outputs with the targets (previous section).</li>
+  <li><strong>Backward.</strong> Walk the layers in reverse and compute the gradient of the loss with respect to every weight. Free each layer's activations once its gradients are done.</li>
+  <li><strong>Optimizer step.</strong> Update every weight using its gradient and the optimizer's running statistics. Reset the gradients to zero.</li>
+</ol>
+
+<pre><code><span class="k">for</span> step <span class="k">in</span> <span class="f">range</span>(num_steps):
+    x, y = <span class="f">next</span>(loader)               <span class="c"># [B, n] token ids; y = x shifted by one</span>
+    logits = <span class="f">model</span>(x)                 <span class="c"># forward  -> [B, n, V], activations saved</span>
+    loss = <span class="f">cross_entropy</span>(logits, y)    <span class="c"># scalar: mean over B*n positions</span>
+    loss.<span class="f">backward</span>()                   <span class="c"># backward -> w.grad for every weight</span>
+    <span class="f">clip_grad_norm_</span>(params, <span class="n">1.0</span>)      <span class="c"># cap the global gradient norm</span>
+    optimizer.<span class="f">step</span>()                  <span class="c"># AdamW update using m, v state</span>
+    optimizer.<span class="f">zero_grad</span>()
+    scheduler.<span class="f">step</span>()                  <span class="c"># next learning rate</span></code></pre>
+
+<figure class="wide fig-anatomy">
+  <svg viewBox="0 0 960 340" role="img" aria-label="Timeline of one training step with forward, loss, backward and optimizer phases, and memory usage rising during forward and falling during backward">
+    <g font-size="15" fill="#687084" font-weight="700">
+      <text x="20" y="62">phase</text>
+      <text x="20" y="200">memory</text>
+    </g>
+    <rect x="100" y="40" width="230" height="36" rx="5" fill="#f2eefc" stroke="#7b5cd6"/>
+    <rect x="330" y="40" width="25" height="36" fill="#fcecec" stroke="#d64545"/>
+    <rect x="355" y="40" width="460" height="36" rx="5" fill="#fcecec" stroke="#d64545"/>
+    <rect x="815" y="40" width="65" height="36" rx="5" fill="#e9f6f0" stroke="#2f9e6e"/>
+    <g font-size="15" fill="#1d2433" text-anchor="middle">
+      <text x="215" y="63">forward: layers 1 &#8594; 32</text>
+      <text x="585" y="63">backward: layers 32 &#8594; 1 (about 2&#215; forward)</text>
+      <text x="847" y="63">opt</text>
+      <text x="342" y="30" fill="#d64545">loss</text>
+    </g>
+    <g font-size="14" fill="#687084" text-anchor="middle">
+      <text x="215" y="94">2N FLOPs / token</text>
+      <text x="585" y="94">4N FLOPs / token</text>
+      <text x="847" y="94">update</text>
+    </g>
+    <!-- comm band -->
+    <g>
+      <rect x="470" y="104" width="70" height="14" fill="#3d8bd4" opacity="0.55"/>
+      <rect x="590" y="104" width="70" height="14" fill="#3d8bd4" opacity="0.55"/>
+      <rect x="710" y="104" width="70" height="14" fill="#3d8bd4" opacity="0.55"/>
+      <rect x="790" y="104" width="40" height="14" fill="#3d8bd4" opacity="0.55"/>
+      <text x="460" y="116" font-size="14" fill="#3d8bd4" text-anchor="end">gradient all-reduce, overlapped</text>
+    </g>
+    <!-- memory plot -->
+    <line x1="100" y1="300" x2="890" y2="300" stroke="#687084"/>
+    <line x1="100" y1="300" x2="100" y2="130" stroke="#687084"/>
+    <rect x="100" y="250" width="780" height="50" fill="#5a6b8c" opacity="0.28"/>
+    <text x="490" y="281" font-size="15" fill="#1d2433" text-anchor="middle">weights + gradients + optimizer state (constant)</text>
+    <polygon points="100,250 330,140 355,140 815,250" fill="#7b5cd6" opacity="0.35"/>
+    <text x="300" y="195" font-size="15" fill="#5a3fb3" text-anchor="end">saved activations grow</text>
+    <text x="560" y="180" font-size="15" fill="#5a3fb3">freed layer by layer</text>
+    <text x="342" y="132" font-size="14" fill="#d64545" text-anchor="middle">peak</text>
+    <text x="490" y="326" font-size="14" fill="#687084" text-anchor="middle">time within one step &#8594;</text>
+    <!-- cursor -->
+    <g class="cursor">
+      <line x1="100" y1="34" x2="100" y2="304" stroke="#1d2433" stroke-width="2"/>
+      <circle cx="100" cy="34" r="4" fill="#1d2433"/>
+    </g>
+  </svg>
+  <figcaption><span class="fig-label">Figure 8.4</span> — One step on one GPU (schematic). The flat band is paid all the time; activations are a sawtooth that peaks at the loss. With data parallelism the gradient all-reduce runs in buckets during the backward pass, hiding most of the communication behind compute.</figcaption>
+</figure>
+
+<p>Some real numbers for Llama 3 405B: each step consumed 16M tokens (in its main phase), which is 6 × 405 × 10<sup>9</sup> × 16.8 × 10<sup>6</sup> ≈ 4.1 × 10<sup>19</sup> FLOPs. At the reported ~400 TFLOP/s per GPU on 16,384 GPUs, one step takes about 6 seconds, and 15.6T tokens / 16M tokens per step is roughly a million steps. The "6" in that formula is the subject of the next section.</p>
+</section>
+
+<section>
+<h2>Backpropagation</h2>
+
+<p>The problem: Llama 3.1 8B has 8,030,261,248 weights, and we need the derivative of the loss with respect to each of them. The naive way, nudging one weight and re-running the model to see how the loss changes, would cost 8 billion forward passes per step. <strong>Backpropagation</strong> computes all 8 billion derivatives for about twice the cost of a single forward pass.</p>
+
+<h3>The idea: the chain rule, run backwards</h3>
+<p>Any model is a graph of simple operations: multiply, add, ReLU, softmax, matmul. If you know how the loss changes with an operation's output, the chain rule tells you how it changes with the operation's inputs: multiply by the operation's local derivative. Start at the loss with "∂<var>L</var>/∂<var>L</var> = 1", walk the graph in reverse topological order, and every node gets its gradient exactly once. It is dynamic programming over the graph: the gradient of a shared intermediate value is computed once and reused by everything upstream, instead of being recomputed for each weight. (The technique's general name is <em>reverse-mode automatic differentiation</em>.)</p>
+
+<p>You only need four local rules:</p>
+<ul>
+  <li><strong>Add</strong> (<var>z</var> = <var>a</var> + <var>b</var>): copy the incoming gradient to both inputs.</li>
+  <li><strong>Multiply</strong> (<var>m</var> = <var>w</var> · <var>x</var>): each input gets the incoming gradient times the <em>other</em> input's forward value. This is why forward values must be saved.</li>
+  <li><strong>ReLU</strong>: pass the gradient through where the input was positive, block it where it was negative.</li>
+  <li><strong>Fan-out</strong>: if a value feeds several consumers, its gradient is the <em>sum</em> of the gradients coming back from each. (Residual connections and weights shared across positions both rely on this.)</li>
+</ul>
+
+<figure class="stepper wide fig-bp" data-steps="7" data-interval="3400">
+  <svg viewBox="0 0 960 420" role="img" aria-label="Backpropagation on a tiny graph with a multiply, add, ReLU, residual add and squared loss, showing forward values then gradients">
+    <defs>
+      <marker id="ch08-bp-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#687084"/></marker>
+    </defs>
+    <!-- edges -->
+    <g stroke="#687084" stroke-width="2" fill="none" marker-end="url(#ch08-bp-a)">
+      <path d="M122 108 L195 143"/>
+      <path d="M122 212 L195 168"/>
+      <path d="M244 166 L356 218"/>
+      <path d="M300 306 L362 250"/>
+      <path d="M406 230 L486 230"/>
+      <path d="M574 222 L656 168"/>
+      <path d="M122 84 C 300 10, 560 20, 668 130"/>
+      <path d="M706 155 L790 155"/>
+      <path d="M860 280 L860 182"/>
+    </g>
+    <!-- leaves -->
+    <g font-size="16" text-anchor="middle">
+      <rect x="30" y="74" width="92" height="44" rx="8" fill="#f2eefc" stroke="#7b5cd6"/><text x="76" y="102" fill="#1d2433">x = 1.0</text>
+      <rect x="30" y="192" width="92" height="44" rx="8" fill="#eef0f5" stroke="#5a6b8c"/><text x="76" y="220" fill="#1d2433" font-weight="700">w = 2.0</text>
+      <rect x="254" y="306" width="92" height="44" rx="8" fill="#eef0f5" stroke="#5a6b8c"/><text x="300" y="334" fill="#1d2433" font-weight="700">b = &#8722;0.5</text>
+      <rect x="800" y="280" width="120" height="40" rx="8" fill="#f3f1ec" stroke="#ddd8ce"/><text x="860" y="306" fill="#1d2433">target t = 1.0</text>
+    </g>
+    <!-- ops -->
+    <g font-size="20" text-anchor="middle" font-weight="700" fill="#1d2433">
+      <circle cx="220" cy="155" r="25" fill="#ffffff" stroke="#1d2433" stroke-width="1.5"/><text x="220" y="162">&#215;</text>
+      <circle cx="381" cy="230" r="25" fill="#ffffff" stroke="#1d2433" stroke-width="1.5"/><text x="381" y="237">+</text>
+      <rect x="488" y="210" width="86" height="40" rx="20" fill="#ffffff" stroke="#1d2433" stroke-width="1.5"/><text x="531" y="236" font-size="16">ReLU</text>
+      <circle cx="681" cy="155" r="25" fill="#ffffff" stroke="#1d2433" stroke-width="1.5"/><text x="681" y="162">+</text>
+      <rect x="792" y="132" width="136" height="46" rx="8" fill="#fcecec" stroke="#d64545" stroke-width="1.5"/><text x="860" y="161" font-size="16">&#189;(y &#8722; t)&#178;</text>
+    </g>
+    <text x="330" y="24" font-size="15" fill="#687084">residual (skip) connection</text>
+    <!-- forward values -->
+    <g data-step="2" font-size="16" font-weight="700" fill="#1d2433">
+      <text x="282" y="178">m = 2.0</text>
+      <text x="420" y="218">z = 1.5</text>
+    </g>
+    <g data-step="3" font-size="16" font-weight="700" fill="#1d2433">
+      <text x="586" y="182">a = 1.5</text>
+      <text x="718" y="144">y = 2.5</text>
+      <text x="870" y="226" fill="#d64545">L = 1.125</text>
+    </g>
+    <!-- gradients -->
+    <g data-step="4" font-size="16" font-weight="700" fill="#d64545">
+      <text x="712" y="186">&#8706;L/&#8706;y = 1.5</text>
+    </g>
+    <g data-step="5" font-size="16" font-weight="700" fill="#d64545">
+      <text x="590" y="272">&#8706;L/&#8706;a = 1.5</text>
+      <text x="420" y="270">&#8706;L/&#8706;z = 1.5</text>
+      <text x="240" y="74">&#8706;L/&#8706;x (skip) = 1.5</text>
+    </g>
+    <g data-step="6" font-size="16" font-weight="700" fill="#d64545">
+      <text x="200" y="240">&#8706;L/&#8706;m = 1.5</text>
+      <text x="356" y="372">&#8706;L/&#8706;b = 1.5</text>
+      <text x="30" y="262">&#8706;L/&#8706;w = 1.5 &#183; x = 1.5</text>
+      <text x="20" y="168">via &#215;: w&#183;1.5 = 3.0</text>
+      <text x="30" y="58">&#8706;L/&#8706;x total = 4.5</text>
+    </g>
+    <!-- update -->
+    <g data-step="7">
+      <rect x="30" y="380" width="900" height="34" rx="6" fill="#e9f6f0" stroke="#2f9e6e"/>
+      <text x="480" y="403" font-size="16" text-anchor="middle" fill="#1d2433">update with learning rate 0.1:  w &#8592; 2.0 &#8722; 0.1&#183;1.5 = <tspan font-weight="700">1.85</tspan>,  b &#8592; &#8722;0.5 &#8722; 0.1&#183;1.5 = <tspan font-weight="700">&#8722;0.65</tspan>  &#8594;  new forward: y = 2.2, L = <tspan font-weight="700">0.72</tspan> (was 1.125)</text>
+    </g>
+  </svg>
+  <div class="step-captions">
+    <p data-step-only="1"><b>Step 1.</b> A tiny "network": <var>y</var> = ReLU(<var>w</var>·<var>x</var> + <var>b</var>) + <var>x</var>, with a squared-error loss against target 1.0. It has a multiply, two adds, a nonlinearity and a residual connection, like a miniature transformer block. The weights are <var>w</var> and <var>b</var>.</p>
+    <p data-step-only="2"><b>Step 2.</b> Forward, left to right: <var>m</var> = 2.0 × 1.0 = 2.0, then <var>z</var> = 2.0 − 0.5 = 1.5. Every intermediate value is saved for later.</p>
+    <p data-step-only="3"><b>Step 3.</b> <var>a</var> = ReLU(1.5) = 1.5; <var>y</var> = 1.5 + 1.0 = 2.5 (the residual adds <var>x</var> back); <var>L</var> = ½(2.5 − 1)² = 1.125.</p>
+    <p data-step-only="4"><b>Step 4.</b> Backward begins at the loss: ∂<var>L</var>/∂<var>y</var> = <var>y</var> − <var>t</var> = 1.5.</p>
+    <p data-step-only="5"><b>Step 5.</b> The residual add copies 1.5 to both inputs: to <var>a</var> and, along the skip path, straight to <var>x</var>. ReLU's input was positive (1.5 &gt; 0), so the gradient passes unchanged: ∂<var>L</var>/∂<var>z</var> = 1.5.</p>
+    <p data-step-only="6"><b>Step 6.</b> The add copies 1.5 to <var>b</var> and <var>m</var>. The multiply swaps in the saved forward values: ∂<var>L</var>/∂<var>w</var> = 1.5 × <var>x</var> = 1.5 and 1.5 × <var>w</var> = 3.0 toward <var>x</var>. <var>x</var> fans out, so its two gradients add: 1.5 + 3.0 = 4.5. In a real network that 4.5 flows on into the previous layer.</p>
+    <p data-step-only="7"><b>Step 7.</b> Gradient descent moves each weight against its gradient. One step cuts the loss from 1.125 to 0.72. Pretraining is this, with 8 billion weights and a million steps.</p>
+  </div>
+  <figcaption><span class="fig-label">Figure 8.5</span> — Backpropagation with real numbers. Forward values (black) are computed left to right and kept; gradients (red) flow right to left, each node applying one local rule. Note how the skip path delivers gradient to <var>x</var> without passing through ReLU: this "gradient highway" is why deep residual stacks train well.</figcaption>
+</figure>
+
+<h3>From scalars to matrices: three matmuls per layer</h3>
+<p>In a transformer almost all compute is linear layers. In the convention of <a href="04-neural-net-toolkit.html">Chapter 4</a>, a layer computes <var>Y</var> = <var>X</var>·<var>W</var><sup>T</sup>, where <var>X</var> is [<var>n</var> × <var>d</var><sub>in</sub>] (one row per token), <var>W</var> is [<var>d</var><sub>out</sub> × <var>d</var><sub>in</sub>] and <var>Y</var> is [<var>n</var> × <var>d</var><sub>out</sub>]. Applying the multiply rule entry by entry and collecting the sums gives two matrix formulas:</p>
+
+<div class="formula">
+  <var>dX</var> = <var>dY</var> &#183; <var>W</var>  &#160;&#160;&#160;&#160;&#160;&#160; <var>dW</var> = <var>dY</var><sup>T</sup> &#183; <var>X</var>
+  <span class="where"><var>dY</var> [<var>n</var> × <var>d</var><sub>out</sub>] is the gradient arriving from above. <var>dX</var> [<var>n</var> × <var>d</var><sub>in</sub>] is passed down to the previous layer. <var>dW</var> [<var>d</var><sub>out</sub> × <var>d</var><sub>in</sub>] has the shape of <var>W</var>; the product over the <var>n</var> dimension sums each weight's gradient over every token that used it (fan-out again).</span>
+</div>
+
+<figure class="wide">
+  <svg viewBox="0 0 960 330" role="img" aria-label="The three matrix multiplications of a linear layer in training: forward, input gradient and weight gradient, each costing 2 n d_in d_out FLOPs">
+    <g font-size="16" font-weight="700" fill="#1d2433" text-anchor="middle">
+      <text x="160" y="30">Forward</text>
+      <text x="480" y="30">Backward: input gradient</text>
+      <text x="800" y="30">Backward: weight gradient</text>
+    </g>
+    <g font-size="16" class="mono" text-anchor="middle" fill="#3a4254">
+      <text x="160" y="56">Y = X &#183; W&#7488;</text>
+      <text x="480" y="56">dX = dY &#183; W</text>
+      <text x="800" y="56">dW = dY&#7488; &#183; X</text>
+    </g>
+    <!-- panel 1 -->
+    <rect x="40" y="80" width="44" height="110" fill="#e6dff8" stroke="#7b5cd6"/>
+    <text x="62" y="210" font-size="14" text-anchor="middle" fill="#3a4254">X</text><text x="62" y="228" font-size="14" text-anchor="middle" fill="#687084">n&#215;d_in</text>
+    <text x="98" y="140" font-size="18" text-anchor="middle">&#183;</text>
+    <rect x="110" y="80" width="64" height="44" fill="#dfe3ec" stroke="#5a6b8c"/>
+    <text x="142" y="144" font-size="14" text-anchor="middle" fill="#3a4254">W&#7488;</text><text x="142" y="162" font-size="14" text-anchor="middle" fill="#687084">d_in&#215;d_out</text>
+    <text x="190" y="140" font-size="18" text-anchor="middle">=</text>
+    <rect x="206" y="80" width="64" height="110" fill="#e6dff8" stroke="#7b5cd6"/>
+    <text x="238" y="210" font-size="14" text-anchor="middle" fill="#3a4254">Y</text><text x="238" y="228" font-size="14" text-anchor="middle" fill="#687084">n&#215;d_out</text>
+    <!-- panel 2 -->
+    <rect x="360" y="80" width="64" height="110" fill="#f7d9d9" stroke="#d64545"/>
+    <text x="392" y="210" font-size="14" text-anchor="middle" fill="#3a4254">dY</text><text x="392" y="228" font-size="14" text-anchor="middle" fill="#687084">n&#215;d_out</text>
+    <text x="438" y="140" font-size="18" text-anchor="middle">&#183;</text>
+    <rect x="450" y="80" width="44" height="64" fill="#dfe3ec" stroke="#5a6b8c"/>
+    <text x="472" y="164" font-size="14" text-anchor="middle" fill="#3a4254">W</text><text x="472" y="182" font-size="14" text-anchor="middle" fill="#687084">d_out&#215;d_in</text>
+    <text x="510" y="140" font-size="18" text-anchor="middle">=</text>
+    <rect x="528" y="80" width="44" height="110" fill="#f7d9d9" stroke="#d64545"/>
+    <text x="550" y="210" font-size="14" text-anchor="middle" fill="#3a4254">dX</text><text x="550" y="228" font-size="14" text-anchor="middle" fill="#687084">n&#215;d_in</text>
+    <!-- panel 3 -->
+    <rect x="660" y="80" width="110" height="64" fill="#f7d9d9" stroke="#d64545"/>
+    <text x="715" y="164" font-size="14" text-anchor="middle" fill="#3a4254">dY&#7488;</text><text x="715" y="182" font-size="14" text-anchor="middle" fill="#687084">d_out&#215;n</text>
+    <text x="784" y="118" font-size="18" text-anchor="middle">&#183;</text>
+    <rect x="798" y="80" width="44" height="110" fill="#e6dff8" stroke="#7b5cd6"/>
+    <text x="820" y="210" font-size="14" text-anchor="middle" fill="#3a4254">X (saved)</text><text x="820" y="228" font-size="14" text-anchor="middle" fill="#687084">n&#215;d_in</text>
+    <text x="858" y="118" font-size="18" text-anchor="middle">=</text>
+    <rect x="874" y="80" width="44" height="64" fill="#dfe3ec" stroke="#5a6b8c"/>
+    <text x="896" y="164" font-size="14" text-anchor="middle" fill="#3a4254">dW</text><text x="896" y="182" font-size="14" text-anchor="middle" fill="#687084">d_out&#215;d_in</text>
+    <!-- flops -->
+    <g font-size="15" text-anchor="middle" fill="#1d2433">
+      <text x="160" y="262">2&#183;n&#183;d_in&#183;d_out FLOPs</text>
+      <text x="480" y="262">2&#183;n&#183;d_in&#183;d_out FLOPs</text>
+      <text x="800" y="262">2&#183;n&#183;d_in&#183;d_out FLOPs</text>
+    </g>
+    <rect x="40" y="282" width="880" height="36" rx="6" fill="#fcecec" stroke="#d64545"/>
+    <text x="480" y="306" font-size="16" text-anchor="middle" fill="#1d2433">Total = <tspan font-weight="700">6 &#183; n &#183; d_in &#183; d_out</tspan> = 6 FLOPs &#215; (weights in W) &#215; (tokens)   &#8594;   <tspan font-weight="700">6N per token</tspan></text>
+  </svg>
+  <figcaption><span class="fig-label">Figure 8.6</span> — Every linear layer costs three GEMMs of equal size in training: the forward pass, the input gradient (passed down) and the weight gradient (kept for the optimizer). Purple = activations, gray-blue = weights, red = gradients. The weight-gradient GEMM needs the saved input <var>X</var>, which is why training stores activations.</figcaption>
+</figure>
+
+<p>Each of the three GEMMs costs 2 · <var>n</var> · <var>d</var><sub>in</sub> · <var>d</var><sub>out</sub> FLOPs (<a href="02-numbers-and-hardware.html">Chapter 2</a>'s 2·<var>m</var>·<var>n</var>·<var>k</var>). Backward is two of them, so it costs twice the forward. In total, each weight costs 6 FLOPs per token: 2 forward, 4 backward. Worked example: Llama 3.1 8B's query projection <var>W</var><sub>q</sub> is 4,096 × 4,096 = 16.8M weights. On one 8,192-token row its forward GEMM is 2 × 8,192 × 4,096 × 4,096 = 2.75 × 10<sup>11</sup> FLOPs, and training adds two more of the same size, 8.2 × 10<sup>11</sup> in total.</p>
+
+<p>Summed over the model, that gives the most useful formula in this chapter: <strong>training costs ≈ 6<var>N</var> FLOPs per token</strong>, versus 2<var>N</var> for inference (<a href="06-transformer.html">Chapter 6</a>). The approximation ignores the attention score computations, which do not involve weights. Their forward cost is about 4·<var>L</var>·<var>d</var>·<var>t</var> at position <var>t</var>, which averages to 2·<var>L</var>·<var>d</var>·<var>n</var> per token over a causal row of length <var>n</var>, so 6·<var>L</var>·<var>d</var>·<var>n</var> with backward. For Llama 3.1 8B at <var>n</var> = 8,192 that is 6.4 GFLOP, about 13% on top of 6<var>N</var> = 48 GFLOP. At <var>n</var> = 131,072 it is 103 GFLOP, more than twice 6<var>N</var>, which is one reason long-context training is saved for the end of the run.</p>
+
+<aside class="callout deep"><div class="callout-title">Low-level deep dive: how frameworks do it</div>
+<p>PyTorch's autograd records every operation during the forward pass on a "tape": a graph of nodes, each holding pointers to the tensors it saved. <code>loss.backward()</code> walks the tape in reverse and launches each op's backward kernel. For linear layers these are ordinary cuBLAS GEMMs with transposed operands, so the backward pass runs on the same tensor cores at similar efficiency. Element-wise ops (SiLU, RMSNorm, residual adds) have memory-bound backward kernels; FlashAttention's backward recomputes the attention scores instead of storing the <var>n</var> × <var>n</var> matrix (<a href="15-serving.html">Chapter 15</a>).</p>
+</aside>
+
+<aside class="callout key"><div class="callout-title">Key takeaway</div>
+<p>Backprop is the chain rule applied in reverse over the computation graph. It needs the saved forward values (memory) and costs about two forward passes (compute). Hence the two constants of training: <strong>6<var>N</var> FLOPs per token</strong> and <strong>activations that must stay in memory until backward uses them</strong>.</p>
+</aside>
+</section>
+
+<section>
+<h2>Optimizers: from gradient descent to AdamW</h2>
+
+<p>The gradient tells you which way is uphill, locally. The optimizer decides how far to step and in exactly which direction. Picture walking down a mountain in fog with a flashlight that only shows the slope under your feet.</p>
+
+<h3>Gradient descent and SGD</h3>
+<div class="formula">
+  <var>w</var> &#8592; <var>w</var> &#8722; <var>&#951;</var> &#183; <var>g</var>
+  <span class="where"><var>w</var> = a weight, <var>g</var> = ∂<var>L</var>/∂<var>w</var> (its gradient), <var>&#951;</var> (eta) = the <strong>learning rate</strong>, a small number like 10<sup>−4</sup> that sets the step size. Figure 8.5's update used <var>&#951;</var> = 0.1.</span>
+</div>
+<p>The true loss is an average over all the training data, but nobody computes the full gradient. Each step uses a <strong>mini-batch</strong> (a few million tokens), which gives a noisy but unbiased estimate. That is <strong>stochastic gradient descent (SGD)</strong>. The noise is not a bug: it lets training make progress after seeing a tiny fraction of the data, and it helps the optimizer avoid sharp, brittle minima.</p>
+
+<h3>Momentum: a heavy ball</h3>
+<p>Loss surfaces of neural nets have long, narrow valleys: very steep across, almost flat along. Plain gradient descent bounces from wall to wall and crawls along the floor. <strong>Momentum</strong> keeps a running velocity:</p>
+<div class="formula">
+  <var>v</var> &#8592; <var>&#946;</var>&#183;<var>v</var> + <var>g</var>  &#160;&#160;&#160;&#160; <var>w</var> &#8592; <var>w</var> &#8722; <var>&#951;</var>&#183;<var>v</var>
+  <span class="where"><var>&#946;</var> ≈ 0.9: how much of the old velocity survives each step. Components that flip sign every step (the bouncing) cancel out; components that point the same way every step (along the valley) add up, giving an effective step up to <var>&#951;</var> / (1 − <var>&#946;</var>) = 10<var>&#951;</var>.</span>
+</div>
+
+<h3>Adam: a separate step size for every weight</h3>
+<p>Different weights see gradients of wildly different sizes. The embedding row of a rare token gets a gradient once in a while; a normalization gain gets one every step. A single learning rate cannot suit them all. <strong>Adam</strong> keeps two running averages per weight and normalizes the step:</p>
+<div class="formula">
+  <var>m</var> &#8592; <var>&#946;</var><sub>1</sub><var>m</var> + (1&#8722;<var>&#946;</var><sub>1</sub>)<var>g</var>  &#160;&#160; <var>v</var> &#8592; <var>&#946;</var><sub>2</sub><var>v</var> + (1&#8722;<var>&#946;</var><sub>2</sub>)<var>g</var><sup>2</sup>  &#160;&#160; <var>w</var> &#8592; <var>w</var> &#8722; <var>&#951;</var> <span class="frac"><span><var>m&#770;</var></span><span>&#8730;<var>v&#770;</var> + <var>&#949;</var></span></span>
+  <span class="where"><var>m</var> = running mean of the gradient (momentum). <var>v</var> = running mean of the squared gradient (its typical size). <var>m&#770;</var> = <var>m</var>/(1−<var>&#946;</var><sub>1</sub><sup><var>k</var></sup>), <var>v&#770;</var> = <var>v</var>/(1−<var>&#946;</var><sub>2</sub><sup><var>k</var></sup>) correct for the zero initialization at step <var>k</var>. <var>&#949;</var> ≈ 10<sup>−8</sup> avoids division by zero.</span>
+</div>
+<p>Worked example at step 1 with <var>g</var> = 0.5, <var>&#946;</var><sub>1</sub> = 0.9, <var>&#946;</var><sub>2</sub> = 0.95: <var>m</var> = 0.05, <var>v</var> = 0.0125; bias-corrected <var>m&#770;</var> = 0.05/0.1 = 0.5 and <var>v&#770;</var> = 0.0125/0.05 = 0.25; step = <var>&#951;</var> × 0.5/√0.25 = <var>&#951;</var> × 1.0. With <var>g</var> = 0.0005 you get the same step, <var>&#951;</var>. Adam's update size is set by <var>&#951;</var>, not by the gradient's magnitude. The gradient mostly contributes a direction and a signal-to-noise ratio: weights with consistent gradients move about <var>&#951;</var> per step; weights with noisy, sign-flipping gradients move less.</p>
+
+<p><strong>AdamW</strong> adds <em>decoupled weight decay</em>: <var>w</var> ← <var>w</var> − <var>&#951;</var>·<var>&#955;</var>·<var>w</var> on top of the Adam step, which gently pulls every weight toward zero (<var>&#955;</var> = 0.1 is typical). "Decoupled" matters: adding the decay to the gradient instead would get divided by √<var>v&#770;</var> and lose its effect. AdamW is the default for LLM pretraining. DeepSeek-V3 used <var>&#946;</var><sub>1</sub> = 0.9, <var>&#946;</var><sub>2</sub> = 0.95, weight decay 0.1 and gradient clipping at 1.0, which are representative values.</p>
+
+<figure class="wide fig-gd">
+  <svg viewBox="0 0 960 400" role="img" aria-label="Animated optimizer race on an elongated loss valley: gradient descent zigzags, momentum and Adam reach the minimum faster">
+    <defs>
+      <clipPath id="ch08-gd-clip"><rect x="60" y="20" width="840" height="310"/></clipPath>
+      <radialGradient id="ch08-gd-bg" cx="0.5" cy="0.5" r="0.6">
+        <stop offset="0" stop-color="#e9f6f0"/>
+        <stop offset="1" stop-color="#f3f1ec"/>
+      </radialGradient>
+    </defs>
+    <rect x="60" y="20" width="840" height="310" fill="url(#ch08-gd-bg)" stroke="#ddd8ce"/>
+    <g id="ch08-gd-contours" fill="none" stroke="#c9cfdb" stroke-width="1.3">
+      <ellipse cx="480" cy="175" rx="148" ry="20"/>
+      <ellipse cx="480" cy="175" rx="257" ry="35"/>
+      <ellipse cx="480" cy="175" rx="364" ry="49"/>
+    </g>
+    <g clip-path="url(#ch08-gd-clip)">
+      <path id="ch08-gd-p0" d="M102 55" fill="none" stroke="#d64545" stroke-width="2.2" stroke-linejoin="round"/>
+      <path id="ch08-gd-p1" d="M102 55" fill="none" stroke="#e8833a" stroke-width="2.2" stroke-linejoin="round"/>
+      <path id="ch08-gd-p2" d="M102 55" fill="none" stroke="#2f9e6e" stroke-width="2.2" stroke-linejoin="round"/>
+      <circle id="ch08-gd-b0" r="7" fill="#d64545" stroke="#ffffff" stroke-width="1.5" cx="102" cy="55"/>
+      <circle id="ch08-gd-b1" r="7" fill="#e8833a" stroke="#ffffff" stroke-width="1.5" cx="102" cy="55"/>
+      <circle id="ch08-gd-b2" r="7" fill="#2f9e6e" stroke="#ffffff" stroke-width="1.5" cx="102" cy="55"/>
+    </g>
+    <g font-size="15" fill="#1d2433">
+      <text x="480" y="180" text-anchor="middle" fill="#687084">&#215;</text>
+      <text x="492" y="196" fill="#687084">minimum</text>
+      <text x="96" y="44" fill="#687084">start</text>
+    </g>
+    <g font-size="15">
+      <rect x="60" y="352" width="18" height="5" fill="#d64545"/><text x="84" y="360" fill="#1d2433">gradient descent</text>
+      <text id="ch08-gd-l0" x="210" y="360" fill="#687084"></text>
+      <rect x="340" y="352" width="18" height="5" fill="#e8833a"/><text x="364" y="360" fill="#1d2433">momentum</text>
+      <text id="ch08-gd-l1" x="452" y="360" fill="#687084"></text>
+      <rect x="590" y="352" width="18" height="5" fill="#2f9e6e"/><text x="614" y="360" fill="#1d2433">Adam</text>
+      <text id="ch08-gd-l2" x="664" y="360" fill="#687084"></text>
+      <text id="ch08-gd-step" x="900" y="360" text-anchor="end" fill="#687084"></text>
+      <text x="60" y="390" fill="#687084">loss f(x, y) = x&#178;/50 + y&#178;: 50&#215; steeper across the valley than along it (a toy stand-in for a real loss surface)</text>
+    </g>
+  </svg>
+  <div class="gd-controls">
+    <button type="button" class="btn primary" id="ch08-gd-play">&#9654; Replay</button>
+    <label>learning-rate scale <input type="range" id="ch08-gd-lr" min="0.3" max="1.3" step="0.05" value="1"> <span class="readout" id="ch08-gd-lr-out">1.00&#215;</span></label>
+    <label><input type="checkbox" id="ch08-gd-noise"> mini-batch noise</label>
+  </div>
+  <figcaption><span class="fig-label">Figure 8.7</span> — Three optimizers race for 60 steps from the same start. Gradient descent zigzags across the steep direction and crawls along the shallow one. Momentum averages out the zigzag. Adam rescales each coordinate by its own gradient size, heads almost straight for the minimum, then jitters around it at a constant learning rate (one reason schedules decay the LR at the end). Push the learning rate above ~1.1× and gradient descent diverges. Base rates: GD 0.9, momentum 0.3 with <var>&#946;</var> = 0.8, Adam 0.5.</figcaption>
+</figure>
+
+<aside class="callout deep"><div class="callout-title">Low-level deep dive: the optimizer step is memory-bound</div>
+<p>AdamW does about a dozen FLOPs per weight but touches a lot of bytes: read the FP32 master weight, BF16 gradient, FP32 <var>m</var> and <var>v</var> (14 B), write back master, <var>m</var>, <var>v</var> and a fresh BF16 copy (14 B). That is ~28 bytes per parameter per step, or 225 GB for an 8B model. At 3.35 TB/s that is ~67 ms on one H100 if nothing were sharded, small next to a multi-second step. Frameworks use "multi-tensor" or fused kernels that update many tensors per launch, because launching one kernel per weight tensor would cost more in launch overhead than in work.</p>
+</aside>
+
+<p>Optimizer research is still active. Kimi K2 (2025) was trained with <strong>MuonClip</strong>, a variant of the Muon optimizer that orthogonalizes each weight matrix's momentum update (via a few Newton–Schulz iterations) instead of scaling each entry separately, plus a clip that keeps attention logits bounded. Muon keeps only one state tensor per weight instead of Adam's two. AdamW remains the default.</p>
+</section>
+
+<section>
+<h2>Learning rate, batch size and stability</h2>
+
+<p>The learning rate is the most sensitive knob. Too high and the loss spikes or diverges to NaN. Too low and you waste millions of dollars of compute crawling. It is not constant: every run follows a <strong>schedule</strong>.</p>
+
+<h3>Warmup</h3>
+<p>Runs start with a <strong>linear warmup</strong>: the learning rate ramps from about zero to its peak over the first few thousand steps (8,000 for Llama 3 405B; 2,000 for DeepSeek-V3). At initialization Adam's <var>v</var> estimates are based on very few samples and the network is in a fragile state, so full-size steps early on cause blow-ups.</p>
+
+<h3>Decay: cosine and WSD</h3>
+<p>After warmup, the classic choice is <strong>cosine decay</strong>: the rate follows half a cosine wave from the peak down to a small floor at the planned end. Llama 3 405B used a peak of 8 × 10<sup>−5</sup>, decaying to 8 × 10<sup>−7</sup> over 1.2 million steps. Its weakness: you must fix the total length in advance, and an intermediate checkpoint is never "finished".</p>
+
+<p><strong>Warmup–stable–decay (WSD)</strong> fixes that: hold the peak rate constant for most of the run, then decay quickly at the end (MiniCPM found ~10% of the tokens is enough). You can branch a short decay off any checkpoint to see how good the model would be if you stopped there, and keep training the main branch. Kimi K2 used WSD: constant 2 × 10<sup>−4</sup> for 10T tokens, then cosine down to 2 × 10<sup>−5</sup> over 5.5T. DeepSeek-V3 used a similar staged schedule: constant until 10T tokens, cosine decay over 4.3T, then two short constant phases at lower rates.</p>
+
+<figure class="wide">
+  <svg viewBox="0 0 960 470" role="img" aria-label="Learning-rate schedules: warmup plus cosine decay versus warmup-stable-decay, with illustrative loss curves showing the sharp drop during decay">
+    <g font-size="15" fill="#687084">
+      <text x="86" y="30" font-weight="700">learning rate</text>
+      <text x="110" y="262" font-weight="700">loss <tspan font-weight="400">(illustrative)</tspan></text>
+    </g>
+    <rect x="80" y="45" width="25" height="155" fill="#fcf6e3"/>
+    <text x="92" y="222" font-size="14" fill="#9a7410" text-anchor="middle">warmup</text>
+    <rect x="736" y="45" width="164" height="155" fill="#f2eefc"/>
+    <text x="818" y="222" font-size="14" fill="#5a3fb3" text-anchor="middle">WSD decay (~10&#8211;20%)</text>
+    <line x1="80" y1="200" x2="905" y2="200" stroke="#687084"/>
+    <line x1="80" y1="200" x2="80" y2="40" stroke="#687084"/>
+    <path id="ch08-lr-cos" d="M80 200" fill="none" stroke="#2f6fde" stroke-width="2.6"/>
+    <path id="ch08-lr-wsd" d="M80 200" fill="none" stroke="#7b5cd6" stroke-width="2.6"/>
+    <g font-size="15">
+      <text x="200" y="112" fill="#2f6fde" font-weight="700">warmup + cosine</text>
+      <text x="430" y="40" fill="#7b5cd6" font-weight="700">warmup + stable + decay (WSD)</text>
+    </g>
+    <line x1="80" y1="430" x2="905" y2="430" stroke="#687084"/>
+    <line x1="80" y1="430" x2="80" y2="262" stroke="#687084"/>
+    <path id="ch08-loss-cos" d="M80 430" fill="none" stroke="#2f6fde" stroke-width="2.6"/>
+    <path id="ch08-loss-wsd" d="M80 430" fill="none" stroke="#7b5cd6" stroke-width="2.6"/>
+    <path id="ch08-loss-br" d="M80 430" fill="none" stroke="#7b5cd6" stroke-width="2.2" stroke-dasharray="6 4"/>
+    <g font-size="15">
+      <text x="300" y="300" fill="#7b5cd6">dashed: a short decay branched off mid-run shows</text>
+      <text x="300" y="318" fill="#7b5cd6">what the model would be "if we stopped here"</text>
+      <text x="700" y="330" fill="#5a3fb3">stable phase: loss plateaus higher</text>
+      <text x="905" y="455" text-anchor="end" fill="#687084">training progress (tokens) &#8594;</text>
+    </g>
+  </svg>
+  <figcaption><span class="fig-label">Figure 8.8</span> — Two schedules with the same peak. With WSD the loss stays higher during the long constant phase and then drops sharply when the rate decays, ending slightly below cosine. A decay branched off any checkpoint (dashed) gives a usable model early. Loss curves are illustrative, but the sharp drop at decay is a real, well-documented effect.</figcaption>
+</figure>
+
+<p>Why does lowering the learning rate drop the loss so fast? At a high rate the weights bounce around the floor of the valley, like the Adam path in Figure 8.7. Lowering the rate lets them settle toward the floor. This "annealing" effect is also why every run ends with a low-LR phase on the best data.</p>
+
+<h3>Batch size, in tokens</h3>
+<p>For LLMs the batch is measured in tokens: rows × sequence length. Bigger batches give less noisy gradients and more parallel work per step, but beyond a <strong>critical batch size</strong> doubling the batch no longer halves the number of steps needed, and the extra tokens are partly wasted. The critical batch size grows as the loss falls, so runs ramp the batch up:</p>
+<ul>
+  <li><strong>Llama 3 405B:</strong> 4M tokens (rows of 4,096) → 8M (rows of 8,192) after 252M tokens → 16M after 2.87T tokens.</li>
+  <li><strong>DeepSeek-V3:</strong> 3,072 → 15,360 rows of 4,096 tokens (about 12.6M → 63M tokens) over the first 469B tokens.</li>
+  <li><strong>Kimi K2:</strong> a constant 67M tokens.</li>
+</ul>
+
+<h3>Gradient accumulation</h3>
+<p>If the batch is bigger than what fits in memory, split it into <strong>micro-batches</strong>: run forward and backward on each, <em>add</em> the gradients into the same buffer, and only then run the optimizer once. The math is identical to one big batch because the loss is an average. The global batch in tokens is:</p>
+<div class="formula">
+  tokens per step = micro-batch rows &#215; accumulation steps &#215; data-parallel replicas &#215; sequence length
+  <span class="where">Llama 3 405B, first stage: 32 rows per data-parallel group (fed through the pipeline as micro-batches) × 64 groups × 8,192 tokens = 16.8M tokens per step.</span>
+</div>
+
+<h3>Gradient clipping and loss spikes</h3>
+<p>Occasionally a batch produces a huge gradient. <strong>Gradient clipping</strong> computes the global L2 norm of all gradients, ‖<var>g</var>‖ = √(Σ <var>g</var><sub><var>i</var></sub><sup>2</sup>) over every weight in the model, and if it exceeds a threshold (1.0 is standard), scales every gradient by 1.0/‖<var>g</var>‖. Direction is kept, length is capped. When weights are sharded across GPUs, this needs one extra all-reduce of the partial sums of squares.</p>
+<p>Big runs still see <strong>loss spikes</strong>: the loss suddenly jumps and either recovers or diverges. Common causes are attention logits growing without bound, bad data batches, and too-high learning rates. Remedies include rolling back to a checkpoint and skipping the offending data, lowering the rate, normalizing queries and keys (QK-norm) or capping attention logits (Kimi's QK-Clip). Llama 3 reports "few loss spikes", DeepSeek-V3 "no irrecoverable loss spikes", and Kimi K2 shows a spike-free curve. Stability is a headline feature because a diverged run at this scale costs millions.</p>
+
+<p>One more knob: <strong>initialization</strong>. Weights start as small random values (in GPT-2-style code, normal with standard deviation 0.02, with residual-output projections scaled down by depth). Getting the scale right per layer, so that hyperparameters tuned on small models transfer to big ones, is an active area; Meta's Llama 4 post calls its method MetaP.</p>
+</section>
+
+<section>
+<h2>Mixed precision: BF16, FP32 masters and FP8</h2>
+
+<p>Number formats themselves are covered in <a href="02-numbers-and-hardware.html">Chapter 2</a>. Here is how training uses them, and why it needs more than one.</p>
+
+<h3>Why not everything in FP32?</h3>
+<p>Speed and memory. On an H100, BF16 tensor-core matmuls run at ~989 TFLOP/s; plain FP32 arithmetic runs at about 67 TFLOP/s. BF16 also halves the bytes moved. So the GEMMs, which are nearly all of the FLOPs, run in BF16 (with FP32 accumulation inside the tensor core).</p>
+
+<h3>Why not everything in BF16?</h3>
+<p>Because updates are tiny relative to the weights. BF16 keeps 8 significant bits, so near 1.0 the gap between representable numbers is 2<sup>−7</sup> ≈ 0.0078. Take a weight of 1.0 and an update of −0.0001 (a learning rate of 10<sup>−4</sup> times an Adam step of ~1): 1.0 − 0.0001 = 0.9999, which rounds right back to 1.0 in BF16. The update is lost, every step, forever (this is the "swamping" effect from <a href="02-numbers-and-hardware.html">Chapter 2</a>). FP32's gap near 1.0 is 2<sup>−23</sup> ≈ 1.2 × 10<sup>−7</sup>, so the update survives. Hence the standard recipe:</p>
+
+<figure class="wide">
+  <svg viewBox="0 0 960 360" role="img" aria-label="Mixed precision training data flow: FP32 master weights cast to BF16 for tensor-core GEMMs, BF16 gradients, FP32 AdamW update, and an FP8 variant">
+    <defs>
+      <marker id="ch08-mp-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#1d2433"/></marker>
+    </defs>
+    <rect x="30" y="40" width="190" height="70" rx="8" fill="#dfe3ec" stroke="#5a6b8c"/>
+    <text x="125" y="68" font-size="16" font-weight="700" text-anchor="middle" fill="#1d2433">master weights</text>
+    <text x="125" y="92" font-size="15" text-anchor="middle" fill="#3a4254">FP32 &#183; 4 B/param</text>
+    <rect x="300" y="40" width="190" height="70" rx="8" fill="#eef0f5" stroke="#5a6b8c"/>
+    <text x="395" y="68" font-size="16" font-weight="700" text-anchor="middle" fill="#1d2433">working weights</text>
+    <text x="395" y="92" font-size="15" text-anchor="middle" fill="#3a4254">BF16 &#183; 2 B/param</text>
+    <rect x="570" y="30" width="230" height="90" rx="8" fill="#fcecec" stroke="#d64545"/>
+    <text x="685" y="58" font-size="16" font-weight="700" text-anchor="middle" fill="#1d2433">tensor-core GEMMs</text>
+    <text x="685" y="80" font-size="15" text-anchor="middle" fill="#3a4254">forward + backward</text>
+    <text x="685" y="102" font-size="15" text-anchor="middle" fill="#3a4254">BF16 in, FP32 accumulate</text>
+    <rect x="570" y="190" width="230" height="70" rx="8" fill="#f7d9d9" stroke="#d64545"/>
+    <text x="685" y="218" font-size="16" font-weight="700" text-anchor="middle" fill="#1d2433">gradients</text>
+    <text x="685" y="242" font-size="15" text-anchor="middle" fill="#3a4254">BF16 &#183; 2 B/param</text>
+    <rect x="30" y="180" width="300" height="90" rx="8" fill="#e8f1fb" stroke="#3d8bd4"/>
+    <text x="180" y="208" font-size="16" font-weight="700" text-anchor="middle" fill="#1d2433">AdamW update in FP32</text>
+    <text x="180" y="232" font-size="15" text-anchor="middle" fill="#3a4254">m: FP32 &#183; 4 B/param</text>
+    <text x="180" y="254" font-size="15" text-anchor="middle" fill="#3a4254">v: FP32 &#183; 4 B/param</text>
+    <g stroke="#1d2433" stroke-width="2" fill="none" marker-end="url(#ch08-mp-a)">
+      <path d="M222 75 L296 75"/>
+      <path d="M492 75 L566 75"/>
+      <path d="M685 122 L685 186"/>
+      <path d="M568 225 L334 225"/>
+      <path d="M125 178 L125 114"/>
+    </g>
+    <g font-size="14" fill="#687084">
+      <text x="259" y="66" text-anchor="middle">cast</text>
+      <text x="695" y="160">grads</text>
+      <text x="450" y="216" text-anchor="middle">(all-reduce / reduce-scatter)</text>
+      <text x="135" y="150">update</text>
+    </g>
+    <rect x="30" y="300" width="770" height="40" rx="6" fill="#f3f1ec" stroke="#ddd8ce"/>
+    <text x="415" y="326" font-size="16" text-anchor="middle" fill="#1d2433">2 (BF16 w) + 2 (BF16 grad) + 4 (FP32 master) + 4 (m) + 4 (v) = <tspan font-weight="700">16 bytes per parameter</tspan></text>
+    <rect x="820" y="30" width="128" height="240" rx="8" fill="#ffffff" stroke="#d64545" stroke-dasharray="5 4"/>
+    <g font-size="14" fill="#3a4254">
+      <text x="832" y="54" font-weight="700" fill="#d64545" font-size="15">FP8 variant</text>
+      <text x="832" y="78">GEMM inputs</text>
+      <text x="832" y="96">cast to E4M3</text>
+      <text x="832" y="114">with a scale per</text>
+      <text x="832" y="132">1&#215;128 activation</text>
+      <text x="832" y="150">tile and 128&#215;128</text>
+      <text x="832" y="168">weight block</text>
+      <text x="832" y="192">2&#215; BF16 peak</text>
+      <text x="832" y="216">masters, m, v</text>
+      <text x="832" y="234">stay in higher</text>
+      <text x="832" y="252">precision</text>
+    </g>
+    <path d="M802 75 L818 75" stroke="#d64545" stroke-width="2" stroke-dasharray="4 3"/>
+  </svg>
+  <figcaption><span class="fig-label">Figure 8.9</span> — Mixed-precision training. The FP32 master copy absorbs tiny updates; a BF16 copy feeds the fast GEMMs. The right panel shows the FP8 recipe DeepSeek-V3 used (details of block-scaled formats are in <a href="13-quantization.html">Chapter 13</a>).</figcaption>
+</figure>
+
+<h3>FP16 and loss scaling</h3>
+<p>Before BF16 hardware (pre-A100), mixed precision used FP16. FP16 has only 5 exponent bits: its smallest normal number is about 6 × 10<sup>−5</sup>. Many gradients are smaller than that: they lose precision, and below about 6 × 10<sup>−8</sup> they become zero. The fix is <strong>loss scaling</strong>: multiply the loss by a large factor <var>S</var> (say 2<sup>16</sup>) before backward, which scales every gradient by <var>S</var> and lifts them into range; then divide by <var>S</var> before the update. <em>Dynamic</em> loss scaling halves <var>S</var> and skips the step when an overflow (inf/NaN) appears, and slowly raises it otherwise. BF16 has the same 8-bit exponent as FP32, so it needs no loss scaling. That is the main reason BF16 won for training.</p>
+
+<h3>FP8 training</h3>
+<p>FP8 tensor cores double peak throughput again (H100: ~1,979 vs ~989 TFLOP/s dense). The difficulty is range: E4M3's largest value is 448, and one outlier forces a coarse scale on everything near it. DeepSeek-V3 made FP8 work at scale with three ideas:</p>
+<ul>
+  <li><strong>Fine-grained scaling.</strong> Each 1 × 128 tile of activations (one token, 128 channels) and each 128 × 128 block of weights gets its own scale factor, so an outlier only hurts its own tile. They used E4M3 for all tensors.</li>
+  <li><strong>Higher-precision accumulation.</strong> They measured that the H800's FP8 tensor-core accumulation keeps only about 14 bits, so partial sums are periodically promoted to FP32 registers on the CUDA cores.</li>
+  <li><strong>Selective precision.</strong> The embedding, output head, MoE router, normalizations and attention stay in BF16/FP32, and master weights, weight gradients and optimizer states are kept in higher precision.</li>
+</ul>
+<p>Their reported relative loss difference versus a BF16 baseline stayed below 0.25%. Meta reports pretraining Llama 4 Behemoth in FP8 at 390 TFLOP/s per GPU on 32K GPUs. FP8 training is now mainstream at the frontier.</p>
+</section>
+
+<section>
+<h2>Training memory: 16 bytes per parameter, plus activations</h2>
+
+<p>Inference needs the weights (plus KV cache, <a href="12-kv-cache.html">Chapter 12</a>). Training needs much more. Using the recipe above, the <strong>model states</strong> for Llama 3.1 8B are:</p>
+
+<div class="table-wrap">
+<table class="data">
+  <tr><th>Item</th><th>Format</th><th class="num">Bytes / param</th><th class="num">Llama 3.1 8B</th></tr>
+  <tr><td>Working weights</td><td>BF16</td><td class="num">2</td><td class="num">16.06 GB</td></tr>
+  <tr><td>Gradients</td><td>BF16</td><td class="num">2</td><td class="num">16.06 GB</td></tr>
+  <tr><td>Master weights</td><td>FP32</td><td class="num">4</td><td class="num">32.12 GB</td></tr>
+  <tr><td>Adam <var>m</var></td><td>FP32</td><td class="num">4</td><td class="num">32.12 GB</td></tr>
+  <tr><td>Adam <var>v</var></td><td>FP32</td><td class="num">4</td><td class="num">32.12 GB</td></tr>
+  <tr><th>Total model states</th><th></th><th class="num">16</th><th class="num">128.5 GB</th></tr>
+</table>
+</div>
+<p>That is <strong>8× the memory of serving the same model in BF16</strong>, before a single activation. Variants exist: keeping FP32 gradients (Llama 3 accumulates gradients in FP32) gives 18 B/param; 8-bit or BF16 optimizer states shrink it toward 10–12. Sixteen is the standard rule of thumb.</p>
+
+<h3>Activations</h3>
+<p>Activations depend on how many tokens are in flight, not on <var>N</var>. A rough count for one Llama 3.1 8B layer, per token, in BF16, using FlashAttention (so no <var>n</var> × <var>n</var> score matrix is stored): the inputs of the two RMSNorms (2 × <var>d</var>), the normalized inputs to the attention and MLP projections (2 × <var>d</var>), Q, K, V after RoPE (<var>d</var> + <var>d</var>/4 + <var>d</var>/4 = 1.5<var>d</var>, thanks to GQA), the attention output (<var>d</var>), and in the MLP the gate, up and gated product (3 × <var>d</var><sub>ff</sub>):</p>
+<div class="formula">
+  2 B × (6.5 × 4,096 + 3 × 14,336) = 139,264 B &#8776; 136 KiB per token per layer
+  <span class="where">× 32 layers = 4.46 MB per token. One 8,192-token row: 8,192 × 4.46 MB ≈ <strong>36.5 GB</strong>. This is an approximation; exact numbers depend on which tensors a framework saves.</span>
+</div>
+<p>(For comparison, Megatron's well-known estimate for GPT-style layers is 34·<var>d</var> bytes per token per layer, plus a term for the attention matrix that FlashAttention removes. It happens to give the same 139,264 B here.)</p>
+
+<h3>Activation checkpointing</h3>
+<p><strong>Activation checkpointing</strong> (also called recomputation) trades compute for memory: store only each layer's <em>input</em> (2 × 4,096 B = 8 KiB per token per layer) and, during backward, re-run that layer's forward to regenerate the rest just before it is needed. Memory falls to 32 × 8 KiB × 8,192 ≈ 2.1 GB for the checkpoints, plus one layer's full activations (~1.1 GB) at a time. The price is one extra forward pass: 8<var>N</var> instead of 6<var>N</var> FLOPs per token, about +33%. <strong>Selective</strong> recomputation only regenerates tensors that are big but cheap to compute (attention internals, element-wise activations) and gets most of the savings for a few percent of extra compute. It is a classic space–time trade, like recomputing a value instead of caching it. Llama 3 405B, with its parallelism spreading activations over many GPUs, reports training 8K-token sequences <em>without</em> activation checkpointing.</p>
+
+<figure class="wide">
+  <svg viewBox="0 0 960 360" role="img" aria-label="Memory bars for training Llama 3.1 8B: single GPU, with activation checkpointing, with ZeRO-3 over 8 GPUs, against the 80 GB H100 line">
+    <g font-size="14" fill="#3a4254">
+      <rect x="210" y="14" width="12" height="12" fill="#5a6b8c"/><text x="227" y="25">BF16 weights</text>
+      <rect x="330" y="14" width="12" height="12" fill="#e99a9a"/><text x="347" y="25">BF16 grads</text>
+      <rect x="440" y="14" width="12" height="12" fill="#a3aec4"/><text x="457" y="25">FP32 master</text>
+      <rect x="560" y="14" width="12" height="12" fill="#3d8bd4"/><text x="577" y="25">Adam m</text>
+      <rect x="650" y="14" width="12" height="12" fill="#9cc5ee"/><text x="667" y="25">Adam v</text>
+      <rect x="740" y="14" width="12" height="12" fill="#7b5cd6"/><text x="757" y="25">activations (one 8K row)</text>
+    </g>
+    <g font-size="15" fill="#1d2433">
+      <text x="20" y="70" font-weight="700">1 GPU, nothing special</text>
+      <text x="20" y="140" font-weight="700">+ act. checkpointing</text>
+      <text x="20" y="202" font-weight="700">ZeRO-3 over 8 GPUs</text><text x="20" y="222" fill="#687084">per GPU, no checkpointing</text>
+      <text x="20" y="272" font-weight="700">ZeRO-3 over 8 GPUs</text><text x="20" y="292" fill="#687084">per GPU, + checkpointing</text>
+    </g>
+    <g>
+      <rect x="210" y="48" width="64.2" height="34" fill="#5a6b8c"/>
+      <rect x="274.2" y="48" width="64.2" height="34" fill="#e99a9a"/>
+      <rect x="338.5" y="48" width="128.5" height="34" fill="#a3aec4"/>
+      <rect x="467" y="48" width="128.5" height="34" fill="#3d8bd4"/>
+      <rect x="595.5" y="48" width="128.5" height="34" fill="#9cc5ee"/>
+      <rect x="724" y="48" width="146" height="34" fill="#7b5cd6"/>
+      <g font-size="14" text-anchor="middle" font-weight="700">
+        <text x="242" y="70" fill="#ffffff">16</text><text x="306" y="70" fill="#1d2433">16</text><text x="403" y="70" fill="#1d2433">32</text><text x="531" y="70" fill="#ffffff">32</text><text x="660" y="70" fill="#1d2433">32</text><text x="797" y="70" fill="#ffffff">36.5</text>
+      </g>
+      <text x="878" y="70" font-size="15" font-weight="700" fill="#d64545">165 GB</text>
+    </g>
+    <g>
+      <rect x="210" y="118" width="64.2" height="34" fill="#5a6b8c"/>
+      <rect x="274.2" y="118" width="64.2" height="34" fill="#e99a9a"/>
+      <rect x="338.5" y="118" width="128.5" height="34" fill="#a3aec4"/>
+      <rect x="467" y="118" width="128.5" height="34" fill="#3d8bd4"/>
+      <rect x="595.5" y="118" width="128.5" height="34" fill="#9cc5ee"/>
+      <rect x="724" y="118" width="13" height="34" fill="#7b5cd6"/>
+      <text x="745" y="140" font-size="15" font-weight="700" fill="#d64545">&#8776; 132 GB</text>
+    </g>
+    <g>
+      <rect x="210" y="188" width="8" height="34" fill="#5a6b8c"/>
+      <rect x="218" y="188" width="8" height="34" fill="#e99a9a"/>
+      <rect x="226" y="188" width="16" height="34" fill="#a3aec4"/>
+      <rect x="242" y="188" width="16" height="34" fill="#3d8bd4"/>
+      <rect x="258" y="188" width="16.2" height="34" fill="#9cc5ee"/>
+      <rect x="274.2" y="188" width="146" height="34" fill="#7b5cd6"/>
+      <text x="347" y="210" font-size="14" text-anchor="middle" fill="#ffffff" font-weight="700">36.5</text>
+      <text x="428" y="210" font-size="15" font-weight="700" fill="#1f7a53">&#8776; 52.6 GB</text>
+    </g>
+    <g>
+      <rect x="210" y="258" width="8" height="34" fill="#5a6b8c"/>
+      <rect x="218" y="258" width="8" height="34" fill="#e99a9a"/>
+      <rect x="226" y="258" width="16" height="34" fill="#a3aec4"/>
+      <rect x="242" y="258" width="16" height="34" fill="#3d8bd4"/>
+      <rect x="258" y="258" width="16.2" height="34" fill="#9cc5ee"/>
+      <rect x="274.2" y="258" width="13" height="34" fill="#7b5cd6"/>
+      <text x="296" y="280" font-size="15" font-weight="700" fill="#1f7a53">&#8776; 19.4 GB</text>
+    </g>
+    <line x1="530" y1="38" x2="530" y2="306" stroke="#d64545" stroke-width="2" stroke-dasharray="6 4"/>
+    <text x="530" y="326" font-size="15" text-anchor="middle" fill="#d64545" font-weight="700">H100: 80 GB</text>
+    <line x1="210" y1="306" x2="890" y2="306" stroke="#687084"/>
+    <g font-size="14" fill="#687084" text-anchor="middle">
+      <text x="210" y="348">0</text><text x="410" y="348">50 GB</text><text x="610" y="348">100 GB</text><text x="810" y="348">150 GB</text>
+    </g>
+  </svg>
+  <figcaption><span class="fig-label">Figure 8.10</span> — Memory to train Llama 3.1 8B with AdamW in mixed precision (1 GB = 10<sup>9</sup> B; activations approximate). Even with perfect checkpointing, 128.5 GB of model states cannot fit on one 80 GB GPU. Sharding them over 8 GPUs (ZeRO-3, next section) makes it fit with room for activations.</figcaption>
+</figure>
+
+<aside class="callout key"><div class="callout-title">Key takeaway</div>
+<p>Training memory = <strong>16 B × <var>N</var></strong> for model states + activations that scale with tokens in flight. An 8B model needs ~128 GB of states; a 405B model needs ~6.5 TB. No single GPU comes close, which is why the next section exists.</p>
+</aside>
+</section>
+
+<section>
+<h2>Parallelism: splitting the job across thousands of GPUs</h2>
+
+<p>Two hard facts force distribution. First, memory: the 405B model's 6.5 TB of model states, against 80 GB per H100. Second, time: Llama 3 405B's 3.8 × 10<sup>25</sup> FLOPs on one H100 at a realistic 400 TFLOP/s would take 9.5 × 10<sup>10</sup> seconds, about 3,000 years. Spread over 16,384 GPUs it took a couple of months.</p>
+
+<p>There are several independent ways to cut the work, and big runs combine them. Each cuts a different dimension and pays in a different kind of communication. The collectives they use (all-reduce, reduce-scatter, all-gather, all-to-all) are introduced in <a href="02-numbers-and-hardware.html">Chapter 2</a>. The governing constraint is the network hierarchy: inside a server, 8 GPUs talk over NVLink at ~900 GB/s; between servers, each GPU typically gets one 400 Gb/s link (~50 GB/s), about 18× slower. Chatty parallelism must stay inside the node.</p>
+
+<div class="table-wrap">
+<table class="data">
+  <tr><th>Dimension</th><th>What is split</th><th>Communication</th><th>Typical placement</th></tr>
+  <tr><td>Data (DP)</td><td>the batch</td><td>gradient all-reduce, once per step</td><td>outermost, across nodes</td></tr>
+  <tr><td>ZeRO / FSDP</td><td>optimizer state, gradients, weights</td><td>reduce-scatter + all-gathers</td><td>with DP</td></tr>
+  <tr><td>Tensor (TP)</td><td>each weight matrix</td><td>2 all-reduces per layer, forward and backward</td><td>inside a node</td></tr>
+  <tr><td>Pipeline (PP)</td><td>the layers</td><td>point-to-point activations between stages</td><td>across nodes</td></tr>
+  <tr><td>Context (CP)</td><td>the sequence</td><td>exchange K/V for attention</td><td>near TP</td></tr>
+  <tr><td>Expert (EP)</td><td>the experts of MoE layers</td><td>all-to-all token dispatch and combine</td><td>across GPUs/nodes</td></tr>
+</table>
+</div>
+
+<h3>Data parallelism</h3>
+<p>The simplest idea: give every GPU a full copy of the model and a different slice of the batch. Each computes gradients on its slice. Because the loss is an average, the full-batch gradient is the average of the slice gradients, so one <strong>all-reduce</strong> (sum, then divide) gives every GPU the exact full-batch gradient. All copies then apply the same update and stay identical.</p>
+
+<figure class="stepper wide fig-dp" data-steps="4" data-interval="3000">
+  <svg viewBox="0 0 960 366" role="img" aria-label="Data parallelism on four GPUs: same weights, different data, local gradients, all-reduce to the average, identical update">
+    <defs>
+      <marker id="ch08-dp-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#3d8bd4"/></marker>
+    </defs>
+    <g font-size="16" font-weight="700" fill="#1d2433" text-anchor="middle">
+      <text x="125" y="32">GPU 0</text><text x="355" y="32">GPU 1</text><text x="585" y="32">GPU 2</text><text x="815" y="32">GPU 3</text>
+    </g>
+    <g fill="#ffffff" stroke="#c9cfdb" stroke-width="1.5">
+      <rect x="20" y="44" width="210" height="250" rx="10"/><rect x="250" y="44" width="210" height="250" rx="10"/>
+      <rect x="480" y="44" width="210" height="250" rx="10"/><rect x="710" y="44" width="210" height="250" rx="10"/>
+    </g>
+    <!-- weights -->
+    <g fill="#dfe3ec" stroke="#5a6b8c">
+      <rect x="35" y="58" width="180" height="34" rx="5"/><rect x="265" y="58" width="180" height="34" rx="5"/>
+      <rect x="495" y="58" width="180" height="34" rx="5"/><rect x="725" y="58" width="180" height="34" rx="5"/>
+    </g>
+    <g font-size="15" fill="#1d2433" text-anchor="middle">
+      <text x="125" y="80">full weights + optimizer</text><text x="355" y="80">full weights + optimizer</text>
+      <text x="585" y="80">full weights + optimizer</text><text x="815" y="80">full weights + optimizer</text>
+    </g>
+    <!-- data -->
+    <g fill="#fbefc5" stroke="#e5b62b">
+      <rect x="35" y="104" width="180" height="34" rx="5"/><rect x="265" y="104" width="180" height="34" rx="5"/>
+      <rect x="495" y="104" width="180" height="34" rx="5"/><rect x="725" y="104" width="180" height="34" rx="5"/>
+    </g>
+    <g font-size="15" fill="#1d2433" text-anchor="middle">
+      <text x="125" y="126">batch rows 0&#8211;3</text><text x="355" y="126">batch rows 4&#8211;7</text>
+      <text x="585" y="126">batch rows 8&#8211;11</text><text x="815" y="126">batch rows 12&#8211;15</text>
+    </g>
+    <!-- local grads -->
+    <g data-step-only="2">
+      <g fill="#e99a9a">
+        <rect x="70" y="230" width="18" height="40"/><rect x="96" y="254" width="18" height="16"/><rect x="122" y="242" width="18" height="28"/><rect x="148" y="218" width="18" height="52"/><rect x="174" y="250" width="18" height="20"/>
+        <rect x="300" y="246" width="18" height="24"/><rect x="326" y="234" width="18" height="36"/><rect x="352" y="258" width="18" height="12"/><rect x="378" y="226" width="18" height="44"/><rect x="404" y="238" width="18" height="32"/>
+        <rect x="530" y="222" width="18" height="48"/><rect x="556" y="250" width="18" height="20"/><rect x="582" y="234" width="18" height="36"/><rect x="608" y="246" width="18" height="24"/><rect x="634" y="254" width="18" height="16"/>
+        <rect x="760" y="238" width="18" height="32"/><rect x="786" y="246" width="18" height="24"/><rect x="812" y="250" width="18" height="20"/><rect x="838" y="230" width="18" height="40"/><rect x="864" y="242" width="18" height="28"/>
+      </g>
+      <g font-size="15" fill="#ad2f2f" text-anchor="middle" font-weight="700">
+        <text x="125" y="196">local gradient g&#8320;</text><text x="355" y="196">local gradient g&#8321;</text>
+        <text x="585" y="196">local gradient g&#8322;</text><text x="815" y="196">local gradient g&#8323;</text>
+      </g>
+    </g>
+    <g data-step="3">
+      <g fill="#d64545">
+        <rect x="70" y="234" width="18" height="36"/><rect x="96" y="246" width="18" height="24"/><rect x="122" y="246" width="18" height="24"/><rect x="148" y="230" width="18" height="40"/><rect x="174" y="246" width="18" height="24"/>
+        <rect x="300" y="234" width="18" height="36"/><rect x="326" y="246" width="18" height="24"/><rect x="352" y="246" width="18" height="24"/><rect x="378" y="230" width="18" height="40"/><rect x="404" y="246" width="18" height="24"/>
+        <rect x="530" y="234" width="18" height="36"/><rect x="556" y="246" width="18" height="24"/><rect x="582" y="246" width="18" height="24"/><rect x="608" y="230" width="18" height="40"/><rect x="634" y="246" width="18" height="24"/>
+        <rect x="760" y="234" width="18" height="36"/><rect x="786" y="246" width="18" height="24"/><rect x="812" y="246" width="18" height="24"/><rect x="838" y="230" width="18" height="40"/><rect x="864" y="246" width="18" height="24"/>
+      </g>
+      <g font-size="15" fill="#ad2f2f" text-anchor="middle" font-weight="700">
+        <text x="125" y="196">average &#7713; (identical)</text><text x="355" y="196">average &#7713; (identical)</text>
+        <text x="585" y="196">average &#7713; (identical)</text><text x="815" y="196">average &#7713; (identical)</text>
+      </g>
+    </g>
+    <g data-step-only="3" stroke="#3d8bd4" stroke-width="2.5" fill="none" marker-end="url(#ch08-dp-a)">
+      <path class="flow" d="M232 160 L248 160"/>
+      <path class="flow" d="M462 160 L478 160"/>
+      <path class="flow" d="M692 160 L708 160"/>
+      <path class="flow" d="M815 296 C 815 330, 125 330, 125 298"/>
+    </g>
+    <text data-step-only="3" x="470" y="354" font-size="15" fill="#3d8bd4" text-anchor="middle" font-weight="700">ring all-reduce: each GPU sends and receives &#8776; 2 &#215; (gradient bytes)</text>
+    <g data-step="4">
+      <g fill="#e9f6f0" stroke="#2f9e6e">
+        <rect x="35" y="150" width="180" height="30" rx="5"/><rect x="265" y="150" width="180" height="30" rx="5"/>
+        <rect x="495" y="150" width="180" height="30" rx="5"/><rect x="725" y="150" width="180" height="30" rx="5"/>
+      </g>
+      <g font-size="15" fill="#1f7a53" text-anchor="middle" font-weight="700">
+        <text x="125" y="170">same AdamW step</text><text x="355" y="170">same AdamW step</text>
+        <text x="585" y="170">same AdamW step</text><text x="815" y="170">same AdamW step</text>
+      </g>
+      <text x="470" y="354" font-size="15" fill="#1f7a53" text-anchor="middle" font-weight="700">weights stay bit-identical; no weights are ever sent</text>
+    </g>
+  </svg>
+  <div class="step-captions">
+    <p data-step-only="1"><b>Step 1.</b> Every GPU holds a full copy of the weights and optimizer state (all 16 B/param). The global batch is split: each GPU gets different rows.</p>
+    <p data-step-only="2"><b>Step 2.</b> Each GPU runs forward and backward on its own rows and gets its own gradient. The gradients differ because the data differ.</p>
+    <p data-step-only="3"><b>Step 3.</b> All-reduce: the GPUs sum their gradients and divide by 4. Every GPU now holds the average, which equals the gradient of the whole batch.</p>
+    <p data-step-only="4"><b>Step 4.</b> Same weights + same gradient + same optimizer state = same update everywhere. The replicas never drift apart.</p>
+  </div>
+  <figcaption><span class="fig-label">Figure 8.11</span> — Data parallelism. Gradient bars are illustrative. The only communication is the gradient all-reduce, which overlaps with the backward pass.</figcaption>
+</figure>
+
+<p><strong>Cost, worked out.</strong> A ring all-reduce makes each GPU send and receive about 2·(<var>P</var>−1)/<var>P</var> times the buffer size. For Llama 3.1 8B with BF16 gradients that is ≈ 2 × 16 GB = 32 GB per GPU per step. Over a 50 GB/s inter-node link: ~0.64 s. Now the compute: with 64 GPUs and a 4M-token batch, a step is 6 × 8.03 × 10<sup>9</sup> × 4.2 × 10<sup>6</sup> ≈ 2.0 × 10<sup>17</sup> FLOPs, or about 7.9 s at 400 TFLOP/s per GPU. Communication is ~8% of the step, and frameworks hide most of it by all-reducing gradients in buckets as soon as each group of layers finishes its backward (Figure 8.4).</p>
+<p>The weakness: every GPU stores all 16 bytes per parameter. As Figure 8.10 showed, that alone exceeds 80 GB for an 8B model.</p>
+
+<h3>ZeRO and FSDP: stop storing the same thing <var>P</var> times</h3>
+<p>In plain data parallelism, all <var>P</var> GPUs hold identical optimizer states, gradients and weights. That is pure redundancy, like every node of a cluster caching the full database. <strong>ZeRO</strong> (Zero Redundancy Optimizer) shards it in three stages. Let Ψ be the parameter count:</p>
+<ul>
+  <li><strong>ZeRO-1</strong> shards the optimizer states (FP32 master, <var>m</var>, <var>v</var>: 12 B/param). Each GPU updates only its 1/<var>P</var> of the weights. The all-reduce is replaced by a <em>reduce-scatter</em> (each GPU receives the summed gradient only for its shard) and, after the update, an <em>all-gather</em> of the new BF16 weights. Same total traffic as an all-reduce, which is itself a reduce-scatter plus an all-gather. Memory: 4Ψ + 12Ψ/<var>P</var>.</li>
+  <li><strong>ZeRO-2</strong> also shards gradients: 2Ψ + 14Ψ/<var>P</var>.</li>
+  <li><strong>ZeRO-3</strong> also shards the weights: 16Ψ/<var>P</var>. A layer's weights exist in full only while that layer runs: all-gather them just before its forward, free them right after, all-gather again for backward, then reduce-scatter its gradients. Traffic rises to about 1.5× plain DP.</li>
+</ul>
+<p>For Llama 3.1 8B on 8 GPUs: 128.5 GB (plain DP) → 44.2 GB (ZeRO-1) → 30.1 GB (ZeRO-2) → 16.1 GB (ZeRO-3) per GPU. <strong>FSDP</strong> (Fully Sharded Data Parallel) is PyTorch's implementation of the same idea. Llama 3 used FSDP to shard optimizer state and gradients but kept the gathered weights after the forward pass, avoiding a second all-gather in backward. DeepSeek-V3 used ZeRO-1. Variants like ZeRO-Offload push optimizer state to CPU RAM, trading PCIe bandwidth for HBM.</p>
+
+<figure class="stepper wide fig-zero" data-steps="5" data-interval="3000">
+  <svg viewBox="0 0 960 380" role="img" aria-label="ZeRO stages on four GPUs: optimizer states, then gradients, then parameters are sharded; ZeRO-3 gathers one layer at a time">
+    <g font-size="15" fill="#3a4254" font-weight="700">
+      <text x="20" y="92">weights</text><text x="20" y="108" font-weight="400" fill="#687084">BF16, 2 B</text>
+      <text x="20" y="132">gradients</text><text x="20" y="148" font-weight="400" fill="#687084">BF16, 2 B</text>
+      <text x="20" y="200">optimizer</text><text x="20" y="218" font-weight="400" fill="#687084">master + m + v</text><text x="20" y="236" font-weight="400" fill="#687084">FP32, 12 B</text>
+    </g>
+    <g font-size="16" font-weight="700" fill="#1d2433" text-anchor="middle">
+      <text x="230" y="40">GPU 0</text><text x="430" y="40">GPU 1</text><text x="630" y="40">GPU 2</text><text x="830" y="40">GPU 3</text>
+    </g>
+    <!-- empty outlines -->
+    <g fill="#ffffff" stroke="#c9cfdb" stroke-dasharray="4 3">
+      <rect x="150" y="80" width="160" height="30"/><rect x="350" y="80" width="160" height="30"/><rect x="550" y="80" width="160" height="30"/><rect x="750" y="80" width="160" height="30"/>
+      <rect x="150" y="120" width="160" height="30"/><rect x="350" y="120" width="160" height="30"/><rect x="550" y="120" width="160" height="30"/><rect x="750" y="120" width="160" height="30"/>
+      <rect x="150" y="160" width="160" height="110"/><rect x="350" y="160" width="160" height="110"/><rect x="550" y="160" width="160" height="110"/><rect x="750" y="160" width="160" height="110"/>
+    </g>
+    <!-- full weights (steps 1-3) -->
+    <g data-step-range="1-3" fill="#5a6b8c">
+      <rect x="150" y="80" width="160" height="30"/><rect x="350" y="80" width="160" height="30"/><rect x="550" y="80" width="160" height="30"/><rect x="750" y="80" width="160" height="30"/>
+    </g>
+    <!-- full grads (steps 1-2) -->
+    <g data-step-range="1-2" fill="#e99a9a">
+      <rect x="150" y="120" width="160" height="30"/><rect x="350" y="120" width="160" height="30"/><rect x="550" y="120" width="160" height="30"/><rect x="750" y="120" width="160" height="30"/>
+    </g>
+    <!-- full optimizer (step 1) -->
+    <g data-step-only="1" fill="#3d8bd4">
+      <rect x="150" y="160" width="160" height="110"/><rect x="350" y="160" width="160" height="110"/><rect x="550" y="160" width="160" height="110"/><rect x="750" y="160" width="160" height="110"/>
+    </g>
+    <!-- sharded optimizer (steps 2+) -->
+    <g data-step="2" fill="#3d8bd4">
+      <rect x="150" y="160" width="40" height="110"/><rect x="390" y="160" width="40" height="110"/><rect x="630" y="160" width="40" height="110"/><rect x="870" y="160" width="40" height="110"/>
+    </g>
+    <!-- sharded grads (steps 3+) -->
+    <g data-step="3" fill="#e99a9a">
+      <rect x="150" y="120" width="40" height="30"/><rect x="390" y="120" width="40" height="30"/><rect x="630" y="120" width="40" height="30"/><rect x="870" y="120" width="40" height="30"/>
+    </g>
+    <!-- sharded weights (steps 4+) -->
+    <g data-step="4" fill="#5a6b8c">
+      <rect x="150" y="80" width="40" height="30"/><rect x="390" y="80" width="40" height="30"/><rect x="630" y="80" width="40" height="30"/><rect x="870" y="80" width="40" height="30"/>
+    </g>
+    <g data-step="2" font-size="14" fill="#ffffff" text-anchor="middle" font-weight="700">
+      <text x="170" y="220">1/4</text><text x="410" y="220">2/4</text><text x="650" y="220">3/4</text><text x="890" y="220">4/4</text>
+    </g>
+    <!-- step 5 gathered layer -->
+    <g data-step-only="5">
+      <g stroke="#5a6b8c">
+        <rect x="150" y="290" width="40" height="26" fill="#5a6b8c"/><rect x="190" y="290" width="40" height="26" fill="#b8c1d4"/><rect x="230" y="290" width="40" height="26" fill="#b8c1d4"/><rect x="270" y="290" width="40" height="26" fill="#b8c1d4"/>
+        <rect x="350" y="290" width="40" height="26" fill="#b8c1d4"/><rect x="390" y="290" width="40" height="26" fill="#5a6b8c"/><rect x="430" y="290" width="40" height="26" fill="#b8c1d4"/><rect x="470" y="290" width="40" height="26" fill="#b8c1d4"/>
+        <rect x="550" y="290" width="40" height="26" fill="#b8c1d4"/><rect x="590" y="290" width="40" height="26" fill="#b8c1d4"/><rect x="630" y="290" width="40" height="26" fill="#5a6b8c"/><rect x="670" y="290" width="40" height="26" fill="#b8c1d4"/>
+        <rect x="750" y="290" width="40" height="26" fill="#b8c1d4"/><rect x="790" y="290" width="40" height="26" fill="#b8c1d4"/><rect x="830" y="290" width="40" height="26" fill="#b8c1d4"/><rect x="870" y="290" width="40" height="26" fill="#5a6b8c"/>
+      </g>
+      <g stroke="#3d8bd4" stroke-width="2" fill="none">
+        <path class="flow" d="M194 95 L194 279"/><path class="flow" d="M434 95 L434 279"/><path class="flow" d="M674 95 L674 279"/><path class="flow" d="M866 95 L866 279"/>
+        <path class="flow" d="M150 279 L910 279"/>
+        <path d="M230 279 L230 288"/><path d="M430 279 L430 288"/><path d="M630 279 L630 288"/><path d="M830 279 L830 288"/>
+      </g>
+      <text x="530" y="336" font-size="15" text-anchor="middle" fill="#1d2433">every GPU temporarily holds all of layer 12 (dark = its own shard)</text>
+      <text x="530" y="360" font-size="15" text-anchor="middle" fill="#3d8bd4" font-weight="700">all-gather layer 12 &#8594; compute &#8594; free &#8594; prefetch layer 13 &#8230;</text>
+    </g>
+    <!-- per-GPU memory labels -->
+    <g font-size="16" font-weight="700" text-anchor="middle">
+      <text data-step-only="1" x="530" y="346" fill="#d64545">Plain DP: every GPU stores 16 B &#215; 8.03 B params = 128.5 GB</text>
+      <text data-step-only="2" x="530" y="346" fill="#1d2433">ZeRO-1: 4&#936; + 12&#936;/4 = 56.2 GB per GPU</text>
+      <text data-step-only="3" x="530" y="346" fill="#1d2433">ZeRO-2: 2&#936; + 14&#936;/4 = 44.2 GB per GPU</text>
+      <text data-step-only="4" x="530" y="346" fill="#1f7a53">ZeRO-3 / FSDP: 16&#936;/4 = 32.1 GB per GPU</text>
+    </g>
+  </svg>
+  <div class="step-captions">
+    <p data-step-only="1"><b>Step 1.</b> Plain data parallelism on 4 GPUs (8B model): four identical copies of everything. Three quarters of the memory is redundant.</p>
+    <p data-step-only="2"><b>Step 2.</b> ZeRO-1: each GPU keeps optimizer state only for its quarter of the weights and only updates that quarter. The 12 B/param block shrinks 4×.</p>
+    <p data-step-only="3"><b>Step 3.</b> ZeRO-2: gradients are reduce-scattered, so each GPU only ever keeps the summed gradient for its own quarter.</p>
+    <p data-step-only="4"><b>Step 4.</b> ZeRO-3 / FSDP: the weights are sharded too. Memory per GPU is 16Ψ/<var>P</var>, falling linearly with the number of GPUs.</p>
+    <p data-step-only="5"><b>Step 5.</b> At runtime ZeRO-3 rebuilds one layer at a time: all-gather its shards, run it, free it, while prefetching the next layer. It is demand paging for weights, with the network as the backing store.</p>
+  </div>
+  <figcaption><span class="fig-label">Figure 8.12</span> — ZeRO stages for Llama 3.1 8B on 4 GPUs (Ψ = 8.03 × 10<sup>9</sup>). Colored = stored on that GPU; dashed = held by other GPUs. Activations are not included.</figcaption>
+</figure>
+
+<h3>Tensor parallelism</h3>
+<p>ZeRO splits <em>storage</em>, but each GPU still runs every layer on its own data. Data parallelism also runs out of road: you cannot grow the global batch forever (critical batch size), so beyond some GPU count each GPU's share of the batch becomes too small to be efficient. <strong>Tensor parallelism</strong> (TP) makes several GPUs cooperate on <em>one</em> layer by splitting its weight matrices.</p>
+
+<p>The Megatron-LM trick needs only one all-reduce per MLP. Split the first matrices (gate and up projections, 4,096 → 14,336) by <strong>columns</strong>: each GPU computes a different slice of the 14,336 hidden units from the full input. SiLU and the element-wise product work per unit, so no communication is needed. Split the down projection (14,336 → 4,096) by <strong>rows</strong>, matching the slice each GPU already has: each GPU produces a full-size but partial output, and one all-reduce sums the partial outputs. Attention splits the same way along heads: each GPU owns some query heads (and their KV heads), and the output projection is row-parallel.</p>
+
+<figure class="stepper wide fig-tp" data-steps="4" data-interval="3000">
+  <svg viewBox="0 0 960 390" role="img" aria-label="Tensor parallel MLP on two GPUs: column-parallel first matmul, row-parallel second matmul, all-reduce of partial outputs">
+    <defs>
+      <marker id="ch08-tp-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#687084"/></marker>
+    </defs>
+    <g font-size="16" font-weight="700" fill="#1d2433">
+      <text x="20" y="104">GPU 0</text><text x="20" y="284">GPU 1</text>
+    </g>
+    <rect x="12" y="40" width="560" height="140" rx="10" fill="none" stroke="#ddd8ce"/>
+    <rect x="12" y="220" width="560" height="140" rx="10" fill="none" stroke="#ddd8ce"/>
+    <!-- X -->
+    <g fill="#e6dff8" stroke="#7b5cd6">
+      <rect x="90" y="60" width="36" height="100"/><rect x="90" y="240" width="36" height="100"/>
+    </g>
+    <g font-size="14" fill="#3a4254" text-anchor="middle">
+      <text x="108" y="176">X</text><text x="108" y="356">X</text>
+    </g>
+    <!-- W1 shards -->
+    <g fill="#dfe3ec" stroke="#5a6b8c">
+      <rect x="150" y="90" width="110" height="40"/><rect x="150" y="270" width="110" height="40"/>
+    </g>
+    <g font-size="14" fill="#1d2433" text-anchor="middle">
+      <text x="215" y="56">gate, up: cols 0&#8211;7,167</text><text x="215" y="236">gate, up: cols 7,168&#8211;14,335</text>
+      <text x="205" y="115">4,096 &#8594; 7,168</text><text x="205" y="295">4,096 &#8594; 7,168</text>
+    </g>
+    <g stroke="#687084" stroke-width="1.8" fill="none" marker-end="url(#ch08-tp-a)">
+      <path d="M128 110 L146 110"/><path d="M128 290 L146 290"/>
+    </g>
+    <!-- W2 shards -->
+    <g fill="#dfe3ec" stroke="#5a6b8c">
+      <rect x="390" y="70" width="44" height="80"/><rect x="390" y="250" width="44" height="80"/>
+    </g>
+    <g font-size="14" fill="#1d2433" text-anchor="middle">
+      <text x="412" y="168">down: rows</text><text x="412" y="348">down: rows</text>
+    </g>
+    <g data-step-only="1" font-size="15" fill="#3a4254">
+      <rect x="610" y="100" width="330" height="170" rx="10" fill="#f3f1ec" stroke="#ddd8ce"/>
+      <text x="626" y="128" font-weight="700" fill="#1d2433">The whole MLP (one layer)</text>
+      <text x="626" y="154">gate, up: 2 &#215; (4,096 &#215; 14,336)</text>
+      <text x="626" y="176">down: 14,336 &#215; 4,096</text>
+      <text x="626" y="198">= 176M weights, 352 MB in BF16</text>
+      <text x="626" y="228" font-weight="700" fill="#1d2433">With TP = 2: half on each GPU</text>
+      <text x="626" y="250">88M weights; half the FLOPs</text>
+    </g>
+    <!-- step 2: H -->
+    <g data-step="2">
+      <g fill="#e6dff8" stroke="#7b5cd6"><rect x="290" y="60" width="66" height="100"/><rect x="290" y="240" width="66" height="100"/></g>
+      <g font-size="14" fill="#1d2433" text-anchor="middle">
+        <text x="323" y="104">H&#8320;</text><text x="323" y="122">n&#215;7,168</text>
+        <text x="323" y="284">H&#8321;</text><text x="323" y="302">n&#215;7,168</text>
+      </g>
+      <g stroke="#687084" stroke-width="1.8" fill="none" marker-end="url(#ch08-tp-a)">
+        <path d="M262 110 L286 110"/><path d="M262 290 L286 290"/>
+      </g>
+      <text x="292" y="200" font-size="14" fill="#1f7a53" font-weight="700">no communication</text>
+    </g>
+    <!-- step 3: partial Y -->
+    <g data-step="3">
+      <g fill="#fcecec" stroke="#d64545" stroke-dasharray="4 3"><rect x="470" y="60" width="40" height="100"/><rect x="470" y="240" width="40" height="100"/></g>
+      <g font-size="14" fill="#1d2433" text-anchor="middle">
+        <text x="490" y="104">Y&#8320;</text><text x="490" y="284">Y&#8321;</text>
+        <text x="490" y="176">partial</text><text x="490" y="356">partial</text>
+      </g>
+      <g stroke="#687084" stroke-width="1.8" fill="none" marker-end="url(#ch08-tp-a)">
+        <path d="M436 110 L466 110"/><path d="M436 290 L466 290"/>
+      </g>
+    </g>
+    <!-- step 4: all-reduce -->
+    <g data-step="4">
+      <rect x="590" y="60" width="130" height="280" rx="10" fill="#e8f1fb" stroke="#3d8bd4"/>
+      <text x="655" y="190" font-size="16" font-weight="700" text-anchor="middle" fill="#1d2433">all-reduce</text>
+      <text x="655" y="212" font-size="15" text-anchor="middle" fill="#3a4254">Y = Y&#8320; + Y&#8321;</text>
+      <g stroke="#3d8bd4" stroke-width="2.5" fill="none">
+        <path class="flow" d="M512 110 L588 110"/><path class="flow" d="M512 290 L588 290"/>
+        <path class="flow" d="M722 110 L748 110"/><path class="flow" d="M722 290 L748 290"/>
+      </g>
+      <g fill="#e6dff8" stroke="#7b5cd6"><rect x="750" y="60" width="40" height="100"/><rect x="750" y="240" width="40" height="100"/></g>
+      <g font-size="14" fill="#1d2433" text-anchor="middle"><text x="770" y="176">Y</text><text x="770" y="356">Y</text></g>
+      <g font-size="14" fill="#3a4254">
+        <text x="808" y="90">n&#215;4,096 BF16</text>
+        <text x="808" y="110">8,192 tokens:</text>
+        <text x="808" y="130" font-weight="700">67 MB per</text>
+        <text x="808" y="150" font-weight="700">all-reduce</text>
+        <text x="808" y="270">&#8594; needs NVLink;</text>
+        <text x="808" y="290">TP stays</text>
+        <text x="808" y="310">inside a node</text>
+      </g>
+    </g>
+  </svg>
+  <div class="step-captions">
+    <p data-step-only="1"><b>Step 1.</b> Two GPUs share one SwiGLU MLP of Llama 3.1 8B. Both receive the same input <var>X</var> [<var>n</var> × 4,096]. GPU 0 holds the first half of the gate/up columns and the matching half of the down-projection rows; GPU 1 holds the other halves.</p>
+    <p data-step-only="2"><b>Step 2.</b> Column-parallel: each GPU computes its 7,168 hidden units, H = SiLU(gate) ⊙ up, entirely locally. No bytes cross the link.</p>
+    <p data-step-only="3"><b>Step 3.</b> Row-parallel: each GPU multiplies its hidden half by its half of the down projection. The results have the full output shape but are partial sums: Y = Y₀ + Y₁.</p>
+    <p data-step-only="4"><b>Step 4.</b> One all-reduce sums the partial outputs; both GPUs now hold the exact result. Attention does the same with heads, so a layer needs 2 all-reduces forward and 2 backward.</p>
+  </div>
+  <figcaption><span class="fig-label">Figure 8.13</span> — Megatron-style tensor parallelism of an MLP (TP = 2 for clarity; real runs use TP = 8 inside a server). Each GPU stores and computes half of the layer.</figcaption>
+</figure>
+
+<p>Why TP stays inside a node: per layer it moves 4 × 67 MB = 268 MB for one 8K-token row (2 all-reduces each way), on the critical path, between every pair of matmuls. Over NVLink that is cheap. Over a 50 GB/s network link it would stall the GPUs. A related trick, <strong>sequence parallelism</strong>, also splits the norm and residual regions between TP blocks along the sequence dimension; the all-reduce becomes a reduce-scatter plus an all-gather (same bytes) and the activations of those regions are sharded too. The same TP layout is used for inference (<a href="11-inference.html">Chapter 11</a>).</p>
+
+<h3>Pipeline parallelism</h3>
+<p><strong>Pipeline parallelism</strong> (PP) puts different layers on different GPUs: stage 1 runs layers 1–8, stage 2 layers 9–16, and so on. Only the activations at stage boundaries travel, point to point: [tokens × <var>d</var>] per micro-batch, which is small enough to cross nodes. The problem is idle time. With one batch, stage 2 waits for stage 1, and in backward stage 1 waits for everyone. The fix is the CPU-pipeline trick: split the batch into <var>m</var> <strong>micro-batches</strong> so stages overlap. The remaining idle slots at the start and end are the <strong>bubble</strong>.</p>
+
+<figure class="stepper wide fig-pp" data-steps="3" data-interval="3800">
+  <svg viewBox="0 0 960 330" role="img" aria-label="Pipeline schedules on four stages: a single micro-batch, GPipe with eight micro-batches, and 1F1B, showing bubbles">
+    <defs>
+      <pattern id="ch08-hatch" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+        <rect width="8" height="8" fill="#fbeaea"/>
+        <line x1="0" y1="0" x2="0" y2="8" stroke="#ecbcbc" stroke-width="3"/>
+      </pattern>
+    </defs>
+    <g font-size="15" fill="#1d2433" font-weight="700">
+      <text x="20" y="62">GPU 0</text><text x="20" y="112">GPU 1</text><text x="20" y="162">GPU 2</text><text x="20" y="212">GPU 3</text>
+    </g>
+    <g font-size="13" fill="#687084">
+      <text x="20" y="78">layers 1&#8211;8</text><text x="20" y="128">layers 9&#8211;16</text><text x="20" y="178">layers 17&#8211;24</text><text x="20" y="228">layers 25&#8211;32</text>
+    </g>
+    <g data-step-only="1" id="ch08-pp-s1"></g>
+    <g data-step-only="2" id="ch08-pp-s2"></g>
+    <g data-step-only="3" id="ch08-pp-s3"></g>
+    <g font-size="14">
+      <rect x="150" y="296" width="16" height="14" fill="#cbbff2" stroke="#7b5cd6"/><text x="172" y="308" fill="#3a4254">forward of micro-batch k (1 unit)</text>
+      <rect x="430" y="296" width="16" height="14" fill="#f4c2c2" stroke="#d64545"/><text x="452" y="308" fill="#3a4254">backward (2 units)</text>
+      <rect x="610" y="296" width="16" height="14" fill="url(#ch08-hatch)" stroke="#ecbcbc"/><text x="632" y="308" fill="#3a4254">bubble (GPU idle)</text>
+    </g>
+  </svg>
+  <div class="step-captions">
+    <p data-step-only="1"><b>Step 1.</b> One micro-batch flowing through 4 stages: each GPU works 3 of 12 time units and idles 75% of the time. Model parallelism without pipelining is mostly waiting.</p>
+    <p data-step-only="2"><b>Step 2.</b> GPipe: 8 micro-batches, all forwards then all backwards. The bubble shrinks to (<var>p</var>−1)/(<var>m</var>+<var>p</var>−1) = 3/11 ≈ 27%. But GPU 0 must keep the activations of all 8 micro-batches until their backward passes arrive.</p>
+    <p data-step-only="3"><b>Step 3.</b> 1F1B: after a short warm-up, each GPU alternates one forward and one backward. Same total time and bubble, but each stage holds at most <var>p</var> = 4 micro-batches of activations instead of 8, which is why 1F1B is the standard.</p>
+  </div>
+  <figcaption><span class="fig-label">Figure 8.14</span> — Pipeline schedules for <var>p</var> = 4 stages (Llama 3.1 8B's 32 layers, 8 per GPU). Numbers in cells are micro-batch indices; backward takes about twice as long as forward. More micro-batches per step shrink the bubble.</figcaption>
+</figure>
+
+<p>Bubble fractions: with <var>p</var> stages and <var>m</var> micro-batches, GPipe and 1F1B idle (<var>p</var>−1)/(<var>m</var>+<var>p</var>−1) of the time. The <strong>interleaved</strong> 1F1B schedule gives each GPU several non-adjacent chunks of layers (e.g., layers 1–4 and 17–20), cutting the bubble by that factor at the cost of more point-to-point traffic. Llama 3 used it and reports a bubble ratio of (PP−1)/(V·M) for V chunks per rank and M micro-batches. Newer schedules split the backward pass into its input-gradient and weight-gradient GEMMs (Figure 8.6) and slot the weight-gradient work into the bubbles ("zero-bubble" pipelines); DeepSeek-V3's DualPipe also feeds micro-batches from both ends of the pipeline and overlaps the MoE all-to-all with compute.</p>
+
+<h3>Context parallelism</h3>
+<p>Long rows break everything else: one 131,072-token row of Llama 3.1 8B needs about 4.46 MB × 131,072 ≈ 584 GB of activations. <strong>Context parallelism</strong> (CP) splits the <em>sequence</em> across GPUs. Every operation except attention is per-token and splits trivially. Attention needs keys and values from earlier chunks. <strong>Ring attention</strong> passes K/V blocks around a ring of GPUs while each computes attention for its local queries, overlapping transfer with compute. Llama 3 instead simply all-gathers K and V before attention, which is cheap with GQA because K and V together are 8× smaller than Q for the 405B model (8 KV heads vs 128 query heads). The causal mask makes later chunks more expensive, so Llama 3 cuts the row into 2 × CP pieces and gives rank <var>i</var> pieces <var>i</var> and 2·CP − 1 − <var>i</var>, balancing the work.</p>
+
+<h3>Expert parallelism</h3>
+<p>For mixture-of-experts models, <strong>expert parallelism</strong> (EP) places different experts on different GPUs and moves tokens to them with an all-to-all, then back again (<a href="07-mixture-of-experts.html">Chapter 7</a> explains EP, routing and load balancing). In training, DeepSeek-V3 spread each layer's 256 routed experts over 64 GPUs on 8 nodes. Its full layout was PP = 16 × EP = 64 × ZeRO-1 DP, with no tensor parallelism at all.</p>
+
+<h3>Putting it together: 4D parallelism</h3>
+<p>Real runs nest these dimensions, ordering them from the chattiest (innermost, fastest links) to the most latency-tolerant (outermost). Llama 3 405B's order was [TP, CP, PP, DP]:</p>
+
+<figure class="wide">
+  <svg viewBox="0 0 960 430" role="img" aria-label="Llama 3 405B layout on 16,384 GPUs: tensor parallel 8 inside each node, pipeline parallel 16 across nodes, data parallel 128 replicas">
+    <defs>
+      <marker id="ch08-4d-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#e8833a"/></marker>
+    </defs>
+    <text x="110" y="30" font-size="16" font-weight="700" fill="#1d2433">pipeline stages 1 &#8594; 16 (PP = 16): ~8 of the 126 layers each</text>
+    <path d="M110 40 L712 40" stroke="#e8833a" stroke-width="2" marker-end="url(#ch08-4d-a)"/>
+    <g font-size="15" fill="#3a4254">
+      <text x="20" y="78">replica 1</text><text x="20" y="128">replica 2</text><text x="20" y="178">replica 3</text><text x="20" y="268">replica 128</text>
+    </g>
+    <text x="400" y="222" font-size="22" fill="#687084" text-anchor="middle">&#8942;</text>
+    <g id="ch08-4d-grid"></g>
+    <rect x="105" y="54" width="612" height="40" rx="6" fill="none" stroke="#2f9e6e" stroke-width="2"/>
+    <text x="722" y="70" font-size="14" fill="#1f7a53" font-weight="700">one model copy</text>
+    <text x="722" y="88" font-size="14" fill="#1f7a53">= 128 GPUs</text>
+    <path d="M770 120 L770 270" stroke="#3d8bd4" stroke-width="2"/>
+    <text x="780" y="180" font-size="15" fill="#3d8bd4" font-weight="700">DP = 128</text>
+    <text x="780" y="198" font-size="14" fill="#3d8bd4">(FSDP)</text>
+    <text x="780" y="216" font-size="14" fill="#3d8bd4">&#215; 128 = 16,384</text>
+    <!-- zoom of one node -->
+    <rect x="110" y="310" width="300" height="100" rx="10" fill="#fcecec" stroke="#d64545"/>
+    <text x="260" y="332" font-size="15" font-weight="700" text-anchor="middle" fill="#1d2433">one server = TP group (TP = 8)</text>
+    <g fill="#ffffff" stroke="#d64545">
+      <rect x="130" y="344" width="52" height="24" rx="4"/><rect x="198" y="344" width="52" height="24" rx="4"/><rect x="266" y="344" width="52" height="24" rx="4"/><rect x="334" y="344" width="52" height="24" rx="4"/>
+      <rect x="130" y="376" width="52" height="24" rx="4"/><rect x="198" y="376" width="52" height="24" rx="4"/><rect x="266" y="376" width="52" height="24" rx="4"/><rect x="334" y="376" width="52" height="24" rx="4"/>
+    </g>
+    <g font-size="13" fill="#1d2433" text-anchor="middle">
+      <text x="156" y="361">H100</text><text x="224" y="361">H100</text><text x="292" y="361">H100</text><text x="360" y="361">H100</text>
+      <text x="156" y="393">H100</text><text x="224" y="393">H100</text><text x="292" y="393">H100</text><text x="360" y="393">H100</text>
+    </g>
+    <path d="M128 98 L170 306" stroke="#d64545" stroke-dasharray="4 3"/>
+    <g font-size="15" fill="#3a4254">
+      <text x="440" y="330"><tspan font-weight="700" fill="#d64545">TP</tspan>: 2 all-reduces per layer each way, over NVLink</text>
+      <text x="440" y="354"><tspan font-weight="700" fill="#7b5cd6">CP</tspan>: all-gather K/V (only for the 128K-context stage)</text>
+      <text x="440" y="378"><tspan font-weight="700" fill="#e8833a">PP</tspan>: send activations to the next stage, across nodes</text>
+      <text x="440" y="402"><tspan font-weight="700" fill="#3d8bd4">DP</tspan>: reduce-scatter grads / all-gather params, overlapped</text>
+    </g>
+  </svg>
+  <figcaption><span class="fig-label">Figure 8.15</span> — Llama 3 405B's main pretraining layout: 8 (TP) × 16 (PP) × 128 (DP) = 16,384 H100s. Each small box is one 8-GPU server. For the 128K-context stage the same GPUs were regrouped as TP 8 × CP 16 × PP 16 × DP 8.</figcaption>
+</figure>
+
+<div class="table-wrap">
+<table class="data">
+  <tr><th class="num">GPUs</th><th class="num">TP</th><th class="num">CP</th><th class="num">PP</th><th class="num">DP</th><th class="num">Seq. len</th><th class="num">Rows / DP group</th><th class="num">Tokens / step</th><th class="num">TFLOP/s per GPU</th><th class="num">BF16 MFU</th></tr>
+  <tr><td class="num">8,192</td><td class="num">8</td><td class="num">1</td><td class="num">16</td><td class="num">64</td><td class="num">8,192</td><td class="num">32</td><td class="num">16M</td><td class="num">430</td><td class="num">43%</td></tr>
+  <tr><td class="num">16,384</td><td class="num">8</td><td class="num">1</td><td class="num">16</td><td class="num">128</td><td class="num">8,192</td><td class="num">16</td><td class="num">16M</td><td class="num">400</td><td class="num">41%</td></tr>
+  <tr><td class="num">16,384</td><td class="num">8</td><td class="num">16</td><td class="num">16</td><td class="num">8</td><td class="num">131,072</td><td class="num">16</td><td class="num">16M</td><td class="num">380</td><td class="num">38%</td></tr>
+</table>
+</div>
+<p class="small muted">Source: Llama 3 paper, Table 4. Going from 8K to 16K GPUs at a fixed 16M-token batch halves the rows per DP group, which lengthens the pipeline bubble and drops MFU from 43% to 41%. The batch-size ceiling is what ultimately limits how many GPUs one run can use well.</p>
+
+<aside class="callout key"><div class="callout-title">Key takeaway</div>
+<p>Data parallelism scales throughput; ZeRO/FSDP removes its memory redundancy; tensor parallelism splits matmuls inside a fast NVLink domain; pipeline parallelism splits layers across slower links at the cost of bubbles; context parallelism splits long sequences; expert parallelism splits MoE experts. Layouts are chosen so the most frequent communication rides the fastest wires.</p>
+</aside>
+</section>
+
+<section>
+<h2>Compute, MFU, time and money</h2>
+
+<p>Everything so far collapses into one estimate. Training compute is</p>
+<div class="formula">
+  <var>C</var> &#8776; 6 &#183; <var>N</var> &#183; <var>D</var>
+  <span class="where"><var>C</var> = total training FLOPs. <var>N</var> = parameters (for MoE, the <em>active</em> parameters per token). <var>D</var> = training tokens. The 6 is 2 (forward) + 4 (backward) FLOPs per weight per token. Attention-score FLOPs and recomputation are not included.</span>
+</div>
+<p>Llama 3.1 8B: 6 × 8.03 × 10<sup>9</sup> × 15 × 10<sup>12</sup> = 7.2 × 10<sup>23</sup> FLOPs. Llama 3 405B: 6 × 405 × 10<sup>9</sup> × 15.6 × 10<sup>12</sup> = 3.8 × 10<sup>25</sup>, matching the paper.</p>
+
+<h3>MFU: how much of the GPU you actually use</h3>
+<p><strong>Model FLOPs Utilization (MFU)</strong> is the fraction of the hardware's peak that goes into the model's useful math: (model FLOPs per token × tokens per second) ÷ (number of GPUs × peak FLOP/s). Recomputation from activation checkpointing does not count; including it gives the higher "hardware FLOPs utilization". Good dense BF16 runs reach 35–45%; Llama 3 405B reports 38–43%. The other 55–65% goes to communication that is not hidden, pipeline bubbles, memory-bound kernels (norms, softmax, the optimizer step), kernel launch gaps, stragglers, data loading and checkpoint pauses. MFU is the efficiency number that labs fight over, because it converts directly into weeks and dollars:</p>
+
+<div class="formula">
+  time = <span class="frac"><span><var>C</var></span><span>GPUs &#215; peak &#215; MFU</span></span>  &#160;&#160;&#160; GPU-hours = <span class="frac"><span><var>C</var></span><span>peak &#215; MFU &#215; 3600</span></span>  &#160;&#160;&#160; cost = GPU-hours &#215; $/GPU-hour
+</div>
+
+<p><strong>Worked example, Llama 3 405B.</strong> 3.8 × 10<sup>25</sup> / (16,384 × 989 × 10<sup>12</sup> × 0.41) = 5.7 × 10<sup>6</sup> s ≈ <strong>66 days</strong> of pure compute, or ~26M GPU-hours. The model card reports 30.84M H100-hours, the gap covering phases at other configurations, restarts and everything not in 6<var>ND</var>. At a rental-equivalent $3.50 per H100-hour (October 2026 on-demand medians are roughly $3.4–3.6) that is about $90–110M of compute for the final run alone. Meta owns its hardware, so this is an illustrative market price, not what Meta paid.</p>
+
+<p><strong>Worked example, DeepSeek-V3.</strong> With 37B active parameters: 6 × 37 × 10<sup>9</sup> × 14.8 × 10<sup>12</sup> ≈ 3.3 × 10<sup>24</sup> FLOPs, about 11× less than Llama 3 405B despite similar token counts, because only 37B parameters are active per token. The report gives 2.664M H800-hours for pretraining (180K GPU-hours per trillion tokens, i.e., 3.7 days per trillion on 2,048 GPUs), so the implied useful throughput is ~343 TFLOP/s per GPU: 17% of FP8 peak, 35% of BF16 peak, by this simple count. Its famous "$5.576M" assumes $2 per GPU-hour for the 2.788M GPU-hours of the official run and, as the report itself says, excludes prior research and ablation experiments.</p>
+
+<p>For Llama 3.1 8B the same formula with 40% MFU gives ~0.5M H100-hours, while the model card reports 1.46M. Published GPU-hour totals usually include more than the idealized main run, so treat 6<var>ND</var> as a lower bound.</p>
+
+<div class="widget" id="ch08-cost">
+  <div class="widget-title">Try it: training cost estimator</div>
+  <div class="wgrid">
+    <label>Preset
+      <select id="ch08-c-preset">
+        <option value="custom">Custom</option>
+        <option value="tiny">1B, 20B tokens</option>
+        <option value="llama8" selected>Llama 3.1 8B</option>
+        <option value="llama70">Llama 3.1 70B</option>
+        <option value="llama405">Llama 3 405B</option>
+        <option value="dsv3">DeepSeek-V3 (MoE)</option>
+      </select>
+    </label>
+    <label>Active params N (billions) <input type="number" id="ch08-c-n" min="0.01" step="0.01" value="8.03"></label>
+    <label>Total params for memory (billions) <input type="number" id="ch08-c-nt" min="0.01" step="0.01" value="8.03"></label>
+    <label>Training tokens D (trillions) <input type="number" id="ch08-c-d" min="0.001" step="0.1" value="15"></label>
+    <label>GPU
+      <select id="ch08-c-gpu">
+        <option value="a100">A100 80GB</option>
+        <option value="h100" selected>H100 / H800</option>
+        <option value="h200">H200 141GB</option>
+        <option value="b200">B200 180GB</option>
+      </select>
+    </label>
+    <label>Precision
+      <select id="ch08-c-prec"><option value="bf16" selected>BF16</option><option value="fp8">FP8</option></select>
+    </label>
+    <label>Number of GPUs <input type="number" id="ch08-c-g" min="1" step="1" value="1024"></label>
+    <label>MFU <span><input type="range" id="ch08-c-mfu" min="5" max="70" step="1" value="40"> <span class="readout" id="ch08-c-mfu-out">40%</span></span></label>
+    <label>$ per GPU-hour <input type="number" id="ch08-c-price" min="0" step="0.05" value="3.50"></label>
+  </div>
+  <table class="res"><tbody id="ch08-c-res"></tbody></table>
+  <div class="membar" id="ch08-c-bar"></div>
+  <div class="legend">
+    <span><i style="background:#5a6b8c"></i>BF16 weights</span><span><i style="background:#e99a9a"></i>BF16 grads</span><span><i style="background:#a3aec4"></i>FP32 master</span><span><i style="background:#3d8bd4"></i>Adam m</span><span><i style="background:#9cc5ee"></i>Adam v</span>
+  </div>
+  <div class="note" id="ch08-c-note"></div>
+  <div class="note">Formulas: C = 6&#183;N&#183;D; GPU-hours = C / (peak &#215; MFU &#215; 3600); days = GPU-hours / GPUs / 24; cost = GPU-hours &#215; price; model states = 16 B &#215; total params. Peaks are dense (no sparsity) per GPU. Rental prices vary a lot: October 2026 on-demand medians were roughly $1.8 (A100), $3.4&#8211;3.6 (H100), $4.6 (H200) and $8 (B200) per GPU-hour, with hyperscaler list prices far higher and multi-year contracts lower.</div>
+</div>
+
+<h3>Things break: failures and checkpoints at scale</h3>
+<p>A cluster of 16,384 GPUs is a machine whose components fail daily. During a 54-day window of Llama 3 405B pretraining there were <strong>466 job interruptions</strong>: 47 planned (firmware, config changes) and 419 unexpected, about 78% of them hardware. Top causes: faulty GPUs (148, 30.1% of unexpected), GPU HBM3 memory (72, 17.2%), software bugs (54), network switches and cables (35). Six were <em>silent data corruption</em>: a GPU returning wrong numbers without an error. Only three needed significant manual intervention; automation handled the rest, and the team kept effective training time above 90%.</p>
+
+<p>The defense is <strong>checkpointing</strong>: periodically saving the complete training state (weights, optimizer state, data-loader position, RNG states) so a crash costs only the work since the last save. For the 405B model the model states alone are 6.5 TB. Llama 3's storage system (240 PB, 2 TB/s sustained, 7 TB/s peak) has to absorb those bursts with each GPU writing its own shard of 1 MB–4 GB in parallel.</p>
+
+<aside class="callout math"><div class="callout-title">The math: how often to checkpoint</div>
+<p>419 unexpected interruptions in 54 days is one every ~3.1 hours. Checkpointing too often wastes time writing; too rarely wastes work on each crash. A classic first-order answer (Young's formula) is τ ≈ √(2·δ·<var>M</var>), where δ is the time to write a checkpoint and <var>M</var> is the mean time between failures. With δ = 1 minute and <var>M</var> = 180 minutes, τ ≈ √360 ≈ 19 minutes. Each failure then costs about τ/2 ≈ 10 minutes of lost work plus restart time, which is why fast restarts and asynchronous checkpointing matter as much as reliability.</p>
+</aside>
+
+<p>Scale creates stranger problems too. Llama 3 saw a 1–2% throughput swing between day and night because midday heat lowered GPU clocks. And when tens of thousands of GPUs pause at once (say, waiting on a checkpoint or a collective), the data center's power draw swings by tens of megawatts, stressing the power grid.</p>
+</section>
+
+<section>
+<h2>Scaling laws</h2>
+
+<p>With a fixed compute budget <var>C</var>, should you train a bigger model on fewer tokens or a smaller one on more? Training many small models revealed a surprise: loss falls as a smooth <strong>power law</strong> in parameters, data and compute, over many orders of magnitude. That makes the outcome of a giant run predictable from small ones.</p>
+
+<h3>Kaplan (2020)</h3>
+<p>OpenAI's Kaplan et al. fit laws like <var>L</var>(<var>N</var>) = (<var>N</var><sub>c</sub>/<var>N</var>)<sup>0.076</sup> for loss versus (non-embedding) parameters, with similar laws for data and compute. Their allocation rule said to grow parameters much faster than data (<var>N</var> ∝ <var>C</var><sup>0.73</sup>). GPT-3 followed that philosophy: 175B parameters on only 300B tokens, 1.7 tokens per parameter.</p>
+
+<h3>Chinchilla (2022)</h3>
+<p>DeepMind's Hoffmann et al. trained over 400 models from 70M to 16B parameters, this time tuning the learning-rate schedule to each run's length (Kaplan's runs had not). The answer changed: <strong>parameters and tokens should grow equally</strong>, about <strong>20 tokens per parameter</strong>. To prove it, they trained <em>Chinchilla</em> (70B parameters, 1.4T tokens) with the same compute as their earlier <em>Gopher</em> (280B, 300B tokens), and Chinchilla won across the board. They fit:</p>
+<div class="formula">
+  <var>L</var>(<var>N</var>, <var>D</var>) = <var>E</var> + <span class="frac"><span><var>A</var></span><span><var>N</var><sup>&#945;</sup></span></span> + <span class="frac"><span><var>B</var></span><span><var>D</var><sup>&#946;</sup></span></span>
+  <span class="where"><var>E</var> = irreducible loss (the entropy of text itself: even a perfect model cannot predict a coin flip). <var>A</var>/<var>N</var><sup>&#945;</sup> = the penalty for a finite model. <var>B</var>/<var>D</var><sup>&#946;</sup> = the penalty for finite data. A 2024 replication by Epoch AI refit Chinchilla's data and got <var>E</var> = 1.82, <var>A</var> = 482, <var>&#945;</var> = 0.348, <var>B</var> = 2,085, <var>&#946;</var> = 0.366, which reproduces the ~20 tokens/parameter rule (the originally published constants imply a different ratio).</span>
+</div>
+<p>Minimizing <var>L</var> subject to <var>C</var> = 6<var>ND</var> gives <var>N</var><sub>opt</sub> ∝ <var>C</var><sup>&#946;/(&#945;+&#946;)</sup> ≈ <var>C</var><sup>0.51</sup>. With the Epoch constants and Gopher's budget (5.76 × 10<sup>23</sup> FLOPs) the optimum is ~72B parameters on ~1.3T tokens, almost exactly Chinchilla. The rule of thumb <var>D</var> = 20<var>N</var> turns <var>C</var> = 6<var>ND</var> into <var>C</var> = 120<var>N</var><sup>2</sup>, so <strong><var>N</var><sub>opt</sub> ≈ √(<var>C</var>/120)</strong>: for 10<sup>24</sup> FLOPs, about 91B parameters and 1.8T tokens.</p>
+
+<figure class="wide">
+  <svg viewBox="0 0 960 440" role="img" aria-label="Scaling laws: log-log loss versus compute curves for different model sizes with the compute-optimal frontier, and parameters versus compute for real models relative to the 20 tokens per parameter line">
+    <g id="ch08-sl"></g>
+  </svg>
+  <figcaption><span class="fig-label">Figure 8.16</span> — Left: loss vs training compute (both log scales) from the Epoch refit of Chinchilla's law, <var>L</var> = 1.82 + 482/<var>N</var><sup>0.348</sup> + 2085/<var>D</var><sup>0.366</sup>. Each curve is one model size trained for more and more tokens; the dashed envelope is the compute-optimal frontier, itself close to a straight line, i.e., a power law. Right: where real models sit relative to the compute-optimal line <var>D</var> = 20<var>N</var> (labels give tokens per parameter). Loss values are specific to Chinchilla's data and tokenizer; only the shapes transfer.</figcaption>
+</figure>
+
+<h3>Why modern models are "over-trained"</h3>
+<p>Chinchilla optimizes <em>training</em> compute only. But a model is trained once and then serves trillions of tokens, each costing ~2<var>N</var> FLOPs (<a href="11-inference.html">Chapter 11</a>). A smaller model trained far past its Chinchilla point reaches almost the same loss and is much cheaper to serve. Llama 3.1 8B saw 15T tokens: <strong>1,870 tokens per parameter</strong>, ~90× the Chinchilla ratio. Under the Epoch fit, a compute-optimal model for the same 7.2 × 10<sup>23</sup> FLOPs would have ~81B parameters and ~1.5T tokens, and its loss would be only ~0.05 nats lower (1.97 vs 2.02), while costing 10× more per generated token. For a model that will be deployed widely, that is an easy trade. The limit is data: high-quality tokens are finite, which is why synthetic data and repetition matter more each year.</p>
+
+<p>Labs fit their own laws on their own data. Llama 3's fits (budgets from 6 × 10<sup>18</sup> to 10<sup>22</sup> FLOPs) predicted that 3.8 × 10<sup>25</sup> FLOPs is best spent on 402B parameters and 16.55T tokens, about 41 tokens per parameter; they trained 405B on 15.6T. They also mapped loss to downstream benchmark accuracy, so the flagship's scores could be forecast before the run. Scaling laws are about loss, not abilities: specific skills can appear abruptly, and laws shift with data quality, architecture (MoE changes what <var>N</var> means) and training recipe.</p>
+
+<aside class="callout key"><div class="callout-title">Key takeaway</div>
+<p>Loss is a predictable power law in <var>N</var> and <var>D</var>. For minimum training cost, use ~20 tokens per parameter (<var>N</var> ≈ √(<var>C</var>/120)). For minimum <em>lifetime</em> cost, train smaller models on far more tokens. That is what nearly every deployed model does today.</p>
+</aside>
+</section>
+
+<section>
+<h2 id="ch08-anneal">The final stretch: annealing and long context</h2>
+
+<p>The last few percent of pretraining are special. Two things happen there, often called <strong>mid-training</strong>.</p>
+
+<h3>Annealing on the best data</h3>
+<p>As the learning rate decays (Figure 8.8), the model settles, and what it settles on matters. Runs switch the mixture toward the highest-quality sources: curated math, code, reasoning, textbooks, sometimes instruction-like data. Llama 3 annealed during its final 40M tokens, decaying the learning rate linearly to zero while upsampling very high-quality sources, then averaged the checkpoints saved during annealing (Polyak averaging) to produce the final base model. Qwen3 has an explicit second stage of ~5T higher-quality, STEM- and code-heavy tokens with faster learning-rate decay. Because annealing has such a strong effect, Llama 3 also used it as a cheap data test: take a 50%-trained Llama 3 8B, anneal its learning rate to zero over 40B tokens with 30% of the mix drawn from a candidate dataset, and see how much the benchmarks move.</p>
+
+<h3>Long-context extension</h3>
+<p>Most training happens at 4K–8K tokens per row, because attention cost grows with sequence length and most documents are short. Long context is added at the end, gradually:</p>
+<ul>
+  <li><strong>Llama 3 405B:</strong> six stages from 8K to 128K tokens, about 800B tokens in total (~5% of the run). A stage ends when short-context benchmarks have recovered and the model solves "needle in a haystack" retrieval at the new length. This stage is where the 16-way context parallelism in the table above was used.</li>
+  <li><strong>DeepSeek-V3:</strong> two phases of 1,000 steps each, 4K → 32K → 128K, using YaRN position scaling.</li>
+  <li><strong>Qwen3:</strong> hundreds of billions of tokens at 32K, raising RoPE's base frequency from 10,000 to 1,000,000.</li>
+</ul>
+<p>The position-encoding side of this (RoPE scaling, YaRN, base changes) is explained in <a href="05-attention.html">Chapter 5</a>. The training side is what this chapter has covered: long rows mean huge activations (context parallelism), attention FLOPs that exceed the 6<var>N</var> term, document masks that prevent attending across packed documents, and data that actually has long-range structure (books, long papers, whole code repositories).</p>
+</section>
+
+<section>
+<h2>What comes out: a base model</h2>
+
+<p>When the run ends, the optimizer state is thrown away and the BF16 weights are exported (for Llama 3.1 8B, a 16 GB set of safetensors files; formats are in <a href="06-transformer.html">Chapter 6</a>). That artifact is a <strong>base model</strong>.</p>
+
+<p>A base model is a <strong>document completer</strong>. It continues whatever text it is given in the way such a document would most likely continue on the internet. Ask it a question and it may answer, or it may continue with three more questions, as if it were completing a quiz. It knows a lot and can do a lot (few-shot prompting works well), but it has no notion of a user, an assistant, turns, or when to stop and hand back control. It is also evaluated differently: by held-out loss and few-shot benchmarks rather than by chatting.</p>
+
+<p>Turning this document completer into an assistant that follows instructions, uses tools and refuses harmful requests is post-training, the subject of <a href="09-post-training.html">Chapter 9</a>. Teaching it to reason with long chains of thought using reinforcement learning is <a href="10-reasoning.html">Chapter 10</a>. Both cost a small fraction of pretraining's compute, but they decide how the model behaves.</p>
+
+<aside class="callout key"><div class="callout-title">Chapter summary</div>
+<p>Pretraining = (curated trillions of tokens) × (next-token cross-entropy at every position) × (backprop: 6<var>N</var> FLOPs per token) × (AdamW with warmup and decay) × (BF16/FP8 mixed precision at 16 B/param) × (DP + ZeRO + TP + PP + CP + EP across thousands of GPUs) × (months, failures, checkpoints). Its cost is <var>C</var> ≈ 6<var>ND</var>, its size is chosen with scaling laws, and its product is a base model that completes documents.</p>
+</aside>
+</section>
+
+<section>
+<h2>Further reading</h2>
+<ul>
+  <li>Llama Team, <a href="https://arxiv.org/abs/2407.21783">The Llama 3 Herd of Models</a> (2024): the most detailed public account of a frontier pretraining run: data, scaling laws, 4D parallelism, failures.</li>
+  <li>DeepSeek-AI, <a href="https://arxiv.org/abs/2412.19437">DeepSeek-V3 Technical Report</a> (2024): FP8 training, DualPipe, MoE at scale, cost accounting.</li>
+  <li>Penedo et al., <a href="https://arxiv.org/abs/2406.17557">The FineWeb Datasets</a> (2024): an open, ablated web-data pipeline, including MinHash settings and FineWeb-Edu.</li>
+  <li>Li et al., <a href="https://arxiv.org/abs/2406.11794">DataComp-LM (DCLM)</a> (2024): controlled experiments on data curation; model-based filtering.</li>
+  <li>Kaplan et al., <a href="https://arxiv.org/abs/2001.08361">Scaling Laws for Neural Language Models</a> (2020).</li>
+  <li>Hoffmann et al., <a href="https://arxiv.org/abs/2203.15556">Training Compute-Optimal Large Language Models</a> (Chinchilla, 2022), and Epoch AI's <a href="https://epoch.ai/publications/chinchilla-scaling-a-replication-attempt">replication attempt</a> (2024).</li>
+  <li>Rajbhandari et al., <a href="https://arxiv.org/abs/1910.02054">ZeRO: Memory Optimizations Toward Training Trillion Parameter Models</a> (2019).</li>
+  <li>Shoeybi et al., <a href="https://arxiv.org/abs/1909.08053">Megatron-LM</a> (2019), the tensor-parallel layout; and Korthikanti et al., <a href="https://arxiv.org/abs/2205.05198">Reducing Activation Recomputation in Large Transformer Models</a> (2022).</li>
+  <li>Hu et al., <a href="https://arxiv.org/abs/2404.06395">MiniCPM</a> (2024), which introduced the WSD schedule.</li>
+  <li>Hugging Face, <a href="https://nanotron-ultrascale-playbook.static.hf.space/index.html">The Ultra-Scale Playbook: Training LLMs on GPU Clusters</a> (2025): a long, practical, benchmark-backed guide to every parallelism technique in this chapter.</li>
+</ul>
+</section>
+
+<footer id="chapter-nav"></footer>
+</main>
+</div>
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+  var NS = "http://www.w3.org/2000/svg";
+  function mk(tag, attrs, parent, text) {
+    var e = document.createElementNS(NS, tag);
+    for (var k in attrs) { if (Object.prototype.hasOwnProperty.call(attrs, k)) e.setAttribute(k, attrs[k]); }
+    if (text != null) e.textContent = text;
+    if (parent) parent.appendChild(e);
+    return e;
+  }
+  function $(id) { return document.getElementById(id); }
+
+  /* ---------- Figure 8.7: optimizer race ---------- */
+  (function () {
+    var paths = [0, 1, 2].map(function (i) { return $("ch08-gd-p" + i); });
+    var balls = [0, 1, 2].map(function (i) { return $("ch08-gd-b" + i); });
+    var labels = [0, 1, 2].map(function (i) { return $("ch08-gd-l" + i); });
+    var stepLbl = $("ch08-gd-step"), lr = $("ch08-gd-lr"), lrOut = $("ch08-gd-lr-out"), noise = $("ch08-gd-noise"), btn = $("ch08-gd-play");
+    if (!paths[0]) return;
+    var STEPS = 60, MS = 110, raf = null, sims = null;
+    /* larger contour ellipses are wider than the plot: draw only their visible top/bottom arcs */
+    var cg = $("ch08-gd-contours");
+    [[470, 63], [594, 80], [727, 98], [891, 120], [1100, 148]].forEach(function (e) {
+      [-1, 1].forEach(function (sgn) {
+        var d = "";
+        for (var i = 0; i <= 84; i++) { var dx = -420 + i * 10, dy = e[1] * Math.sqrt(Math.max(0, 1 - (dx / e[0]) * (dx / e[0]))); d += (i ? " L" : "M") + (480 + dx) + " " + (175 + sgn * dy).toFixed(1); }
+        mk("path", { d: d }, cg);
+      });
+    });
+    function px(x) { return 480 + x * 42; }
+    function py(y) { return 175 - y * 40; }
+    function f(x, y) { return x * x / 50 + y * y; }
+    function rng(seed) { return function () { seed |= 0; seed = seed + 0x6D2B79F5 | 0; var t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+    function simulate() {
+      var scale = +lr.value, useNoise = noise.checked, r = rng(7), nz = [];
+      for (var i = 0; i < STEPS; i++) {
+        var u1 = 1 - r(), u2 = r(), u3 = 1 - r(), u4 = r();
+        var g1 = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2), g2 = Math.sqrt(-2 * Math.log(u3)) * Math.cos(2 * Math.PI * u4);
+        nz.push(useNoise ? [g1 * 0.15, g2 * 1.2] : [0, 0]);
+      }
+      var base = [0.9, 0.3, 0.5];
+      return [0, 1, 2].map(function (kind) {
+        var x = -9, y = 3, vx = 0, vy = 0, mx = 0, my = 0, sx = 0, sy = 0, pts = [[x, y]], eta = base[kind] * scale;
+        for (var t = 1; t <= STEPS; t++) {
+          var gx = x / 25 + nz[t - 1][0], gy = 2 * y + nz[t - 1][1];
+          if (kind === 0) { x -= eta * gx; y -= eta * gy; }
+          else if (kind === 1) { vx = 0.8 * vx + gx; vy = 0.8 * vy + gy; x -= eta * vx; y -= eta * vy; }
+          else {
+            mx = 0.9 * mx + 0.1 * gx; my = 0.9 * my + 0.1 * gy; sx = 0.99 * sx + 0.01 * gx * gx; sy = 0.99 * sy + 0.01 * gy * gy;
+            var mhx = mx / (1 - Math.pow(0.9, t)), mhy = my / (1 - Math.pow(0.9, t)), vhx = sx / (1 - Math.pow(0.99, t)), vhy = sy / (1 - Math.pow(0.99, t));
+            x -= eta * mhx / (Math.sqrt(vhx) + 1e-8); y -= eta * mhy / (Math.sqrt(vhy) + 1e-8);
+          }
+          x = Math.max(-10, Math.min(10, x)); y = Math.max(-3.8, Math.min(3.8, y));
+          pts.push([x, y]);
+        }
+        return pts;
+      });
+    }
+    function draw(k, frac) {
+      sims.forEach(function (pts, i) {
+        var d = "M" + px(pts[0][0]).toFixed(1) + " " + py(pts[0][1]).toFixed(1);
+        for (var j = 1; j <= k; j++) d += " L" + px(pts[j][0]).toFixed(1) + " " + py(pts[j][1]).toFixed(1);
+        var cx = pts[k][0], cy = pts[k][1];
+        if (k < STEPS && frac > 0) { cx += (pts[k + 1][0] - cx) * frac; cy += (pts[k + 1][1] - cy) * frac; d += " L" + px(cx).toFixed(1) + " " + py(cy).toFixed(1); }
+        paths[i].setAttribute("d", d);
+        balls[i].setAttribute("cx", px(cx).toFixed(1)); balls[i].setAttribute("cy", py(cy).toFixed(1));
+        var fv = f(pts[k][0], pts[k][1]);
+        labels[i].textContent = Math.abs(pts[k][1]) >= 3.8 ? "diverged!" : "f = " + (fv < 0.001 ? fv.toExponential(1) : fv.toFixed(3));
+      });
+      stepLbl.textContent = "step " + k + " / " + STEPS;
+    }
+    function play() {
+      if (raf) cancelAnimationFrame(raf);
+      sims = simulate();
+      var t0 = null;
+      function frame(ts) {
+        if (t0 == null) t0 = ts;
+        var e = (ts - t0) / MS, k = Math.min(STEPS, Math.floor(e));
+        draw(k, k < STEPS ? e - k : 0);
+        if (k < STEPS) raf = requestAnimationFrame(frame); else raf = null;
+      }
+      raf = requestAnimationFrame(frame);
+    }
+    function showFinal() { if (raf) { cancelAnimationFrame(raf); raf = null; } sims = simulate(); draw(STEPS, 0); }
+    lr.addEventListener("input", function () { lrOut.textContent = (+lr.value).toFixed(2) + "\u00d7"; showFinal(); });
+    lr.addEventListener("change", play);
+    noise.addEventListener("change", play);
+    btn.addEventListener("click", play);
+    lrOut.textContent = (+lr.value).toFixed(2) + "\u00d7";
+    showFinal();
+    var fig = btn.closest("figure");
+    if (window.Blog && Blog.onInView) Blog.onInView(fig, function () { play(); }, { threshold: 0.4 });
+  })();
+
+  /* ---------- Figure 8.8: LR schedules ---------- */
+  (function () {
+    if (!$("ch08-lr-cos")) return;
+    var X0 = 80, W = 820;
+    function lrCos(s) { return s < 0.03 ? s / 0.03 : 0.1 + 0.45 * (1 + Math.cos(Math.PI * (s - 0.03) / 0.97)); }
+    function lrWsd(s) { return s < 0.03 ? s / 0.03 : s < 0.8 ? 1 : 0.02 + 0.49 * (1 + Math.cos(Math.PI * (s - 0.8) / 0.2)); }
+    function lrBr(s) { return s < 0.45 ? 1 : s > 0.55 ? 0.02 : 0.02 + 0.49 * (1 + Math.cos(Math.PI * (s - 0.45) / 0.1)); }
+    function base(s) { return 2.0 + 1.6 * Math.pow(1 + 60 * s, -0.45); }
+    function yLr(v) { return 200 - 150 * v; }
+    function yLoss(v) { return 430 - 160 * (v - 2.0) / 1.5; }
+    function path(fn, y, a, b, n) {
+      var d = "";
+      for (var i = 0; i <= n; i++) { var s = a + (b - a) * i / n; d += (i ? " L" : "M") + (X0 + W * s).toFixed(1) + " " + y(fn(s)).toFixed(1); }
+      return d;
+    }
+    $("ch08-lr-cos").setAttribute("d", path(lrCos, yLr, 0, 1, 160));
+    $("ch08-lr-wsd").setAttribute("d", path(lrWsd, yLr, 0, 1, 160));
+    $("ch08-loss-cos").setAttribute("d", path(function (s) { return base(s) + 0.3 * lrCos(s); }, yLoss, 0.01, 1, 160));
+    $("ch08-loss-wsd").setAttribute("d", path(function (s) { return base(s) + 0.3 * lrWsd(s); }, yLoss, 0.01, 1, 160));
+    $("ch08-loss-br").setAttribute("d", path(function (s) { return base(s) + 0.3 * lrBr(s); }, yLoss, 0.45, 0.62, 40));
+  })();
+
+  /* ---------- Figure 8.14: pipeline schedules ---------- */
+  (function () {
+    var groups = [$("ch08-pp-s1"), $("ch08-pp-s2"), $("ch08-pp-s3")];
+    if (!groups[0]) return;
+    var P = 4, X0 = 150, U = 24;
+    function sim(m, kind) {
+      var orders = [], s, i;
+      for (s = 0; s < P; s++) {
+        var o = [];
+        if (kind === "gpipe") { for (i = 1; i <= m; i++) o.push(["F", i]); for (i = 1; i <= m; i++) o.push(["B", i]); }
+        else { var w = Math.min(P - s - 1, m), f = 1, b = 1, k; for (k = 0; k < w; k++) o.push(["F", f++]); while (f <= m) { o.push(["F", f++]); o.push(["B", b++]); } while (b <= m) o.push(["B", b++]); }
+        orders.push(o);
+      }
+      var done = {}, free = [0, 0, 0, 0], idx = [0, 0, 0, 0], ops = [], progress = true;
+      while (progress) {
+        progress = false;
+        for (s = 0; s < P; s++) {
+          if (idx[s] >= orders[s].length) continue;
+          var op = orders[s][idx[s]], t = op[0], mb = op[1], dep;
+          if (t === "F") dep = s === 0 ? 0 : done["F" + (s - 1) + "_" + mb];
+          else dep = s === P - 1 ? done["F" + s + "_" + mb] : done["B" + (s + 1) + "_" + mb];
+          if (dep === undefined) continue;
+          var st = Math.max(free[s], dep), dur = t === "F" ? 1 : 2;
+          done[t + s + "_" + mb] = st + dur; free[s] = st + dur; ops.push([s, t, mb, st, dur]); idx[s]++; progress = true;
+        }
+      }
+      return { total: Math.max.apply(null, free), ops: ops };
+    }
+    function peakInFlight(ops, stage) {
+      var ev = ops.filter(function (o) { return o[0] === stage; }).sort(function (a, b) { return a[3] - b[3]; }), cur = 0, peak = 0;
+      ev.forEach(function (o) { cur += o[1] === "F" ? 1 : -1; peak = Math.max(peak, cur); });
+      return peak;
+    }
+    function render(g, m, kind, text) {
+      var r = sim(m, kind), s;
+      for (s = 0; s < P; s++) mk("rect", { x: X0, y: 46 + s * 50, width: r.total * U, height: 36, fill: "url(#ch08-hatch)", stroke: "#ecbcbc" }, g);
+      r.ops.forEach(function (o) {
+        var x = X0 + o[3] * U, y = 46 + o[0] * 50, w = o[4] * U;
+        mk("rect", { x: x + 1, y: y + 1, width: w - 2, height: 34, rx: 3, fill: o[1] === "F" ? "#cbbff2" : "#f4c2c2", stroke: o[1] === "F" ? "#7b5cd6" : "#d64545" }, g);
+        mk("text", { x: x + w / 2, y: y + 23, "text-anchor": "middle", "font-size": 14, fill: "#1d2433" }, g, String(o[2]));
+      });
+      var busy = m * 3, bubble = 1 - busy / r.total;
+      mk("text", { x: X0, y: 270, "font-size": 15, fill: "#1d2433", "font-weight": 700 }, g,
+        text + ": total " + r.total + " units, each GPU busy " + busy + " \u2192 bubble " + Math.round(bubble * 100) + "%;  GPU 0 holds up to " + peakInFlight(r.ops, 0) + " micro-batch" + (m > 1 ? "es" : "") + " of activations");
+    }
+    render(groups[0], 1, "gpipe", "1 micro-batch");
+    render(groups[1], 8, "gpipe", "GPipe, 8 micro-batches");
+    render(groups[2], 8, "1f1b", "1F1B, 8 micro-batches");
+  })();
+
+  /* ---------- Figure 8.15: 4D grid ---------- */
+  (function () {
+    var g = $("ch08-4d-grid");
+    if (!g) return;
+    [56, 106, 156, 246].forEach(function (y) {
+      for (var k = 0; k < 16; k++) {
+        var x = 110 + k * 38;
+        mk("rect", { x: x, y: y, width: 34, height: 36, rx: 4, fill: "#fcecec", stroke: "#d64545" }, g);
+        for (var j = 0; j < 8; j++) mk("circle", { cx: x + 5 + (j % 4) * 8, cy: y + 12 + Math.floor(j / 4) * 12, r: 2.6, fill: "#d64545" }, g);
+      }
+    });
+  })();
+
+  /* ---------- Figure 8.16: scaling laws ---------- */
+  (function () {
+    var g = $("ch08-sl");
+    if (!g) return;
+    var E = 1.8172, A = 482.01, B = 2085.43, al = 0.3478, be = 0.3658;
+    function L(N, D) { return E + A / Math.pow(N, al) + B / Math.pow(D, be); }
+    var Gc = Math.pow(al * A / (be * B), 1 / (al + be)), ea = be / (al + be);
+    var sup = { "0": "\u2070", "1": "\u00b9", "2": "\u00b2", "3": "\u00b3", "4": "\u2074", "5": "\u2075", "6": "\u2076", "7": "\u2077", "8": "\u2078", "9": "\u2079" };
+    function pow10(e) { return "10" + String(e).split("").map(function (c) { return sup[c]; }).join(""); }
+    var clip = mk("clipPath", { id: "ch08-sl-clip" }, mk("defs", {}, g));
+    mk("rect", { x: 80, y: 40, width: 370, height: 300 }, clip);
+    /* left panel: x = log10 C in [18, 26] -> 80..450; y = log10 L in [log 1.8, log 4] -> 340..40 */
+    function lx(c) { return 80 + (Math.log10(c) - 18) / 8 * 370; }
+    var l0 = Math.log10(1.8), l1 = Math.log10(4.0);
+    function ly(v) { return 340 - (Math.log10(v) - l0) / (l1 - l0) * 300; }
+    mk("text", { x: 80, y: 26, "font-size": 16, "font-weight": 700, fill: "#1d2433" }, g, "Loss vs compute (log\u2013log)");
+    [18, 20, 22, 24, 26].forEach(function (e) {
+      mk("line", { x1: lx(Math.pow(10, e)), y1: 40, x2: lx(Math.pow(10, e)), y2: 340, stroke: "#eeebe4" }, g);
+      mk("text", { x: lx(Math.pow(10, e)), y: 360, "text-anchor": "middle", "font-size": 14, fill: "#687084" }, g, pow10(e));
+    });
+    [2.0, 2.5, 3.0, 3.5, 4.0].forEach(function (v) {
+      mk("line", { x1: 80, y1: ly(v), x2: 450, y2: ly(v), stroke: "#eeebe4" }, g);
+      mk("text", { x: 72, y: ly(v) + 5, "text-anchor": "end", "font-size": 14, fill: "#687084" }, g, v.toFixed(1));
+    });
+    mk("rect", { x: 80, y: 40, width: 370, height: 300, fill: "none", stroke: "#687084" }, g);
+    mk("text", { x: 265, y: 384, "text-anchor": "middle", "font-size": 15, fill: "#3a4254" }, g, "training compute C (FLOPs)");
+    mk("text", { x: 22, y: 190, "text-anchor": "middle", "font-size": 15, fill: "#3a4254", transform: "rotate(-90 22 190)" }, g, "loss (nats/token)");
+    var sizes = [[1e8, "100M", "#b9a9ec"], [1e9, "1B", "#9a83e2"], [1e10, "10B", "#7b5cd6"], [1e11, "100B", "#5a3fb3"], [1e12, "1T", "#3a2580"]];
+    var pg = mk("g", { "clip-path": "url(#ch08-sl-clip)" }, g);
+    sizes.forEach(function (sz) {
+      var d = "";
+      for (var i = 0; i <= 120; i++) { var e = 18 + 8 * i / 120, c = Math.pow(10, e), v = L(sz[0], c / (6 * sz[0])); if (v > 6) v = 6; d += (d ? " L" : "M") + lx(c).toFixed(1) + " " + ly(v).toFixed(1); }
+      mk("path", { d: d, fill: "none", stroke: sz[2], "stroke-width": 2.2 }, pg);
+    });
+    var env = "";
+    for (var i = 0; i <= 120; i++) { var e = 18 + 8 * i / 120, c = Math.pow(10, e), n = Gc * Math.pow(c / 6, ea); env += (env ? " L" : "M") + lx(c).toFixed(1) + " " + ly(L(n, c / (6 * n))).toFixed(1); }
+    mk("path", { d: env, fill: "none", stroke: "#1d2433", "stroke-width": 2.4, "stroke-dasharray": "7 5" }, pg);
+    var lg = mk("g", { "font-size": 14, fill: "#3a4254" }, g);
+    mk("text", { x: 80, y: 414, "font-weight": 700 }, lg, "N:");
+    [104, 172, 220, 276, 340].forEach(function (x, k) { mk("rect", { x: x, y: 406, width: 16, height: 4, fill: sizes[k][2] }, lg); mk("text", { x: x + 20, y: 414 }, lg, sizes[k][1]); });
+    mk("line", { x1: 386, y1: 408, x2: 402, y2: 408, stroke: "#1d2433", "stroke-width": 2.4, "stroke-dasharray": "5 3" }, lg);
+    mk("text", { x: 406, y: 414 }, lg, "optimal");
+
+    /* right panel: x = log10 C in [21, 26] -> 560..930; y = log10 N in [9, 12] -> 340..40 */
+    function rx(c) { return 560 + (Math.log10(c) - 21) / 5 * 370; }
+    function ry(n) { return 340 - (Math.log10(n) - 9) / 3 * 300; }
+    mk("text", { x: 560, y: 26, "font-size": 16, "font-weight": 700, fill: "#1d2433" }, g, "Model size vs compute: real models");
+    [21, 22, 23, 24, 25, 26].forEach(function (e) {
+      mk("line", { x1: rx(Math.pow(10, e)), y1: 40, x2: rx(Math.pow(10, e)), y2: 340, stroke: "#eeebe4" }, g);
+      mk("text", { x: rx(Math.pow(10, e)), y: 360, "text-anchor": "middle", "font-size": 14, fill: "#687084" }, g, pow10(e));
+    });
+    [[1e9, "1B"], [1e10, "10B"], [1e11, "100B"], [1e12, "1T"]].forEach(function (t) {
+      mk("line", { x1: 560, y1: ry(t[0]), x2: 930, y2: ry(t[0]), stroke: "#eeebe4" }, g);
+      mk("text", { x: 552, y: ry(t[0]) + 5, "text-anchor": "end", "font-size": 14, fill: "#687084" }, g, t[1]);
+    });
+    mk("rect", { x: 560, y: 40, width: 370, height: 300, fill: "none", stroke: "#687084" }, g);
+    mk("text", { x: 745, y: 384, "text-anchor": "middle", "font-size": 15, fill: "#3a4254" }, g, "training compute C = 6ND (FLOPs)");
+    mk("text", { x: 506, y: 190, "text-anchor": "middle", "font-size": 15, fill: "#3a4254", transform: "rotate(-90 506 190)" }, g, "parameters N");
+    mk("path", { d: "M" + rx(1e21) + " " + ry(Math.sqrt(1e21 / 120)) + " L" + rx(1e26) + " " + ry(Math.sqrt(1e26 / 120)), stroke: "#2f9e6e", "stroke-width": 2.5, fill: "none" }, g);
+    mk("text", { x: 664, y: 262, "font-size": 14, fill: "#1f7a53", "font-weight": 700 }, g, "D = 20N");
+    mk("text", { x: 572, y: 62, "font-size": 14, fill: "#687084" }, g, "under-trained \u2191");
+    mk("text", { x: 920, y: 326, "text-anchor": "end", "font-size": 14, fill: "#687084" }, g, "over-trained \u2193 (cheaper to serve)");
+    var models = [
+      [175e9, 300e9, "GPT-3 (1.7)", "end", -10, 4],
+      [280e9, 300e9, "Gopher (1.1)", "end", -10, -6],
+      [70e9, 1.4e12, "Chinchilla (20)", "start", 10, 20],
+      [70.6e9, 15e12, "Llama 3 70B (212)", "start", 10, -8],
+      [405e9, 15.6e12, "Llama 3 405B (39)", "end", -10, -19],
+      [8.03e9, 15e12, "Llama 3 8B (1,870)", "start", 10, 5]
+    ];
+    models.forEach(function (m) {
+      var c = 6 * m[0] * m[1], x = rx(c), y = ry(m[0]);
+      mk("circle", { cx: x, cy: y, r: 5.5, fill: "#d64545", stroke: "#ffffff", "stroke-width": 1.5 }, g);
+      mk("text", { x: x + m[4], y: y + m[5], "text-anchor": m[3], "font-size": 14, fill: "#1d2433" }, g, m[2]);
+    });
+    mk("text", { x: 560, y: 412, "font-size": 14, fill: "#687084" }, g, "(numbers in parentheses: tokens per parameter)");
+  })();
+
+  /* ---------- Widget: training cost estimator ---------- */
+  (function () {
+    var root = $("ch08-cost");
+    if (!root) return;
+    var GPUS = {
+      a100: { name: "A100", bf16: 312e12, fp8: 0, mem: 80e9, tdp: 400 },
+      h100: { name: "H100", bf16: 989e12, fp8: 1979e12, mem: 80e9, tdp: 700 },
+      h200: { name: "H200", bf16: 989e12, fp8: 1979e12, mem: 141e9, tdp: 700 },
+      b200: { name: "B200", bf16: 2250e12, fp8: 4500e12, mem: 180e9, tdp: 1000 }
+    };
+    var PRESETS = {
+      tiny: { n: 1, nt: 1, d: 0.02, gpu: "h100", prec: "bf16", g: 8, mfu: 40, price: 3.5 },
+      llama8: { n: 8.03, nt: 8.03, d: 15, gpu: "h100", prec: "bf16", g: 1024, mfu: 40, price: 3.5 },
+      llama70: { n: 70.6, nt: 70.6, d: 15, gpu: "h100", prec: "bf16", g: 4096, mfu: 40, price: 3.5 },
+      llama405: { n: 405, nt: 405, d: 15.6, gpu: "h100", prec: "bf16", g: 16384, mfu: 41, price: 3.5 },
+      dsv3: { n: 37, nt: 671, d: 14.8, gpu: "h100", prec: "fp8", g: 2048, mfu: 17, price: 2.0 }
+    };
+    var el = {
+      preset: $("ch08-c-preset"), n: $("ch08-c-n"), nt: $("ch08-c-nt"), d: $("ch08-c-d"), gpu: $("ch08-c-gpu"), prec: $("ch08-c-prec"),
+      g: $("ch08-c-g"), mfu: $("ch08-c-mfu"), mfuOut: $("ch08-c-mfu-out"), price: $("ch08-c-price"), res: $("ch08-c-res"), bar: $("ch08-c-bar"), note: $("ch08-c-note")
+    };
+    function sci(x) {
+      if (!isFinite(x) || x <= 0) return "\u2014";
+      var e = Math.floor(Math.log10(x)), m = x / Math.pow(10, e);
+      if (m >= 9.995) { m /= 10; e += 1; }
+      return m.toFixed(2) + " \u00d7 10<sup>" + e + "</sup>";
+    }
+    function num(x, d) { return Blog.fmtNum(x, d == null ? 2 : d); }
+    function dur(h) {
+      if (h < 48) return h.toFixed(1) + " hours";
+      var days = h / 24;
+      return days < 730 ? days.toFixed(1) + " days" : (days / 365).toFixed(1) + " years";
+    }
+    function money(x) { return x < 1000 ? "$" + x.toFixed(0) : "$" + num(x, 2); }
+    function row(label, value, hint) {
+      return "<tr><td>" + label + (hint ? "<div class=\"h\">" + hint + "</div>" : "") + "</td><td class=\"v\">" + value + "</td></tr>";
+    }
+    var syncTotal = true;
+    function update() {
+      var N = Math.max(0.001, +el.n.value) * 1e9, Nt = Math.max(0.001, +el.nt.value) * 1e9, D = Math.max(1e-6, +el.d.value) * 1e12;
+      var gpu = GPUS[el.gpu.value], G = Math.max(1, Math.round(+el.g.value)), mfu = +el.mfu.value / 100, price = Math.max(0, +el.price.value);
+      var note = "";
+      var peak = gpu.bf16;
+      if (el.prec.value === "fp8") { if (gpu.fp8) peak = gpu.fp8; else note = "A100 has no FP8 tensor cores; using its BF16 peak. "; }
+      el.mfuOut.textContent = Math.round(mfu * 100) + "%";
+      var C = 6 * N * D, eff = peak * mfu, gpuH = C / (eff * 3600), wallH = gpuH / G, cost = gpuH * price;
+      var tokS = G * eff / (6 * N), mwh = gpuH * gpu.tdp / 1e6;
+      var nOpt = Math.sqrt(C / 120), states = 16 * Nt, minG = Math.ceil(states / gpu.mem);
+      var html = "";
+      html += row("Training compute C = 6\u00b7N\u00b7D", sci(C) + " FLOPs");
+      html += row("Useful throughput per GPU", num(eff / 1e12, 0) + " TFLOP/s", "peak " + num(peak / 1e12, 0) + " TFLOP/s \u00d7 MFU");
+      html += row("Cluster speed", num(tokS, 2) + " tokens/s", "GPUs \u00d7 per-GPU throughput / 6N");
+      html += row("GPU-hours", num(gpuH, 2), "C / (peak \u00d7 MFU \u00d7 3600 s)");
+      html += row("Wall-clock on " + G.toLocaleString("en-US") + " " + gpu.name + "s", dur(wallH), "excludes failures, restarts and evaluation");
+      html += row("Compute cost", money(cost), "GPU-hours \u00d7 $" + price.toFixed(2));
+      html += row("GPU energy", (mwh >= 1000 ? (mwh / 1000).toFixed(1) + " GWh" : mwh >= 1 ? mwh.toFixed(mwh < 10 ? 1 : 0) + " MWh" : (mwh * 1000).toFixed(0) + " kWh"), "GPU board power only (" + gpu.tdp + " W each); excludes cooling, CPUs, network");
+      html += row("Tokens per parameter", (D / N >= 10 ? Math.round(D / N).toLocaleString("en-US") : (D / N).toFixed(1)), "20 tokens/param optimum for this compute: N \u2248 " + num(nOpt, 1) + " params on " + num(20 * nOpt, 1) + " tokens");
+      html += row("Model states (16 B \u00d7 total params)", Blog.fmtBytes(states), "\u2265 " + minG.toLocaleString("en-US") + " \u00d7 " + gpu.name + " just to hold them, before activations");
+      el.res.innerHTML = html;
+      var perGpu = states / G, parts = [[2, "#5a6b8c", "#fff"], [2, "#e99a9a", "#1d2433"], [4, "#a3aec4", "#1d2433"], [4, "#3d8bd4", "#fff"], [4, "#9cc5ee", "#1d2433"]], bh = "";
+      parts.forEach(function (p) { bh += "<span style=\"width:" + (p[0] / 16 * 100).toFixed(2) + "%;background:" + p[1] + ";color:" + p[2] + "\">" + Blog.fmtBytes(p[0] * Nt) + "</span>"; });
+      el.bar.innerHTML = bh;
+      note += "Bar: the " + Blog.fmtBytes(states) + " of model states (weights, gradients, FP32 master, Adam m and v). Fully sharded (ZeRO-3) over " + G.toLocaleString("en-US") + " GPUs that is " + Blog.fmtBytes(perGpu) + " per GPU of " + Blog.fmtBytes(gpu.mem) + (perGpu > gpu.mem ? " \u2014 does not fit: add GPUs." : "; the rest is for activations and buffers.");
+      el.note.textContent = note;
+    }
+    function applyPreset(k) {
+      var p = PRESETS[k]; if (!p) return;
+      el.n.value = p.n; el.nt.value = p.nt; el.d.value = p.d; el.gpu.value = p.gpu; el.prec.value = p.prec; el.g.value = p.g; el.mfu.value = p.mfu; el.price.value = p.price.toFixed(2);
+      syncTotal = p.n === p.nt;
+      update();
+    }
+    el.preset.addEventListener("change", function () { applyPreset(el.preset.value); });
+    el.n.addEventListener("input", function () { if (syncTotal) el.nt.value = el.n.value; el.preset.value = "custom"; update(); });
+    el.nt.addEventListener("input", function () { syncTotal = false; el.preset.value = "custom"; update(); });
+    [el.d, el.gpu, el.prec, el.g, el.mfu, el.price].forEach(function (x) {
+      x.addEventListener("input", function () { el.preset.value = "custom"; update(); });
+      x.addEventListener("change", update);
+    });
+    applyPreset(el.preset.value);
+  })();
+});
+</script>
+</body>
+</html>

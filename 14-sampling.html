@@ -1,0 +1,1723 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>14 · Sampling &amp; Temperature — How LLMs Really Work</title>
+<link rel="stylesheet" href="assets/style.css">
+<script src="assets/blog.js" defer></script>
+<style>
+  /* chapter 14 styles: every selector scoped with #ch14, keyframes prefixed ch14- */
+  #ch14 > section { max-width: var(--wide-w); }
+  #ch14 figure svg text.mono, #ch14 figure svg .mono text { font-family: var(--mono); white-space: pre; }
+  #ch14 .ch14-flow { stroke-dasharray: 7 9; animation: ch14-dash 1.2s linear infinite; }
+  @keyframes ch14-dash { to { stroke-dashoffset: -32; } }
+  #ch14 .ch14-pulse { animation: ch14-pulse 2.2s ease-in-out infinite; }
+  @keyframes ch14-pulse { 0%, 100% { opacity: .45 } 50% { opacity: 1 } }
+
+  /* widgets: shared */
+  #ch14 .ch14-note { font-size: 13.5px; color: var(--muted); margin-top: 8px; line-height: 1.45; }
+  #ch14 .ch14-stats { display: flex; flex-wrap: wrap; gap: 8px 22px; margin: 4px 0 12px; font-size: 14.5px; color: var(--ink-2); }
+  #ch14 .ch14-stats b { font-family: var(--mono); color: var(--q); font-weight: 700; }
+  #ch14 .ch14-sentence { font-family: var(--mono); font-size: 15px; background: var(--panel); border-radius: 6px; padding: 8px 12px; margin: 10px 0 0; min-height: 1.6em; }
+  #ch14 .ch14-sentence .ch14-new { background: #fbefc5; border: 1px solid #ecd27e; border-radius: 4px; padding: 0 3px; }
+  #ch14 .widget input[type=number] { width: 84px; }
+
+  /* temperature widget bars */
+  #ch14 .ch14-bars { display: grid; grid-template-columns: 150px 1fr 1fr; gap: 3px 12px; align-items: center; font-size: 13.5px; }
+  #ch14 .ch14-bars .h { font-weight: 700; color: var(--muted); font-size: 12.5px; text-transform: uppercase; letter-spacing: .05em; }
+  #ch14 .ch14-bars .lab { font-family: var(--mono); white-space: pre; overflow: hidden; text-overflow: ellipsis; }
+  #ch14 .ch14-bars .lab.tail { font-family: var(--sans); color: var(--muted); font-size: 12.5px; white-space: normal; line-height: 1.2; }
+  #ch14 .ch14-track { position: relative; height: 18px; background: #f3f1ec; border-radius: 4px; overflow: hidden; }
+  #ch14 .ch14-fill { position: absolute; left: 0; top: 0; bottom: 0; background: #7b5cd6; border-radius: 4px; transition: width .18s ease; }
+  #ch14 .ch14-fill.cnt { background: #e5b62b; }
+  #ch14 .ch14-fill.tail { background: #d64545; }
+  #ch14 .ch14-val { position: absolute; right: 6px; top: 0; line-height: 18px; font-family: var(--mono); font-size: 12px; color: var(--ink); }
+
+  /* sampler playground */
+  #ch14 .ch14-pg-grid { width: 100%; border-collapse: collapse; font-size: 13px; }
+  #ch14 .ch14-pg-grid th { font-size: 12px; color: var(--muted); font-weight: 700; text-align: center; padding: 4px 4px; border-bottom: 1px solid var(--line); line-height: 1.25; vertical-align: bottom; }
+  #ch14 .ch14-pg-grid th.stg-temp { color: #d64545; }
+  #ch14 .ch14-pg-grid td { padding: 3px 4px; border-bottom: 1px solid #eeebe4; text-align: center; font-family: var(--mono); font-size: 12.5px; white-space: nowrap; }
+  #ch14 .ch14-pg-grid td.tk { text-align: left; white-space: pre; }
+  #ch14 .ch14-pg-grid td.tk.tail { font-family: var(--sans); color: var(--muted); font-size: 12px; white-space: normal; }
+  #ch14 .ch14-pg-grid td.live { background: #eaf1fd; color: #24539f; }
+  #ch14 .ch14-pg-grid td.dead { color: #c3c0b8; }
+  #ch14 .ch14-pg-grid td.fin { text-align: left; min-width: 150px; }
+  #ch14 .ch14-pg-grid .ch14-mini { display: inline-block; height: 11px; background: #7b5cd6; border-radius: 2px; vertical-align: middle; margin-right: 6px; }
+  #ch14 .ch14-pg-grid .ch14-mini.cnt { background: #e5b62b; }
+  #ch14 .ch14-pg-scroll { overflow-x: auto; }
+  #ch14 .ch14-presets { display: flex; flex-wrap: wrap; gap: 8px; margin: 2px 0 12px; align-items: center; }
+  #ch14 .ch14-presets span { font-size: 13px; color: var(--muted); font-weight: 600; }
+  #ch14 .widget .controls label { font-size: 14px; }
+  #ch14 .widget .controls input[type=range] { width: 130px; }
+</style>
+</head>
+<body data-chapter="14">
+<div class="layout">
+<nav id="sidebar"></nav>
+<main class="article" id="ch14">
+
+<header class="chapter-head">
+  <div class="kicker">Part IV · Chapter 14</div>
+  <h1>Sampling &amp; Temperature</h1>
+  <p class="lede">The model only produces a probability for every possible next token. Separate code, the sampler, has to pick one of them. This chapter covers that code: the random draw, temperature, the top-k/top-p/min-p filters, penalties, stopping, why "temperature 0" still gives different answers, and how JSON schemas are enforced one token at a time.</p>
+</header>
+
+<div class="tldr">
+  <div class="tldr-title">In this chapter</div>
+  <ul>
+    <li>How a uniform random number becomes a token (inverse-CDF), and how GPUs do it without sorting (Gumbel-max, rejection sampling).</li>
+    <li>What temperature does to the math: logits divided by <var>T</var>, entropy, and why a high temperature hands most of the probability to junk tokens.</li>
+    <li>Top-k, top-p (nucleus), min-p and typical sampling; why the <em>order</em> of the sampler chain changes results; repetition, frequency, presence and DRY penalties; logit bias.</li>
+    <li>Greedy decoding, repetition loops, beam search, stop sequences, <code>finish_reason</code>, seeds and RNGs.</li>
+    <li>Why temperature 0 is not deterministic on real servers (floating-point order, batch-dependent kernels, MoE routing), and how batch-invariant kernels fix it.</li>
+    <li>Constrained decoding for structured output: schema → automaton → token mask → logits set to −∞. Logprobs, and recommended settings, including the fixed temperatures of reasoning models.</li>
+  </ul>
+</div>
+
+<section>
+<h2>The last step: from logits to a token</h2>
+
+<p>Every forward pass ends the same way. The LM head (<a href="06-transformer.html">Chapter 6</a>) produces one score, a <dfn>logit</dfn>, for every entry in the vocabulary: 128,256 numbers for Llama&#160;3.1&#160;8B. Softmax (<a href="04-neural-net-toolkit.html">Chapter 4</a>) turns them into a probability distribution. At this point the model has not chosen anything. It has only said how likely each token is. A separate piece of code, the <dfn>sampler</dfn> (also called the <dfn>decoder</dfn> or decoding strategy), must turn that distribution into exactly one token ID. That token is appended to the context and the generation loop from <a href="01-big-picture.html">Chapter 1</a> runs again.</p>
+
+<p>The sampler has no weights and learns nothing. It is a few hundred lines of code. Yet it decides whether the same prompt gives the same answer twice, whether text falls into a loop, whether JSON output parses, and how "creative" the output feels. Formally, a decoding strategy is a function:</p>
+
+<div class="formula">
+  token = decode(<var>z</var>, history, settings, random bits)
+  <span class="where"><var>z</var> = the logit vector for the next position (length <var>V</var>). history = the tokens so far (needed for penalties and grammars). settings = temperature, top-p, and so on. random bits = output of a pseudo-random number generator (absent for greedy decoding).</span>
+</div>
+
+<p>In practice this function is built as a <strong>chain of small stages</strong>. Each stage reads the logit vector and writes a modified one: add a bias here, subtract a penalty there, divide by the temperature, cut off the unlikely tail. The last stage turns the result into probabilities and makes a random draw. Hugging Face calls these stages <em>logits processors</em>; llama.cpp calls them <em>samplers</em> in a <em>sampler chain</em>.</p>
+
+<aside class="callout intuition"><div class="callout-title">Intuition</div><p>Think of a Unix pipeline or an HTTP middleware chain. The model emits one big record (the logits). Each filter in the pipe edits or drops fields. The final stage picks one field at random, weighted by its value. Change the order of the filters and you can get a different result, exactly like reordering <code>sort | uniq</code>.</p></aside>
+
+<figure class="wide">
+<svg viewBox="0 0 1000 330" role="img" aria-label="The sampling pipeline: logits from the LM head pass through logit processors, temperature, truncation filters, softmax and a random draw to produce one token; a stop check either ends generation or appends the token and runs the next decode step.">
+  <defs>
+    <marker id="ch14-arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#1d2433"/></marker>
+    <marker id="ch14-arr-m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#687084"/></marker>
+  </defs>
+  <text x="500" y="26" text-anchor="middle" font-size="16" font-weight="700" fill="#1d2433">Runs once per generated token, for every sequence in the batch, right after the LM head</text>
+  <!-- boxes -->
+  <g font-size="15" text-anchor="middle">
+    <rect x="20" y="52" width="140" height="104" rx="9" fill="#efebfb" stroke="#7b5cd6" stroke-width="1.6"/>
+    <text x="90" y="80" font-weight="700" fill="#1d2433">Logits z</text>
+    <text x="90" y="104" fill="#3a4254">128,256 floats</text>
+    <text x="90" y="126" fill="#3a4254">FP32 = 513 KB</text>
+    <text x="90" y="146" fill="#687084" font-size="14">per sequence</text>
+
+    <rect x="183" y="52" width="140" height="104" rx="9" fill="#ffffff" stroke="#5a6b8c" stroke-width="1.6"/>
+    <text x="253" y="80" font-weight="700" fill="#1d2433">Processors</text>
+    <text x="253" y="104" fill="#3a4254">logit bias,</text>
+    <text x="253" y="124" fill="#3a4254">penalties,</text>
+    <text x="253" y="144" fill="#3a4254">grammar mask</text>
+
+    <rect x="346" y="52" width="140" height="104" rx="9" fill="#fcecec" stroke="#d64545" stroke-width="1.6"/>
+    <text x="416" y="80" font-weight="700" fill="#1d2433">Temperature</text>
+    <text x="416" y="110" fill="#3a4254" font-size="17">z / T</text>
+    <text x="416" y="138" fill="#687084" font-size="14">sharpen or flatten</text>
+
+    <rect x="509" y="52" width="140" height="104" rx="9" fill="#ffffff" stroke="#5a6b8c" stroke-width="1.6"/>
+    <text x="579" y="80" font-weight="700" fill="#1d2433">Truncation</text>
+    <text x="579" y="104" fill="#3a4254">top-k, top-p,</text>
+    <text x="579" y="124" fill="#3a4254">min-p, typical</text>
+    <text x="579" y="144" fill="#687084" font-size="14">cut the tail</text>
+
+    <rect x="672" y="52" width="140" height="104" rx="9" fill="#eaf1fd" stroke="#2f6fde" stroke-width="1.6"/>
+    <text x="742" y="80" font-weight="700" fill="#1d2433">Softmax + draw</text>
+    <text x="742" y="104" fill="#3a4254">p = softmax(z)</text>
+    <text x="742" y="124" fill="#3a4254">u ~ U(0, 1)</text>
+    <text x="742" y="144" fill="#687084" font-size="14">or argmax</text>
+
+    <rect x="835" y="52" width="145" height="104" rx="9" fill="#fcf6e3" stroke="#e5b62b" stroke-width="1.8"/>
+    <text x="907" y="80" font-weight="700" fill="#1d2433">One token</text>
+    <text x="907" y="108" class="mono" font-size="15" fill="#1d2433">id 5634</text>
+    <text x="907" y="132" class="mono" font-size="15" fill="#1d2433">"␣mat"</text>
+  </g>
+  <g stroke="#1d2433" stroke-width="1.8" fill="none">
+    <path d="M160 104 H181" marker-end="url(#ch14-arr)"/>
+    <path d="M323 104 H344" marker-end="url(#ch14-arr)"/>
+    <path d="M486 104 H507" marker-end="url(#ch14-arr)"/>
+    <path d="M649 104 H670" marker-end="url(#ch14-arr)"/>
+    <path d="M812 104 H833" marker-end="url(#ch14-arr)"/>
+  </g>
+  <!-- stop check -->
+  <path d="M907 156 V196" stroke="#1d2433" stroke-width="1.8" fill="none" marker-end="url(#ch14-arr)"/>
+  <rect x="640" y="198" width="340" height="62" rx="9" fill="#f3f1ec" stroke="#ddd8ce" stroke-width="1.4"/>
+  <text x="810" y="222" text-anchor="middle" font-size="15" font-weight="700" fill="#1d2433">Stop check</text>
+  <text x="810" y="246" text-anchor="middle" font-size="15" fill="#3a4254">EOS? stop string? max_tokens?</text>
+  <path d="M980 229 H992 V300 H970" stroke="#d64545" stroke-width="1.6" fill="none"/>
+  <text x="962" y="305" text-anchor="end" font-size="15" fill="#d64545">yes → finish_reason</text>
+  <!-- loop back -->
+  <path class="ch14-flow" d="M640 229 H90 V160" stroke="#7b5cd6" stroke-width="2.2" fill="none" marker-end="url(#ch14-arr-m)"/>
+  <text x="370" y="252" text-anchor="middle" font-size="15" fill="#5a3fb3">no → append token to context, run the next decode step (Ch 11, 12)</text>
+  <text x="370" y="296" text-anchor="middle" font-size="15" fill="#687084">Every stage after "Logits" is this chapter. None of them has learned weights.</text>
+</svg>
+<figcaption><span class="fig-label">Figure 14.1</span> — The sampler is a pipeline over one vector of logits per sequence. Processors edit logits, temperature rescales them, truncation removes unlikely tokens, and the final stage draws one token. Engines differ in the exact order of the middle stages (see the sampler-chain section below). Token ID is illustrative.</figcaption>
+</figure>
+
+<aside class="callout deep"><div class="callout-title">Low-level: what the sampler touches</div>
+<p>The logits tensor has shape [<var>B</var>, <var>V</var>]: one row per sequence in the batch. Engines convert it to FP32 before sampling (vLLM's sampler does this explicitly), so one row is 128,256 × 4 B = <strong>513 KB</strong>. At a batch of 256 sequences that is 131 MB, read and written by several small elementwise kernels per decode step. Compare this with the ~16 GB of weights that a decode step of Llama&#160;3.1&#160;8B reads (<a href="11-inference.html">Chapter 11</a>): sampling is a small part of the step. It is not free, though. A naive implementation launches a handful of kernels, sorts 128K values when top-p is on, and may force the GPU to wait for the CPU. The next two sections show how this is done well.</p></aside>
+</section>
+
+<section>
+<h2>Drawing a token: inverse-CDF sampling</h2>
+
+<p><strong>The problem.</strong> We have probabilities <var>p</var><sub>1</sub> … <var>p</var><sub><var>V</var></sub> that sum to 1. We want to pick token <var>i</var> with probability exactly <var>p</var><sub><var>i</var></sub>. A computer gives us only uniform random numbers: a value <var>u</var> anywhere in [0, 1), all values equally likely.</p>
+
+<p><strong>The idea.</strong> Lay the probabilities end to end on a ruler of length 1. Token 1 owns the segment [0, <var>p</var><sub>1</sub>), token 2 owns the next <var>p</var><sub>2</sub>, and so on. Drop <var>u</var> on the ruler. The token whose segment contains <var>u</var> wins. A segment of length 0.21 catches 21% of all uniform draws, so each token is chosen with exactly its probability. This is <dfn>inverse transform sampling</dfn>, or inverse-CDF sampling. It is a roulette wheel cut open and laid flat.</p>
+
+<div class="formula">
+  <var>F</var><sub><var>i</var></sub> = <var>p</var><sub>1</sub> + <var>p</var><sub>2</sub> + … + <var>p</var><sub><var>i</var></sub>, &#160;&#160; choose the smallest <var>i</var> with <var>F</var><sub><var>i</var></sub> &gt; <var>u</var>
+  <span class="where"><var>F</var><sub><var>i</var></sub> is the cumulative distribution function (CDF): the total probability of the first <var>i</var> tokens. <var>u</var> ~ U(0, 1) is one uniform random number. "Inverse" because we go from a height on the CDF (<var>u</var>) back to the token.</span>
+</div>
+
+<p><strong>Worked example.</strong> The figure below uses illustrative logits for 12 continuations of "The cat sat on the" (<span class="tok">&#9251;mat</span> 4.0, <span class="tok">&#9251;floor</span> 3.2, <span class="tok">&#9251;bed</span> 2.5, <span class="tok">&#9251;couch</span> 2.1, …) and, to be realistic, gives every one of the other 128,244 vocabulary tokens a logit of −12. At <var>T</var> = 1 the probabilities are 0.467, 0.210, 0.104, 0.070, … and the 128,244 junk tokens share 0.7%. With <var>u</var> = 0.62: <var>F</var>(mat) = 0.467 ≤ 0.62, keep walking; <var>F</var>(floor) = 0.676 &gt; 0.62, stop. The sampler emits <span class="tok">&#9251;floor</span>, the <em>second</em> most likely token. Over many draws <span class="tok">&#9251;mat</span> wins 46.7% of the time and <span class="tok">&#9251;floor</span> 21.0%. (These numbers differ from Chapter 4's five-token example because there are more candidates.)</p>
+
+<figure class="stepper wide" data-steps="6" data-interval="3000">
+<svg viewBox="0 0 1000 500" role="img" aria-label="Stepper: logits become probabilities, probabilities are stacked into a cumulative ruler, a uniform random number u equals 0.62 is dropped on the ruler, and the walk stops at the floor token.">
+  <text x="30" y="32" font-size="17" font-weight="700" fill="#1d2433">Context: "The cat sat on the" → which token next?</text>
+  <!-- table header -->
+  <g font-size="15" font-weight="700" fill="#687084">
+    <text x="30" y="70">token</text>
+    <text x="300" y="70" text-anchor="end">logit z</text>
+    <g data-step="2"><text x="420" y="70" text-anchor="end">e^(z−4)</text><text x="520" y="70" text-anchor="end">p</text></g>
+    <g data-step="3"><text x="640" y="70" text-anchor="end">CDF F</text></g>
+  </g>
+  <line x1="30" y1="80" x2="660" y2="80" stroke="#ddd8ce"/>
+  <!-- rows -->
+  <g font-size="15" fill="#1d2433">
+    <g class="mono">
+      <rect data-step="5" x="24" y="117" width="640" height="26" rx="4" fill="#fcf6e3" stroke="#e5b62b"/>
+      <text x="30" y="104">␣mat</text><text x="30" y="134">␣floor</text><text x="30" y="164">␣bed</text><text x="30" y="194">␣couch</text>
+      <text x="30" y="224">␣edge</text><text x="30" y="254">␣windowsill</text><text x="30" y="284">␣table</text>
+      <text x="300" y="104" text-anchor="end">4.0</text><text x="300" y="134" text-anchor="end">3.2</text><text x="300" y="164" text-anchor="end">2.5</text><text x="300" y="194" text-anchor="end">2.1</text>
+      <text x="300" y="224" text-anchor="end">1.6</text><text x="300" y="254" text-anchor="end">1.2</text><text x="300" y="284" text-anchor="end">0.9</text>
+      <g data-step="2">
+        <text x="420" y="104" text-anchor="end">1.000</text><text x="420" y="134" text-anchor="end">0.449</text><text x="420" y="164" text-anchor="end">0.223</text><text x="420" y="194" text-anchor="end">0.150</text>
+        <text x="420" y="224" text-anchor="end">0.091</text><text x="420" y="254" text-anchor="end">0.061</text><text x="420" y="284" text-anchor="end">0.045</text><text x="420" y="314" text-anchor="end">0.124</text>
+        <text x="420" y="344" text-anchor="end" font-weight="700">Σ 2.143</text>
+        <text x="520" y="104" text-anchor="end">0.467</text><text x="520" y="134" text-anchor="end">0.210</text><text x="520" y="164" text-anchor="end">0.104</text><text x="520" y="194" text-anchor="end">0.070</text>
+        <text x="520" y="224" text-anchor="end">0.042</text><text x="520" y="254" text-anchor="end">0.028</text><text x="520" y="284" text-anchor="end">0.021</text><text x="520" y="314" text-anchor="end">0.058</text>
+      </g>
+      <g data-step="3">
+        <text x="640" y="104" text-anchor="end">0.467</text><text x="640" y="134" text-anchor="end">0.676</text><text x="640" y="164" text-anchor="end">0.780</text><text x="640" y="194" text-anchor="end">0.850</text>
+        <text x="640" y="224" text-anchor="end">0.892</text><text x="640" y="254" text-anchor="end">0.921</text><text x="640" y="284" text-anchor="end">0.942</text><text x="640" y="314" text-anchor="end">1.000</text>
+      </g>
+    </g>
+    <text x="30" y="314" fill="#687084">everything else</text>
+    <text x="300" y="314" text-anchor="end" fill="#687084">0.7 … −12</text>
+  </g>
+  <!-- right: probability bars -->
+  <g data-step="2">
+    <text x="700" y="70" font-size="15" font-weight="700" fill="#687084">p as bars</text>
+    <rect x="700" y="90" width="257" height="18" rx="3" fill="#5b8def"/>
+    <rect x="700" y="120" width="116" height="18" rx="3" fill="#8fb3f5"/>
+    <rect x="700" y="150" width="57" height="18" rx="3" fill="#b3cbf7"/>
+    <rect x="700" y="180" width="39" height="18" rx="3" fill="#c9daf9"/>
+    <rect x="700" y="210" width="23" height="18" rx="3" fill="#d8e4fa"/>
+    <rect x="700" y="240" width="15" height="18" rx="3" fill="#dfe8f9"/>
+    <rect x="700" y="270" width="12" height="18" rx="3" fill="#e6ecf7"/>
+    <rect x="700" y="300" width="32" height="18" rx="3" fill="#e2ded6"/>
+    <rect data-step="5" x="700" y="120" width="116" height="18" rx="3" fill="#e5b62b"/>
+  </g>
+  <!-- CDF ruler -->
+  <g data-step="3">
+    <text x="30" y="384" font-size="15" font-weight="700" fill="#1d2433">The ruler: segments of length p, laid end to end</text>
+    <rect x="60" y="400" width="392" height="34" fill="#5b8def"/>
+    <rect x="452" y="400" width="176" height="34" fill="#8fb3f5"/>
+    <rect x="628" y="400" width="87" height="34" fill="#b3cbf7"/>
+    <rect x="715" y="400" width="59" height="34" fill="#c9daf9"/>
+    <rect x="774" y="400" width="35" height="34" fill="#d8e4fa"/>
+    <rect x="809" y="400" width="25" height="34" fill="#dfe8f9"/>
+    <rect x="834" y="400" width="17" height="34" fill="#e6ecf7"/>
+    <rect x="851" y="400" width="49" height="34" fill="#e2ded6"/>
+    <rect x="60" y="400" width="840" height="34" fill="none" stroke="#1d2433" stroke-width="1.2"/>
+    <g font-size="15" text-anchor="middle" fill="#1d2433">
+      <text x="256" y="422" class="mono" fill="#ffffff">␣mat</text>
+      <text x="540" y="422" class="mono">␣floor</text>
+      <text x="671" y="422" class="mono" font-size="14">␣bed</text>
+    </g>
+    <g font-size="14" fill="#687084" text-anchor="middle">
+      <text x="60" y="456">0</text><text x="452" y="456">0.467</text><text x="628" y="456">0.676</text><text x="900" y="456">1</text>
+    </g>
+  </g>
+  <rect data-step="5" x="452" y="400" width="176" height="34" fill="#e5b62b" stroke="#1d2433" stroke-width="1.2"/>
+  <text data-step="5" x="540" y="422" font-size="15" text-anchor="middle" class="mono" fill="#1d2433">␣floor</text>
+  <!-- u marker -->
+  <g data-step="4">
+    <line x1="581" y1="360" x2="581" y2="440" stroke="#d64545" stroke-width="2.5"/>
+    <path d="M573 356 L589 356 L581 368 z" fill="#d64545"/>
+    <text x="581" y="350" text-anchor="middle" font-size="15" font-weight="700" fill="#d64545">u = 0.62</text>
+  </g>
+  <!-- walk arrow -->
+  <g data-step-only="5">
+    <path d="M60 480 H578" stroke="#d64545" stroke-width="2" fill="none" marker-end="url(#ch14-arr)" class="ch14-flow"/>
+    <text x="700" y="486" font-size="15" fill="#d64545">0.467 ≤ 0.62 &lt; 0.676 → ␣floor</text>
+  </g>
+  <g data-step="6">
+    <rect x="600" y="462" width="380" height="32" rx="7" fill="#fcf6e3" stroke="#e5b62b"/>
+    <text x="790" y="484" text-anchor="middle" font-size="15" fill="#1d2433">"The cat sat on the <tspan font-weight="700">floor</tspan>"</text>
+  </g>
+</svg>
+<div class="step-captions">
+  <p data-step-only="1"><b>Step 1.</b> The LM head gives a logit per token. Only 7 of the 12 named candidates are listed; the other 5 and the 128,244 tokens at logit −12 are grouped as "everything else". All logits are illustrative.</p>
+  <p data-step-only="2"><b>Step 2.</b> Softmax: subtract the max (4.0), exponentiate, divide by the sum 2.143. The "everything else" row sums the 5 remaining named tokens (0.110) and the tail (128,244 × e<sup>−16</sup> ≈ 0.014).</p>
+  <p data-step-only="3"><b>Step 3.</b> Running sums give the CDF. Drawn as a ruler, each token owns a segment exactly as long as its probability. The order of segments does not matter for correctness.</p>
+  <p data-step-only="4"><b>Step 4.</b> The random number generator returns one uniform value, here <var>u</var> = 0.62. It lands somewhere on the ruler.</p>
+  <p data-step-only="5"><b>Step 5.</b> Walk the cumulative sums until one exceeds <var>u</var>. 0.467 is not enough; 0.676 is. The winner is <span class="tok">&#9251;floor</span>, the second most likely token.</p>
+  <p data-step-only="6"><b>Step 6.</b> The token is appended. A new <var>u</var> next time could land anywhere; 46.7% of draws land in the <span class="tok">&#9251;mat</span> segment.</p>
+</div>
+<figcaption><span class="fig-label">Figure 14.2</span> — Inverse-CDF sampling. One uniform random number plus one pass of running sums picks a token with exactly its probability. Logits illustrative.</figcaption>
+</figure>
+
+<p><strong>Ordering does not matter.</strong> The ruler can list tokens in any order: in vocabulary-ID order, sorted, or shuffled. Each token's segment still has length <var>p</var><sub><var>i</var></sub>, so each token is still chosen with probability <var>p</var><sub><var>i</var></sub>. Plain sampling therefore needs no sort. Only the truncation filters (top-k, top-p) need to know which tokens are the largest.</p>
+
+<aside class="callout deep"><div class="callout-title">Low-level: llama.cpp's final sampler</div>
+<p>llama.cpp's <code>dist</code> sampler is a direct implementation of the ruler. It finds the max logit, computes <code>p = expf(logit − max)</code> for each surviving token and their sum <var>S</var> in a <code>double</code>, draws <code>rnd</code> from a <code>std::uniform_real_distribution&lt;double&gt;(0, 1)</code>, and walks the running sum until it passes <var>S</var> · <code>rnd</code>. Multiplying <var>u</var> by <var>S</var> instead of dividing every <var>p</var> by <var>S</var> saves a full pass over the vocabulary; a code comment says this single-pass version is about 3× faster on a Mac with the full gpt-oss vocabulary.</p></aside>
+</section>
+
+<section>
+<h2>How GPUs actually sample</h2>
+
+<p>The ruler is perfect on a CPU. On a GPU it has two problems. A running sum is a sequential scan, and the classic library call that does it, <code>torch.multinomial</code>, makes the CPU wait for the GPU. vLLM's source says so directly: it avoids <code>torch.multinomial</code> "because torch.multinomial causes CPU-GPU synchronization". During decode the CPU is busy preparing the next step, so a sync stalls the pipeline. The fix is a different but equivalent way to draw.</p>
+
+<h3>The Gumbel-max trick, or the exponential race</h3>
+
+<p><strong>Idea.</strong> Give every token its own random alarm clock. Token <var>i</var>'s clock rings after a random time that is exponentially distributed with rate <var>p</var><sub><var>i</var></sub>: likely tokens have fast clocks. The token whose clock rings first wins. For exponential clocks, the chance that clock <var>i</var> rings first is exactly <var>p</var><sub><var>i</var></sub> / Σ<var>p</var><sub><var>j</var></sub>. So the race is a correct sampler, and it is a single parallel <em>argmax</em> instead of a sequential scan.</p>
+
+<div class="formula">
+  token = argmax<sub><var>i</var></sub> &#160;<var>p</var><sub><var>i</var></sub> / <var>q</var><sub><var>i</var></sub>, &#160; <var>q</var><sub><var>i</var></sub> ~ Exp(1) &#160;&#160;⇔&#160;&#160; token = argmax<sub><var>i</var></sub> ( <var>z</var><sub><var>i</var></sub>/<var>T</var> + <var>g</var><sub><var>i</var></sub> ), &#160; <var>g</var><sub><var>i</var></sub> = −ln(−ln <var>U</var><sub><var>i</var></sub>)
+  <span class="where"><var>q</var><sub><var>i</var></sub> = one exponential random number per token (−ln of a uniform). <var>q</var><sub><var>i</var></sub>/<var>p</var><sub><var>i</var></sub> is token <var>i</var>'s ring time, so the largest <var>p</var><sub><var>i</var></sub>/<var>q</var><sub><var>i</var></sub> rings first. Taking logs gives the second form: add independent <dfn>Gumbel noise</dfn> <var>g</var><sub><var>i</var></sub> to every scaled logit and take the argmax. Neither form needs the probabilities to be normalized, and the second needs no softmax at all.</span>
+</div>
+
+<p>Worked example with two tokens, <var>p</var> = 0.467 for <span class="tok">&#9251;mat</span> and 0.210 for <span class="tok">&#9251;floor</span>. Suppose the noise draws are <var>q</var> = 1.30 and 0.40. Scores: 0.467/1.30 = 0.359 and 0.210/0.40 = 0.525, so <span class="tok">&#9251;floor</span> wins this race. Over many races <span class="tok">&#9251;mat</span> wins 0.467/(0.467+0.210) = 69% of the head-to-head contests, exactly as the ruler would give.</p>
+
+<p>vLLM's default PyTorch path does exactly this: fill a [<var>B</var>, <var>V</var>] tensor with <code>exponential_()</code> noise, divide the probabilities by it in place, and take <code>argmax</code>. That costs 128,256 random numbers per sequence per step instead of one, but GPU random number generation is cheap (see the seeds section) and the whole thing is two fused, fully parallel passes with no sort and no sync.</p>
+
+<h3>Selecting the top tokens without a full sort</h3>
+
+<p>Truncation filters need the largest tokens. Sorting 128,256 floats per sequence per step is wasteful when you need the top 40. Engines use partial methods instead:</p>
+<ul>
+  <li><strong>Bucketing.</strong> llama.cpp's top-k drops every logit into one of 128 buckets spanning [−10, 10], builds a histogram, finds the bucket where the running count reaches <var>k</var>, and runs <code>std::partial_sort</code> only inside that boundary bucket. It is a radix-select in spirit.</li>
+  <li><strong>Radix select on GPU.</strong> Finding the <var>k</var>-th largest value digit by digit, with a histogram per pass, then keeping everything above it.</li>
+  <li><strong>Rejection sampling with pivots.</strong> FlashInfer (used by vLLM and SGLang on NVIDIA GPUs) never sorts. It samples with a ruler pass over tokens above a pivot probability, checks whether the sampled token satisfies the top-k or top-p rule, and if not, raises the pivot and tries again. Its "dual pivot" version provably finishes in O(log(1/ε)) rounds, and in practice in a few, all inside one fused kernel.</li>
+</ul>
+
+<figure class="wide">
+<svg viewBox="0 0 1000 400" role="img" aria-label="Three GPU sampling methods side by side: sort plus prefix sum plus search; exponential race with argmax; rejection sampling with a rising pivot.">
+  <g font-size="16" font-weight="700" fill="#1d2433" text-anchor="middle">
+    <text x="170" y="30">A. Sort + scan + search</text>
+    <text x="500" y="30">B. Exponential race (Gumbel-max)</text>
+    <text x="830" y="30">C. Rejection with pivots</text>
+  </g>
+  <g fill="none" stroke="#ddd8ce"><rect x="20" y="44" width="300" height="340" rx="10"/><rect x="350" y="44" width="300" height="340" rx="10"/><rect x="680" y="44" width="300" height="340" rx="10"/></g>
+  <!-- A: sorted bars with CDF staircase -->
+  <g>
+    <line x1="40" y1="170" x2="300" y2="170" stroke="#687084"/>
+    <g fill="#8fb3f5">
+      <rect x="50" y="76" width="22" height="94"/><rect x="80" y="112" width="22" height="58"/><rect x="110" y="132" width="22" height="38"/><rect x="140" y="146" width="22" height="24"/>
+      <rect x="170" y="154" width="22" height="16"/><rect x="200" y="159" width="22" height="11"/><rect x="230" y="163" width="22" height="7"/><rect x="260" y="166" width="22" height="4"/>
+    </g>
+    <polyline points="50,140 72,140 80,128 102,128 110,121 132,121 140,116 162,116 170,113 192,113 200,111 222,111 230,110 252,110 260,109 282,109" fill="none" stroke="#2f6fde" stroke-width="2"/>
+    <line x1="40" y1="124" x2="300" y2="124" stroke="#d64545" stroke-dasharray="5 4" stroke-width="1.6"/>
+    <text x="296" y="118" text-anchor="end" font-size="14" fill="#d64545">u</text>
+    <text x="296" y="100" text-anchor="end" font-size="14" fill="#2f6fde">CDF</text>
+  </g>
+  <!-- B: bars + noisy scores -->
+  <g>
+    <line x1="370" y1="170" x2="630" y2="170" stroke="#687084"/>
+    <g fill="#e6ecf7">
+      <rect x="380" y="146" width="22" height="24"/><rect x="410" y="76" width="22" height="94"/><rect x="440" y="159" width="22" height="11"/><rect x="470" y="112" width="22" height="58"/>
+      <rect x="500" y="163" width="22" height="7"/><rect x="530" y="132" width="22" height="38"/><rect x="560" y="154" width="22" height="16"/><rect x="590" y="166" width="22" height="4"/>
+    </g>
+    <g fill="#7b5cd6" opacity=".85">
+      <rect x="386" y="120" width="10" height="50"/><rect x="416" y="104" width="10" height="66"/><rect x="446" y="150" width="10" height="20"/><rect x="476" y="70" width="10" height="100"/>
+      <rect x="506" y="160" width="10" height="10"/><rect x="536" y="128" width="10" height="42"/><rect x="566" y="138" width="10" height="32"/><rect x="596" y="162" width="10" height="8"/>
+    </g>
+    <rect x="472" y="66" width="18" height="108" fill="none" stroke="#e5b62b" stroke-width="2.4" class="ch14-pulse"/>
+    <text x="510" y="64" font-size="14" fill="#5a3fb3">max of p/q wins</text>
+  </g>
+  <!-- C: pivot -->
+  <g>
+    <line x1="700" y1="170" x2="960" y2="170" stroke="#687084"/>
+    <g fill="#8fb3f5">
+      <rect x="740" y="76" width="22" height="94"/><rect x="800" y="112" width="22" height="58"/><rect x="860" y="132" width="22" height="38"/>
+    </g>
+    <g fill="#e2ded6">
+      <rect x="710" y="146" width="22" height="24"/><rect x="770" y="159" width="22" height="11"/><rect x="830" y="163" width="22" height="7"/><rect x="890" y="154" width="22" height="16"/><rect x="920" y="166" width="22" height="4"/>
+    </g>
+    <line x1="700" y1="140" x2="960" y2="140" stroke="#d64545" stroke-width="2" stroke-dasharray="6 4"/>
+    <text x="956" y="132" text-anchor="end" font-size="14" fill="#d64545">pivot rises ↑</text>
+  </g>
+  <!-- steps -->
+  <g font-size="15" fill="#1d2433">
+    <text x="36" y="206">1. sort V probabilities</text>
+    <text x="36" y="230">2. prefix sum → CDF</text>
+    <text x="36" y="254">3. binary-search u</text>
+    <text x="366" y="206">1. q<tspan font-size="12" dy="4">i</tspan><tspan dy="-4"> ~ Exp(1) for every token</tspan></text>
+    <text x="366" y="230">2. score = p<tspan font-size="12" dy="4">i</tspan><tspan dy="-4"> / q</tspan><tspan font-size="12" dy="4">i</tspan></text>
+    <text x="366" y="254">3. token = argmax(score)</text>
+    <text x="696" y="206">1. ruler pass over tokens</text>
+    <text x="696" y="228">    with p above the pivot</text>
+    <text x="696" y="254">2. passes top-k / top-p? accept</text>
+    <text x="696" y="278">3. else raise pivot, repeat</text>
+  </g>
+  <g stroke="#ddd8ce"><line x1="36" y1="296" x2="304" y2="296"/><line x1="366" y1="296" x2="634" y2="296"/><line x1="696" y1="296" x2="964" y2="296"/></g>
+  <g font-size="15">
+    <text x="36" y="322" fill="#d64545">O(V log V) sort, 3+ kernels</text>
+    <text x="36" y="346" fill="#687084">torch.multinomial: CPU waits</text>
+    <text x="36" y="370" fill="#687084">needed for exact top-p</text>
+    <text x="366" y="322" fill="#2f9e6e">2 parallel passes, no sort</text>
+    <text x="366" y="346" fill="#687084">no CDF, no CPU sync</text>
+    <text x="366" y="370" fill="#687084">vLLM's default path</text>
+    <text x="696" y="322" fill="#2f9e6e">no sort, one fused kernel</text>
+    <text x="696" y="346" fill="#687084">O(log 1/ε) rounds worst case</text>
+    <text x="696" y="370" fill="#687084">FlashInfer top-k / top-p</text>
+  </g>
+</svg>
+<figcaption><span class="fig-label">Figure 14.3</span> — Three ways to draw from the same distribution on a GPU. All three are statistically identical; they differ in passes over the 128,256-entry row, kernel launches, and whether anything must be sorted. (B) works on unnormalized probabilities or, with Gumbel noise, directly on logits.</figcaption>
+</figure>
+
+<aside class="callout warn"><div class="callout-title">A floating-point trap</div><p>FlashInfer's authors note that a parallel prefix sum of non-negative floats is not guaranteed to be monotone, because the parallel adds happen in a different order than a sequential scan. A "CDF" that dips slightly can return an invalid token. Floating-point addition order will come back as the main character in the determinism section.</p></aside>
+</section>
+
+<section>
+<h2>Greedy decoding and the repetition trap</h2>
+
+<p>The simplest decoder uses no randomness: always take the most likely token, token = argmax<sub><var>i</var></sub> <var>z</var><sub><var>i</var></sub>. This is <dfn>greedy decoding</dfn>. It needs no softmax (the largest logit has the largest probability) and, in exact math, the same prompt always gives the same output. Greedy is a good choice for short, closed answers: classification labels, extracting a field, a yes/no. It is a poor choice for anything long.</p>
+
+<p><strong>Why greedy loops.</strong> Language models learn that text often repeats itself: names recur, code repeats patterns, lists have parallel structure. Attention heads that find an earlier occurrence of the current token and copy what followed it (induction heads, <a href="05-attention.html">Chapter 5</a>) make copying a strong signal. Once a sentence has appeared twice, the evidence that it will appear a third time is stronger. Holtzman et al. measured this: the probability of repeating a phrase <em>rises</em> with each repetition. Greedy decoding always takes the top choice, so once the loop becomes the top choice it can never escape. It is a positive-feedback loop, like a microphone near its own speaker.</p>
+
+<figure class="stepper" data-steps="4" data-interval="2600">
+<svg viewBox="0 0 760 360" role="img" aria-label="Stepper: under greedy decoding the sentence The cat sat on the mat repeats; each repetition raises the probability of repeating again, a positive feedback loop.">
+  <text x="20" y="28" font-size="15" font-weight="700" fill="#1d2433">Greedy output so far</text>
+  <rect x="20" y="40" width="400" height="150" rx="8" fill="#f3f1ec" stroke="#ddd8ce"/>
+  <g font-size="14" class="mono" fill="#1d2433">
+    <text x="34" y="72">The cat sat on the mat.</text>
+    <text data-step="2" x="34" y="102" fill="#ad2f2f">The cat sat on the mat.</text>
+    <text data-step="3" x="34" y="132" fill="#ad2f2f">The cat sat on the mat.</text>
+    <text data-step="4" x="34" y="162" fill="#ad2f2f">The cat sat on the mat. …</text>
+  </g>
+  <text x="450" y="28" font-size="15" font-weight="700" fill="#1d2433">P(next sentence is a repeat)</text>
+  <line x1="450" y1="190" x2="740" y2="190" stroke="#687084"/>
+  <g>
+    <rect x="466" y="160" width="46" height="30" fill="#e6a0a0"/>
+    <text x="489" y="152" text-anchor="middle" font-size="14" fill="#1d2433">0.21</text>
+    <g data-step="2"><rect x="532" y="113" width="46" height="77" fill="#dd7373"/><text x="555" y="105" text-anchor="middle" font-size="14" fill="#1d2433">0.55</text></g>
+    <g data-step="3"><rect x="598" y="77" width="46" height="113" fill="#d64545"/><text x="621" y="69" text-anchor="middle" font-size="14" fill="#1d2433">0.81</text></g>
+    <g data-step="4"><rect x="664" y="60" width="46" height="130" fill="#b33636"/><text x="687" y="52" text-anchor="middle" font-size="14" fill="#1d2433">0.93</text></g>
+  </g>
+  <g font-size="13" fill="#687084" text-anchor="middle">
+    <text x="489" y="208">after 1</text><text x="555" y="208">after 2</text><text x="621" y="208">after 3</text><text x="687" y="208">after 4</text>
+  </g>
+  <!-- feedback loop -->
+  <g font-size="14" text-anchor="middle">
+    <rect x="20" y="248" width="160" height="56" rx="8" fill="#ffffff" stroke="#5a6b8c"/>
+    <text x="100" y="272" fill="#1d2433">copy earlier text</text><text x="100" y="292" fill="#687084">(induction heads)</text>
+    <rect x="210" y="248" width="160" height="56" rx="8" fill="#ffffff" stroke="#5a6b8c"/>
+    <text x="290" y="272" fill="#1d2433">p(repeat) rises</text><text x="290" y="292" fill="#687084">more evidence</text>
+    <rect x="400" y="248" width="160" height="56" rx="8" fill="#ffffff" stroke="#5a6b8c"/>
+    <text x="480" y="272" fill="#1d2433">argmax takes it</text><text x="480" y="292" fill="#687084">every single time</text>
+    <rect x="590" y="248" width="150" height="56" rx="8" fill="#ffffff" stroke="#5a6b8c"/>
+    <text x="665" y="272" fill="#1d2433">one more copy</text><text x="665" y="292" fill="#687084">in the context</text>
+  </g>
+  <g stroke="#1d2433" stroke-width="1.6" fill="none">
+    <path d="M180 276 H207" marker-end="url(#ch14-arr)"/><path d="M370 276 H397" marker-end="url(#ch14-arr)"/><path d="M560 276 H587" marker-end="url(#ch14-arr)"/>
+  </g>
+  <path d="M665 304 V336 H100 V307" fill="none" stroke="#d64545" stroke-width="2" marker-end="url(#ch14-arr)" class="ch14-flow"/>
+  <text data-step="4" x="382" y="352" text-anchor="middle" font-size="14" font-weight="700" fill="#d64545">locked: the loop is now the argmax at every step</text>
+</svg>
+<div class="step-captions">
+  <p data-step-only="1"><b>Step 1.</b> The model completes the sentence. The chance that the next sentence is an exact copy is modest.</p>
+  <p data-step-only="2"><b>Step 2.</b> If the top choice happens to be a copy, greedy takes it. Now the sentence appears twice, and copying looks even more likely.</p>
+  <p data-step-only="3"><b>Step 3.</b> Each copy is more evidence for the next copy. The probability keeps climbing.</p>
+  <p data-step-only="4"><b>Step 4.</b> The loop is self-sustaining. Greedy has no way out until <code>max_tokens</code> ends it. Numbers are illustrative; the rising shape matches the measurements in Holtzman et al. (2019).</p>
+</div>
+<figcaption><span class="fig-label">Figure 14.4</span> — Why greedy decoding loops: copying is rewarded by the model, and argmax never takes a lower-probability exit.</figcaption>
+</figure>
+
+<p>Sampling breaks loops because a random draw sometimes takes a lower-probability exit. Penalties and DRY (later in this chapter) attack loops directly. Long reasoning traces are especially prone to loops, which is why Qwen3's model card says, in bold, not to use greedy decoding in thinking mode: it "can lead to performance degradation and endless repetitions".</p>
+
+<p>There is a second, quieter problem. The single most likely continuation is not what human text looks like. People do not always pick the most predictable next word; real text has frequent small surprises. Text built only from argmax choices reads as bland. That observation is the starting point for nucleus and typical sampling below.</p>
+</section>
+
+<section>
+<h2>Temperature</h2>
+
+<p><strong>The problem.</strong> Pure sampling uses the model's distribution as is. Sometimes we want it more decisive (fewer odd choices, more consistent answers) and sometimes more varied (brainstorming, fiction). We need one knob that sharpens or flattens the whole distribution while keeping the ranking.</p>
+
+<p><strong>The idea.</strong> Divide every logit by a positive number <var>T</var> before softmax. Dividing by a small <var>T</var> stretches the gaps between logits, so the winner takes more. Dividing by a large <var>T</var> shrinks the gaps, so everything moves toward equal.</p>
+
+<div class="formula">
+  <var>p</var><sub><var>i</var></sub>(<var>T</var>) = <span class="frac"><span><var>e</var><sup><var>z</var><sub><var>i</var></sub>/<var>T</var></sup></span><span>Σ<sub><var>j</var></sub> <var>e</var><sup><var>z</var><sub><var>j</var></sub>/<var>T</var></sup></span></span>
+  &#160;&#160;&#160; and so &#160;&#160;
+  <span class="frac"><span><var>p</var><sub><var>i</var></sub></span><span><var>p</var><sub><var>j</var></sub></span></span> = <var>e</var><sup>(<var>z</var><sub><var>i</var></sub> − <var>z</var><sub><var>j</var></sub>)/<var>T</var></sup>
+  <span class="where"><var>T</var> = temperature. <var>T</var> = 1 is the model's own distribution. The ratio form is the useful one: a logit gap of Δ becomes a probability ratio of <var>e</var><sup>Δ/<var>T</var></sup>. Ranking never changes, only how lopsided it is.</span>
+</div>
+
+<p><strong>Worked example.</strong> The gap between <span class="tok">&#9251;mat</span> (4.0) and <span class="tok">&#9251;floor</span> (3.2) is 0.8. At <var>T</var> = 1 the ratio is <var>e</var><sup>0.8</sup> = 2.23 (0.467 vs 0.210). At <var>T</var> = 0.5 it is <var>e</var><sup>1.6</sup> = 4.95, and <span class="tok">&#9251;mat</span> rises to 0.775. At <var>T</var> = 2 it is <var>e</var><sup>0.4</sup> = 1.49, nearly a coin flip between the two.</p>
+
+<ul>
+  <li><strong><var>T</var> → 0:</strong> the largest logit's share goes to 1. The limit is greedy decoding. Dividing by zero is undefined, so engines special-case it: vLLM treats <var>T</var> &lt; 10<sup>−5</sup> as greedy, llama.cpp treats <var>T</var> ≤ 0 as greedy.</li>
+  <li><strong><var>T</var> = 1:</strong> sample from what the model learned. This is the distribution training optimized (<a href="08-pretraining.html">Chapter 8</a>).</li>
+  <li><strong><var>T</var> → ∞:</strong> every token gets 1/<var>V</var>, including all 128,244 junk tokens. Output becomes random bytes.</li>
+</ul>
+
+<aside class="callout intuition"><div class="callout-title">Why it is called temperature</div><p>The formula is the Boltzmann distribution from statistical physics: a system is in state <var>i</var> with probability proportional to <var>e</var><sup>−<var>E</var><sub><var>i</var></sub>/<var>kT</var></sup>. Read a logit as negative energy. At low temperature a physical system sits in its lowest-energy state (the argmax); at high temperature it visits every state almost equally. Same math, same behavior.</p></aside>
+
+<h3>Entropy: one number for "how spread out"</h3>
+
+<p>We need a measure of how uncertain a distribution is. The standard one is <dfn>entropy</dfn>, the average surprise of a draw:</p>
+
+<div class="formula">
+  <var>H</var>(<var>p</var>) = − Σ<sub><var>i</var></sub> <var>p</var><sub><var>i</var></sub> log<sub>2</sub> <var>p</var><sub><var>i</var></sub> &#160; bits
+  <span class="where">−log<sub>2</sub> <var>p</var><sub><var>i</var></sub> is the <dfn>surprisal</dfn> of token <var>i</var> in bits: 1 bit for a token with <var>p</var> = 0.5, 10 bits for <var>p</var> = 1/1024. Entropy averages it. <var>H</var> = 0 means one certain token; <var>H</var> = log<sub>2</sub> 128,256 = 16.97 bits is the uniform maximum. 2<sup><var>H</var></sup> is the "effective number of choices" (the perplexity of this one step).</span>
+</div>
+
+<p>For our example: at <var>T</var> = 1, <var>H</var> = 2.54 bits, about 5.8 effective choices. At <var>T</var> = 0.5, <var>H</var> = 1.10 bits (2.1 choices). At <var>T</var> = 1.5 it jumps to 10.8 bits, and at <var>T</var> = 2 to 16.2 bits, close to the uniform maximum. Why the jump? Look at the tail.</p>
+
+<p><strong>The tail explosion.</strong> Each junk token has a logit 16 below <span class="tok">&#9251;mat</span>. At <var>T</var> = 1 its weight relative to <span class="tok">&#9251;mat</span> is <var>e</var><sup>−16</sup> ≈ 1.1 × 10<sup>−7</sup>; times 128,244 tokens that is 0.014, under 1% of the total. At <var>T</var> = 2 the gap halves to 8, so each junk token's weight is <var>e</var><sup>−8</sup> = 3.4 × 10<sup>−4</sup>, and 128,244 of them add up to 43 times the weight of <span class="tok">&#9251;mat</span>. The junk now holds <strong>91.5%</strong> of the probability. A large vocabulary means a huge number of individually negligible tokens, and temperature raises all of them at once. This is why raw high-temperature sampling produces gibberish, and why every serious sampler combines temperature with truncation.</p>
+
+<figure class="wide">
+<svg viewBox="0 -40 1000 440" role="img" aria-label="Line chart of token probabilities versus temperature: mat falls from 1 toward 0, floor and bed rise then fall, the tail of 128,244 junk tokens rises steeply above T = 1, and entropy climbs toward 17 bits.">
+<line x1="90" y1="260" x2="890" y2="260" stroke="#eeebe4"/>
+<line x1="90" y1="190" x2="890" y2="190" stroke="#eeebe4"/>
+<line x1="90" y1="120" x2="890" y2="120" stroke="#eeebe4"/>
+<line x1="90" y1="50" x2="890" y2="50" stroke="#eeebe4"/>
+<line x1="290" y1="50" x2="290" y2="330" stroke="#eeebe4"/>
+<line x1="490" y1="50" x2="490" y2="330" stroke="#eeebe4"/>
+<line x1="690" y1="50" x2="690" y2="330" stroke="#eeebe4"/>
+<line x1="890" y1="50" x2="890" y2="330" stroke="#eeebe4"/>
+<line x1="490" y1="44" x2="490" y2="330" stroke="#687084" stroke-dasharray="5 5"/>
+<line x1="370" y1="110" x2="370" y2="330" stroke="#c9c4b8" stroke-dasharray="3 5"/>
+<text x="370" y="102" text-anchor="middle" font-size="14" fill="#687084">chat ~0.7</text>
+<line x1="90" y1="330" x2="890" y2="330" stroke="#1d2433" stroke-width="1.4"/>
+<line x1="90" y1="330" x2="90" y2="50" stroke="#1d2433" stroke-width="1.4"/>
+<line x1="890" y1="330" x2="890" y2="50" stroke="#1d2433" stroke-width="1" stroke-dasharray="4 3"/>
+<g font-size="15" fill="#3a4254">
+<text x="80" y="335" text-anchor="end">0</text>
+<text x="80" y="265" text-anchor="end">0.25</text>
+<text x="80" y="195" text-anchor="end">0.5</text>
+<text x="80" y="125" text-anchor="end">0.75</text>
+<text x="80" y="55" text-anchor="end">1</text>
+<text x="90" y="354" text-anchor="middle">0</text>
+<text x="290" y="354" text-anchor="middle">0.5</text>
+<text x="490" y="354" text-anchor="middle">1</text>
+<text x="690" y="354" text-anchor="middle">1.5</text>
+<text x="890" y="354" text-anchor="middle">2</text>
+<text x="900" y="335">0</text>
+<text x="900" y="269">4</text>
+<text x="900" y="203">8</text>
+<text x="900" y="137">12</text>
+<text x="900" y="71">16</text>
+</g>
+<text x="490" y="382" text-anchor="middle" font-size="15" font-weight="700" fill="#1d2433">temperature T</text>
+<text x="28" y="190" text-anchor="middle" font-size="15" font-weight="700" fill="#1d2433" transform="rotate(-90 28 190)">probability</text>
+<text x="972" y="190" text-anchor="middle" font-size="15" font-weight="700" fill="#1d2433" transform="rotate(90 972 190)">entropy (bits)</text>
+<text x="496" y="58" font-size="14" fill="#687084">T = 1</text>
+<polyline points="90.0,330.0 106.0,330.0 122.0,330.0 138.0,329.8 154.0,329.0 170.0,327.7 186.0,326.0 202.0,324.1 218.0,322.0 234.0,319.8 250.0,317.5 266.0,315.3 282.0,313.0 298.0,310.8 314.0,308.7 330.0,306.6 346.0,304.6 362.0,302.7 378.0,300.8 394.0,299.1 410.0,297.4 426.0,295.8 442.0,294.2 458.0,292.4 474.0,290.5 490.0,288.2 506.0,285.3 522.0,281.5 538.0,276.5 554.0,270.0 570.0,261.6 586.0,251.3 602.0,238.9 618.0,224.6 634.0,208.9 650.0,192.3 666.0,175.6 682.0,159.3 698.0,144.0 714.0,130.1 730.0,117.8 746.0,107.1 762.0,98.0 778.0,90.4 794.0,83.9 810.0,78.6 826.0,74.2 842.0,70.5 858.0,67.5 874.0,64.9 890.0,62.9" fill="none" stroke="#1d2433" stroke-width="2" stroke-dasharray="7 5"/>
+<polyline points="90.0,330.0 106.0,330.0 122.0,330.0 138.0,330.0 154.0,330.0 170.0,329.8 186.0,329.5 202.0,328.8 218.0,327.6 234.0,326.2 250.0,324.4 266.0,322.4 282.0,320.3 298.0,318.1 314.0,316.0 330.0,313.9 346.0,312.0 362.0,310.2 378.0,308.5 394.0,307.0 410.0,305.6 426.0,304.4 442.0,303.3 458.0,302.3 474.0,301.5 490.0,300.9 506.0,300.3 522.0,300.0 538.0,299.9 554.0,300.1 570.0,300.5 586.0,301.3 602.0,302.5 618.0,303.9 634.0,305.7 650.0,307.7 666.0,309.8 682.0,312.0 698.0,314.1 714.0,316.1 730.0,318.0 746.0,319.6 762.0,321.0 778.0,322.3 794.0,323.4 810.0,324.3 826.0,325.1 842.0,325.7 858.0,326.3 874.0,326.8 890.0,327.2" fill="none" stroke="#2f9e6e" stroke-width="3" stroke-linejoin="round"/>
+<polyline points="90.0,330.0 106.0,330.0 122.0,330.0 138.0,329.6 154.0,328.1 170.0,325.0 186.0,320.4 202.0,314.9 218.0,309.0 234.0,303.2 250.0,297.7 266.0,292.6 282.0,288.2 298.0,284.4 314.0,281.1 330.0,278.4 346.0,276.2 362.0,274.5 378.0,273.2 394.0,272.2 410.0,271.5 426.0,271.0 442.0,270.8 458.0,270.8 474.0,270.9 490.0,271.3 506.0,271.9 522.0,272.7 538.0,273.8 554.0,275.3 570.0,277.2 586.0,279.6 602.0,282.4 618.0,285.7 634.0,289.3 650.0,293.2 666.0,297.2 682.0,301.1 698.0,304.8 714.0,308.3 730.0,311.3 746.0,314.1 762.0,316.4 778.0,318.4 794.0,320.1 810.0,321.6 826.0,322.8 842.0,323.8 858.0,324.7 874.0,325.4 890.0,326.0" fill="none" stroke="#2f6fde" stroke-width="3" stroke-linejoin="round"/>
+<polyline points="90.0,50.0 106.0,50.0 122.0,50.0 138.0,50.4 154.0,51.9 170.0,55.2 186.0,60.3 202.0,66.7 218.0,74.2 234.0,82.4 250.0,91.1 266.0,99.9 282.0,108.7 298.0,117.5 314.0,126.1 330.0,134.4 346.0,142.4 362.0,150.1 378.0,157.4 394.0,164.3 410.0,170.9 426.0,177.1 442.0,183.1 458.0,188.7 474.0,194.1 490.0,199.4 506.0,204.6 522.0,209.8 538.0,215.3 554.0,221.0 570.0,227.2 586.0,233.9 602.0,241.1 618.0,248.8 634.0,256.8 650.0,264.9 666.0,272.8 682.0,280.4 698.0,287.4 714.0,293.7 730.0,299.2 746.0,304.0 762.0,308.1 778.0,311.6 794.0,314.5 810.0,316.9 826.0,318.9 842.0,320.5 858.0,321.9 874.0,323.1 890.0,324.0" fill="none" stroke="#7b5cd6" stroke-width="3" stroke-linejoin="round"/>
+<polyline points="90.0,330.0 106.0,330.0 122.0,330.0 138.0,330.0 154.0,330.0 170.0,330.0 186.0,330.0 202.0,330.0 218.0,330.0 234.0,330.0 250.0,330.0 266.0,330.0 282.0,330.0 298.0,330.0 314.0,330.0 330.0,330.0 346.0,330.0 362.0,330.0 378.0,330.0 394.0,330.0 410.0,330.0 426.0,329.9 442.0,329.8 458.0,329.5 474.0,329.0 490.0,328.1 506.0,326.7 522.0,324.3 538.0,320.8 554.0,315.7 570.0,308.6 586.0,299.3 602.0,287.5 618.0,273.3 634.0,257.0 650.0,239.1 666.0,220.4 682.0,201.6 698.0,183.5 714.0,166.4 730.0,150.9 746.0,137.1 762.0,125.0 778.0,114.5 794.0,105.5 810.0,97.8 826.0,91.3 842.0,85.8 858.0,81.1 874.0,77.1 890.0,73.8" fill="none" stroke="#d64545" stroke-width="3" stroke-linejoin="round"/>
+<line x1="90" y1="-19" x2="120" y2="-19" stroke="#7b5cd6" stroke-width="3"/>
+<text x="128" y="-14" font-size="15" fill="#1d2433" class="mono">␣mat</text>
+<line x1="208" y1="-19" x2="238" y2="-19" stroke="#2f6fde" stroke-width="3"/>
+<text x="246" y="-14" font-size="15" fill="#1d2433" class="mono">␣floor</text>
+<line x1="340" y1="-19" x2="370" y2="-19" stroke="#2f9e6e" stroke-width="3"/>
+<text x="378" y="-14" font-size="15" fill="#1d2433" class="mono">␣bed</text>
+<line x1="458" y1="-19" x2="488" y2="-19" stroke="#d64545" stroke-width="3"/>
+<text x="496" y="-14" font-size="15" fill="#1d2433">tail: 128,244 junk tokens (sum)</text>
+<line x1="762" y1="-19" x2="792" y2="-19" stroke="#1d2433" stroke-width="3" stroke-dasharray="7 5"/>
+<text x="800" y="-14" font-size="15" fill="#1d2433">entropy H (right axis)</text></svg>
+<figcaption><span class="fig-label">Figure 14.5</span> — Probability of three tokens and of the whole 128,244-token tail as temperature goes from 0 to 2, plus entropy (dashed, right axis). Below <var>T</var> = 1 the curves are gentle; above it the tail takes over. Logits illustrative (named tokens as in Figure 14.2, tail at −12).</figcaption>
+</figure>
+
+<div class="widget" id="ch14-tw">
+  <div class="widget-title">Try it: temperature over "The cat sat on the ___"</div>
+  <div class="controls">
+    <label>Temperature <var>T</var> <input type="range" min="0" max="2" step="0.01" value="1" id="ch14-tw-t"> <span class="readout" id="ch14-tw-tv">1.00</span></label>
+    <span class="ch14-presets" id="ch14-tw-presets"><button type="button" data-t="0">0</button><button type="button" data-t="0.3">0.3</button><button type="button" data-t="0.7">0.7</button><button type="button" data-t="1">1</button><button type="button" data-t="1.5">1.5</button><button type="button" data-t="2">2</button></span>
+    <label><input type="checkbox" id="ch14-tw-tail" checked> include the other 128,244 tokens</label>
+  </div>
+  <div class="ch14-stats" id="ch14-tw-stats"></div>
+  <div class="ch14-bars" id="ch14-tw-bars"></div>
+  <div class="controls" style="margin-top:14px; margin-bottom:0">
+    <button type="button" class="primary" id="ch14-tw-one">Sample once</button>
+    <button type="button" id="ch14-tw-new">New seed</button>
+    <label>seed <input type="number" id="ch14-tw-seed" value="42" min="0" step="1"></label>
+  </div>
+  <div class="ch14-sentence" id="ch14-tw-sent"></div>
+  <div class="ch14-note">Purple bars: exact probabilities. Yellow bars: counts from 1,000 draws using inverse-CDF sampling with a seeded pseudo-random generator (mulberry32). The same seed always gives the same 1,000 draws; that is a tiny demonstration of the determinism section later. Logits are illustrative; the tail gives each of the other 128,244 tokens a logit of −12.</div>
+</div>
+
+<p>Try <var>T</var> = 0.7, a common chat setting: <span class="tok">&#9251;mat</span> gets 63%, the tail is invisible, and the 1,000-draw histogram still shows a few <span class="tok">&#9251;bed</span> and <span class="tok">&#9251;couch</span>. Try 1.5 with the tail on: half of all draws are junk. Uncheck the tail and 1.5 looks harmless. That difference is the whole argument for the next section.</p>
+
+<aside class="callout key"><div class="callout-title">Key takeaway</div><p>Temperature multiplies every logit gap by 1/<var>T</var>. It keeps the ranking and changes how lopsided the distribution is. Below 1 it trims variety smoothly; above 1 it hands probability to the vast tail of junk tokens, so it must be paired with truncation.</p></aside>
+</section>
+
+<section>
+<h2>Truncation: top-k, top-p, min-p, typical</h2>
+
+<p><strong>The problem.</strong> Most of the vocabulary is nonsense in any given context, but each nonsense token gets a small non-zero probability. One at a time they do not matter; together they do, and temperature makes them matter more. Holtzman et al. called this the "unreliable tail". <dfn>Truncation</dfn> removes tokens judged unreliable, renormalizes the survivors so they sum to 1, and samples only among them. The methods differ in how they decide where the tail starts.</p>
+
+<h3>Top-k</h3>
+<p>Keep the <var>k</var> most likely tokens. Simple and cheap. Its weakness is that <var>k</var> is fixed, while the shape of the distribution changes from step to step. After "The cat sat on the", 5 tokens is generous. After "My favorite fruit is", there may be a dozen equally good answers, and <var>k</var> = 5 throws away half of the probability mass for no reason.</p>
+
+<h3>Top-p (nucleus sampling)</h3>
+<p>Keep the <em>smallest</em> set of top tokens whose probabilities add up to at least <var>p</var>. This set is the <dfn>nucleus</dfn>. It adapts: a peaked distribution gives a small nucleus, a flat one gives a large nucleus. Holtzman et al. (2019) introduced it, and it became the default filter in most APIs (<code>top_p</code>).</p>
+<div class="formula">
+  keep the top <var>m</var> tokens, where <var>m</var> = min { <var>m</var> : <var>p</var><sub>(1)</sub> + … + <var>p</var><sub>(<var>m</var>)</sub> ≥ <var>p</var> }
+  <span class="where"><var>p</var><sub>(1)</sub> ≥ <var>p</var><sub>(2)</sub> ≥ … are the probabilities sorted in descending order. For our example with <var>p</var> = 0.9: 0.467, 0.676, 0.780, 0.850, 0.892, 0.921 → <var>m</var> = 6 tokens.</span>
+</div>
+<p>Its weakness: the nucleus is defined by <em>total</em> mass. If many junk tokens together hold a lot of mass, which is exactly what high temperature causes, the nucleus has to swallow thousands of them to reach <var>p</var>.</p>
+
+<h3>Min-p</h3>
+<p>Keep every token whose probability is at least a fraction of the top token's probability. Nguyen et al. (ICLR 2025) proposed it; it is now in llama.cpp (default 0.05), Hugging Face and vLLM.</p>
+<div class="formula">
+  keep token <var>i</var> if &#160;<var>p</var><sub><var>i</var></sub> ≥ <var>p</var><sub>base</sub> · <var>p</var><sub>max</sub>
+  <span class="where"><var>p</var><sub>max</sub> = probability of the most likely token. <var>p</var><sub>base</sub> = the min-p setting, typically 0.05–0.1. Peaked example: 0.1 × 0.467 = 0.047, so 4 tokens survive (<span class="tok">&#9251;edge</span> at 0.042 just misses). Flat example: 0.1 × 0.119 = 0.012, so all 12 fruits survive.</span>
+</div>
+<p>The threshold moves with the model's confidence. When the model is sure, the bar is high. When it is unsure, the bar drops and many options survive. And a single junk token's probability stays tiny relative to the top token even at high temperature, so min-p removes the tail no matter how hot the sampling is. That is why it pairs well with <var>T</var> &gt; 1.</p>
+
+<h3>Typical sampling</h3>
+<p>Meister et al. (2022) asked a different question: not "is this token likely?" but "is this token about as surprising as a token here should be?" Human text tends to carry a steady amount of information per word. <dfn>Locally typical sampling</dfn> keeps tokens whose surprisal −log <var>p</var><sub><var>i</var></sub> is close to the entropy <var>H</var>, adding tokens in order of closeness until their mass reaches τ (the <code>typical_p</code> setting).</p>
+<p>Worked example: <var>H</var> = 2.54 bits. Surprisals: <span class="tok">&#9251;mat</span> 1.10, <span class="tok">&#9251;floor</span> 2.25, <span class="tok">&#9251;bed</span> 3.26, <span class="tok">&#9251;couch</span> 3.84 bits. Distances from <var>H</var>: 1.44, 0.29, 0.72, 1.30. With τ = 0.3 the method keeps <span class="tok">&#9251;floor</span> then <span class="tok">&#9251;bed</span> (0.21 + 0.10 = 0.31 ≥ 0.3) and <strong>drops <span class="tok">&#9251;mat</span></strong>, the most likely token, as "too predictable". No other filter here can do that. With τ = 0.9 it keeps the same 6 tokens as top-p.</p>
+
+<figure class="wide">
+<svg viewBox="0 0 1000 470" role="img" aria-label="Two distributions, one peaked and one flat, with markers showing which tokens survive top-k 5, top-p 0.9 and min-p 0.1. Top-k keeps 5 in both; top-p keeps 6 and 11; min-p keeps 4 and 12.">
+  <g font-size="16" font-weight="700" fill="#1d2433">
+    <text x="20" y="28">Peaked: "The cat sat on the"</text>
+    <text x="520" y="28">Flat: "My favorite fruit is"</text>
+  </g>
+  <g font-size="14" font-weight="700" text-anchor="middle">
+    <text x="360" y="58" fill="#e8833a">top-k 5</text><text x="420" y="58" fill="#2f6fde">top-p .9</text><text x="480" y="58" fill="#2f9e6e">min-p .1</text>
+    <text x="835" y="58" fill="#e8833a">top-k 5</text><text x="900" y="58" fill="#2f6fde">top-p .9</text><text x="965" y="58" fill="#2f9e6e">min-p .1</text>
+  </g>
+  <line x1="20" y1="68" x2="500" y2="68" stroke="#ddd8ce"/><line x1="520" y1="68" x2="995" y2="68" stroke="#ddd8ce"/>
+  <g font-size="15" fill="#1d2433">
+    <g class="mono">
+      <text x="20" y="92">␣mat</text><text x="20" y="117">␣floor</text><text x="20" y="142">␣bed</text><text x="20" y="167">␣couch</text><text x="20" y="192">␣edge</text><text x="20" y="217">␣windowsill</text>
+      <text x="20" y="242">␣table</text><text x="20" y="267">␣chair</text><text x="20" y="292">␣roof</text><text x="20" y="317">␣sofa</text><text x="20" y="342">␣keyboard</text><text x="20" y="367">␣moon</text>
+      <text x="520" y="92">␣mango</text><text x="520" y="117">␣apple</text><text x="520" y="142">␣banana</text><text x="520" y="167">␣strawberry</text><text x="520" y="192">␣pineapple</text><text x="520" y="217">␣watermelon</text>
+      <text x="520" y="242">␣peach</text><text x="520" y="267">␣cherry</text><text x="520" y="292">␣orange</text><text x="520" y="317">␣blueberry</text><text x="520" y="342">␣kiwi</text><text x="520" y="367">␣grape</text>
+    </g>
+  </g>
+  <g fill="#7b5cd6">
+    <rect x="135" y="79" width="140" height="16" rx="2"/><rect x="135" y="104" width="63" height="16" rx="2"/><rect x="135" y="129" width="31" height="16" rx="2"/><rect x="135" y="154" width="21" height="16" rx="2"/>
+    <rect x="135" y="179" width="13" height="16" rx="2"/><rect x="135" y="204" width="8" height="16" rx="2"/><rect x="135" y="229" width="6" height="16" rx="2"/><rect x="135" y="254" width="5" height="16" rx="2"/>
+    <rect x="135" y="279" width="4" height="16" rx="2"/><rect x="135" y="304" width="3" height="16" rx="2"/><rect x="135" y="329" width="3" height="16" rx="2"/><rect x="135" y="354" width="1" height="16" rx="2"/>
+    <rect x="645" y="79" width="36" height="16" rx="2"/><rect x="645" y="104" width="32" height="16" rx="2"/><rect x="645" y="129" width="31" height="16" rx="2"/><rect x="645" y="154" width="29" height="16" rx="2"/>
+    <rect x="645" y="179" width="26" height="16" rx="2"/><rect x="645" y="204" width="25" height="16" rx="2"/><rect x="645" y="229" width="24" height="16" rx="2"/><rect x="645" y="254" width="22" height="16" rx="2"/>
+    <rect x="645" y="279" width="21" height="16" rx="2"/><rect x="645" y="304" width="20" height="16" rx="2"/><rect x="645" y="329" width="18" height="16" rx="2"/><rect x="645" y="354" width="17" height="16" rx="2"/>
+  </g>
+  <g font-size="14" fill="#3a4254" class="mono">
+    <text x="281" y="92">.467</text><text x="204" y="117">.210</text><text x="172" y="142">.104</text><text x="162" y="167">.070</text><text x="154" y="192">.042</text><text x="149" y="217">.028</text>
+    <text x="147" y="242">.021</text><text x="146" y="267">.017</text><text x="145" y="292">.014</text><text x="144" y="317">.010</text><text x="144" y="342">.009</text><text x="142" y="367">.001</text>
+    <text x="687" y="92">.119</text><text x="683" y="117">.108</text><text x="682" y="142">.102</text><text x="680" y="167">.097</text><text x="677" y="192">.088</text><text x="676" y="217">.084</text>
+    <text x="675" y="242">.080</text><text x="673" y="267">.072</text><text x="672" y="292">.069</text><text x="671" y="317">.065</text><text x="669" y="342">.059</text><text x="668" y="367">.056</text>
+  </g>
+  <g>
+    <g fill="#e8833a"><circle cx="360" cy="87" r="6"/><circle cx="360" cy="112" r="6"/><circle cx="360" cy="137" r="6"/><circle cx="360" cy="162" r="6"/><circle cx="360" cy="187" r="6"/></g>
+    <g fill="#2f6fde"><circle cx="420" cy="87" r="6"/><circle cx="420" cy="112" r="6"/><circle cx="420" cy="137" r="6"/><circle cx="420" cy="162" r="6"/><circle cx="420" cy="187" r="6"/><circle cx="420" cy="212" r="6"/></g>
+    <g fill="#2f9e6e"><circle cx="480" cy="87" r="6"/><circle cx="480" cy="112" r="6"/><circle cx="480" cy="137" r="6"/><circle cx="480" cy="162" r="6"/></g>
+    <g fill="none" stroke="#cfcac0" stroke-width="1.5">
+      <circle cx="360" cy="212" r="4"/><circle cx="360" cy="237" r="4"/><circle cx="360" cy="262" r="4"/><circle cx="360" cy="287" r="4"/><circle cx="360" cy="312" r="4"/><circle cx="360" cy="337" r="4"/><circle cx="360" cy="362" r="4"/>
+      <circle cx="420" cy="237" r="4"/><circle cx="420" cy="262" r="4"/><circle cx="420" cy="287" r="4"/><circle cx="420" cy="312" r="4"/><circle cx="420" cy="337" r="4"/><circle cx="420" cy="362" r="4"/>
+      <circle cx="480" cy="187" r="4"/><circle cx="480" cy="212" r="4"/><circle cx="480" cy="237" r="4"/><circle cx="480" cy="262" r="4"/><circle cx="480" cy="287" r="4"/><circle cx="480" cy="312" r="4"/><circle cx="480" cy="337" r="4"/><circle cx="480" cy="362" r="4"/>
+    </g>
+  </g>
+  <g>
+    <g fill="#e8833a"><circle cx="835" cy="87" r="6"/><circle cx="835" cy="112" r="6"/><circle cx="835" cy="137" r="6"/><circle cx="835" cy="162" r="6"/><circle cx="835" cy="187" r="6"/></g>
+    <g fill="#2f6fde"><circle cx="900" cy="87" r="6"/><circle cx="900" cy="112" r="6"/><circle cx="900" cy="137" r="6"/><circle cx="900" cy="162" r="6"/><circle cx="900" cy="187" r="6"/><circle cx="900" cy="212" r="6"/><circle cx="900" cy="237" r="6"/><circle cx="900" cy="262" r="6"/><circle cx="900" cy="287" r="6"/><circle cx="900" cy="312" r="6"/><circle cx="900" cy="337" r="6"/></g>
+    <g fill="#2f9e6e"><circle cx="965" cy="87" r="6"/><circle cx="965" cy="112" r="6"/><circle cx="965" cy="137" r="6"/><circle cx="965" cy="162" r="6"/><circle cx="965" cy="187" r="6"/><circle cx="965" cy="212" r="6"/><circle cx="965" cy="237" r="6"/><circle cx="965" cy="262" r="6"/><circle cx="965" cy="287" r="6"/><circle cx="965" cy="312" r="6"/><circle cx="965" cy="337" r="6"/><circle cx="965" cy="362" r="6"/></g>
+    <g fill="none" stroke="#cfcac0" stroke-width="1.5">
+      <circle cx="835" cy="212" r="4"/><circle cx="835" cy="237" r="4"/><circle cx="835" cy="262" r="4"/><circle cx="835" cy="287" r="4"/><circle cx="835" cy="312" r="4"/><circle cx="835" cy="337" r="4"/><circle cx="835" cy="362" r="4"/>
+      <circle cx="900" cy="362" r="4"/>
+    </g>
+  </g>
+  <line x1="20" y1="380" x2="500" y2="380" stroke="#ddd8ce"/><line x1="520" y1="380" x2="995" y2="380" stroke="#ddd8ce"/>
+  <g font-size="14" text-anchor="middle" fill="#1d2433">
+    <text x="20" y="402" text-anchor="start" font-weight="700">kept</text>
+    <text x="360" y="402">5</text><text x="420" y="402">6</text><text x="480" y="402">4</text>
+    <text x="20" y="424" text-anchor="start" font-weight="700">mass kept</text>
+    <text x="360" y="424">89%</text><text x="420" y="424">92%</text><text x="480" y="424">85%</text>
+    <text x="835" y="402">5</text><text x="900" y="402">11</text><text x="965" y="402">12</text>
+    <text x="835" y="424" fill="#d64545" font-weight="700">51%</text><text x="900" y="424">94%</text><text x="965" y="424">99.8%</text>
+  </g>
+  <text x="500" y="458" text-anchor="middle" font-size="15" fill="#687084">min-p threshold = 0.1 × p_max: 0.047 on the left, 0.012 on the right. Top-k ignores the shape entirely.</text>
+</svg>
+<figcaption><span class="fig-label">Figure 14.6</span> — The same three filters on a peaked and a flat distribution (<var>T</var> = 1, illustrative logits; the tail is not drawn). Filled dot = survives, open circle = removed. Top-k keeps 5 either way and throws away half of the good options on the right. Top-p and min-p adapt to the shape.</figcaption>
+</figure>
+
+<p>A few more filters exist, mostly in local engines. <strong>Top-nσ</strong> keeps tokens whose <em>logit</em> is within <var>n</var> standard deviations of the maximum logit; because it works on logits, the kept set does not change with temperature. <strong>XTC</strong> ("exclude top choices", llama.cpp) does the opposite of truncation for creative writing: with some probability it removes the most likely tokens above a threshold, keeping only the least likely of them. <strong>Mirostat</strong> is a feedback controller that adjusts truncation each step to hold the surprise of the generated text near a target. Hugging Face also has epsilon and eta sampling (fixed and entropy-dependent probability floors).</p>
+
+<aside class="callout key"><div class="callout-title">Key takeaway</div><p>Truncation decides <em>which</em> tokens are allowed; temperature decides <em>how</em> to weight the allowed ones. Top-k uses a count, top-p uses total mass, min-p uses a ratio to the best token, typical uses closeness to the expected surprise. Min-p is the most robust when temperature is above 1.</p></aside>
+</section>
+
+<section>
+<h2>The sampler chain: order matters</h2>
+
+<p>Real samplers apply several of these stages in sequence. The stages do not commute. Two examples:</p>
+<ul>
+  <li><strong>Temperature before or after top-p.</strong> If temperature comes first, top-p sees the flattened distribution, and a hot temperature makes the nucleus enormous. If temperature comes last, top-p chooses the survivors from the <var>T</var> = 1 distribution and temperature only reshapes the survivors. Junk cannot get back in.</li>
+  <li><strong>Top-k then top-p.</strong> After top-k removes tokens, the survivors are renormalized, so each one's share grows and top-p's threshold is reached with fewer tokens than it would be on the full distribution.</li>
+</ul>
+
+<p>The three most common engines use different orders. These come from their current source code (llama.cpp <code>common/common.h</code>, Hugging Face <code>generation/utils.py</code>, vLLM <code>v1/sample/sampler.py</code>):</p>
+
+<figure class="wide">
+<svg viewBox="0 0 1000 352" role="img" aria-label="Default sampler chain orders: llama.cpp applies penalties, DRY, top-n-sigma, top-k, typical, top-p, min-p, XTC, then temperature last; vLLM applies bans, bias, penalties, temperature, min-p, then top-k and top-p; Hugging Face applies processors, temperature, top-k, top-p, min-p, typical.">
+  <g font-size="15" font-weight="700" fill="#1d2433">
+    <text x="30" y="36">llama.cpp (default --samplers order)</text>
+    <text x="30" y="148">vLLM (fixed order)</text>
+    <text x="30" y="260">Hugging Face transformers, generate()</text>
+  </g>
+  <g font-size="15" text-anchor="middle" fill="#1d2433">
+    <rect x="30" y="48" width="98" height="40" rx="7" fill="#ffffff" stroke="#5a6b8c"/><text x="79" y="73">penalties</text>
+    <rect x="150" y="48" width="47" height="40" rx="7" fill="#ffffff" stroke="#5a6b8c"/><text x="173" y="73">DRY</text>
+    <rect x="219" y="48" width="72" height="40" rx="7" fill="#eaf1fd" stroke="#2f6fde"/><text x="255" y="73">top-nσ</text>
+    <rect x="313" y="48" width="64" height="40" rx="7" fill="#eaf1fd" stroke="#2f6fde"/><text x="345" y="73">top-k</text>
+    <rect x="399" y="48" width="81" height="40" rx="7" fill="#eaf1fd" stroke="#2f6fde"/><text x="439" y="73">typical</text>
+    <rect x="502" y="48" width="64" height="40" rx="7" fill="#eaf1fd" stroke="#2f6fde"/><text x="534" y="73">top-p</text>
+    <rect x="588" y="48" width="64" height="40" rx="7" fill="#eaf1fd" stroke="#2f6fde"/><text x="620" y="73">min-p</text>
+    <rect x="674" y="48" width="47" height="40" rx="7" fill="#eaf1fd" stroke="#2f6fde"/><text x="697" y="73">XTC</text>
+    <rect x="743" y="48" width="114" height="40" rx="7" fill="#fcecec" stroke="#d64545" stroke-width="2"/><text x="800" y="73" font-weight="700">temperature</text>
+    <rect x="879" y="48" width="64" height="40" rx="7" fill="#fcf6e3" stroke="#e5b62b"/><text x="911" y="73">draw</text>
+    <rect x="30" y="160" width="148" height="40" rx="7" fill="#ffffff" stroke="#5a6b8c"/><text x="104" y="185">bans, allow-list</text>
+    <rect x="200" y="160" width="156" height="40" rx="7" fill="#ffffff" stroke="#5a6b8c"/><text x="278" y="185">bias, min_tokens</text>
+    <rect x="378" y="160" width="98" height="40" rx="7" fill="#ffffff" stroke="#5a6b8c"/><text x="427" y="185">penalties</text>
+    <rect x="498" y="160" width="114" height="40" rx="7" fill="#fcecec" stroke="#d64545" stroke-width="2"/><text x="555" y="185" font-weight="700">temperature</text>
+    <rect x="634" y="160" width="64" height="40" rx="7" fill="#eaf1fd" stroke="#2f6fde"/><text x="666" y="185">min-p</text>
+    <rect x="720" y="160" width="131" height="40" rx="7" fill="#eaf1fd" stroke="#2f6fde"/><text x="785" y="185">top-k, top-p</text>
+    <rect x="873" y="160" width="64" height="40" rx="7" fill="#fcf6e3" stroke="#e5b62b"/><text x="905" y="185">draw</text>
+    <rect x="30" y="272" width="198" height="40" rx="7" fill="#ffffff" stroke="#5a6b8c"/><text x="129" y="297">rep. penalty, bans, …</text>
+    <rect x="250" y="272" width="114" height="40" rx="7" fill="#fcecec" stroke="#d64545" stroke-width="2"/><text x="307" y="297" font-weight="700">temperature</text>
+    <rect x="386" y="272" width="64" height="40" rx="7" fill="#eaf1fd" stroke="#2f6fde"/><text x="418" y="297">top-k</text>
+    <rect x="472" y="272" width="64" height="40" rx="7" fill="#eaf1fd" stroke="#2f6fde"/><text x="504" y="297">top-p</text>
+    <rect x="558" y="272" width="64" height="40" rx="7" fill="#eaf1fd" stroke="#2f6fde"/><text x="590" y="297">min-p</text>
+    <rect x="644" y="272" width="81" height="40" rx="7" fill="#eaf1fd" stroke="#2f6fde"/><text x="684" y="297">typical</text>
+    <rect x="747" y="272" width="64" height="40" rx="7" fill="#fcf6e3" stroke="#e5b62b"/><text x="779" y="297">draw</text>
+  </g>
+  <g stroke="#1d2433" stroke-width="1.5" fill="none">
+    <path d="M128 68 H148" marker-end="url(#ch14-arr)"/><path d="M197 68 H217" marker-end="url(#ch14-arr)"/><path d="M291 68 H311" marker-end="url(#ch14-arr)"/><path d="M377 68 H397" marker-end="url(#ch14-arr)"/><path d="M480 68 H500" marker-end="url(#ch14-arr)"/><path d="M566 68 H586" marker-end="url(#ch14-arr)"/><path d="M652 68 H672" marker-end="url(#ch14-arr)"/><path d="M721 68 H741" marker-end="url(#ch14-arr)"/><path d="M857 68 H877" marker-end="url(#ch14-arr)"/>
+    <path d="M178 180 H198" marker-end="url(#ch14-arr)"/><path d="M356 180 H376" marker-end="url(#ch14-arr)"/><path d="M476 180 H496" marker-end="url(#ch14-arr)"/><path d="M612 180 H632" marker-end="url(#ch14-arr)"/><path d="M698 180 H718" marker-end="url(#ch14-arr)"/><path d="M851 180 H871" marker-end="url(#ch14-arr)"/>
+    <path d="M228 292 H248" marker-end="url(#ch14-arr)"/><path d="M364 292 H384" marker-end="url(#ch14-arr)"/><path d="M450 292 H470" marker-end="url(#ch14-arr)"/><path d="M536 292 H556" marker-end="url(#ch14-arr)"/><path d="M622 292 H642" marker-end="url(#ch14-arr)"/><path d="M725 292 H745" marker-end="url(#ch14-arr)"/>
+  </g>
+  <g font-size="15" fill="#687084">
+    <text x="30" y="112">Truncation sees the T = 1 distribution; temperature only reshapes the survivors.</text>
+    <text x="30" y="224">Greedy requests skip everything after penalties. Truncation sees the tempered distribution.</text>
+    <text x="30" y="336">Temperature is the first "warper", so all truncation sees the tempered distribution.</text>
+  </g>
+</svg>
+<figcaption><span class="fig-label">Figure 14.7</span> — Default sampler chains. Blue = truncation filters, red = temperature. llama.cpp lets you reorder with <code>--samplers</code>; in Hugging Face you can pass your own processor list; vLLM's order is fixed. (Typical-p is not a vLLM option.)</figcaption>
+</figure>
+
+<p><strong>A worked example of order changing the answer.</strong> Set <var>T</var> = 1.5, top-p = 0.95, nothing else. In llama.cpp order, top-p runs on the <var>T</var> = 1 distribution and keeps 8 tokens (cumulative 0.959); temperature 1.5 then spreads probability among those 8, so <span class="tok">&#9251;mat</span> drops to 0.353 and no junk can appear. In vLLM or Hugging Face order, temperature runs first, the tail grows to 49% of the mass, and to reach 0.95 the nucleus must include the 12 named tokens <em>plus about 115,000 junk tokens</em>. About 46% of all draws become junk. Same settings, different engine, very different text. Adding min-p = 0.05 repairs the second chain, because no single junk token comes close to 5% of <span class="tok">&#9251;mat</span>'s probability.</p>
+
+<div class="widget wide" id="ch14-pg">
+  <div class="widget-title">Try it: sampler playground</div>
+  <div class="ch14-presets" id="ch14-pg-presets"><span>Presets:</span>
+    <button type="button" data-preset="llama">llama.cpp defaults</button>
+    <button type="button" data-preset="qwen">Qwen3 thinking</button>
+    <button type="button" data-preset="hot">Hot: T 1.5, top-p .95</button>
+    <button type="button" data-preset="greedy">Greedy (T 0)</button>
+    <button type="button" data-preset="off">Everything off</button>
+  </div>
+  <div class="controls">
+    <label>Chain order <select id="ch14-pg-order"><option value="llama">llama.cpp default</option><option value="vllm">vLLM</option><option value="hf">HF transformers</option></select></label>
+    <label>T <input type="range" min="0" max="2" step="0.05" value="0.8" id="ch14-pg-t"> <span class="readout" id="ch14-pg-t-v"></span></label>
+    <label>top-k <input type="range" min="0" max="50" step="1" value="40" id="ch14-pg-k"> <span class="readout" id="ch14-pg-k-v"></span></label>
+    <label>top-p <input type="range" min="0.05" max="1" step="0.01" value="0.95" id="ch14-pg-p"> <span class="readout" id="ch14-pg-p-v"></span></label>
+    <label>min-p <input type="range" min="0" max="0.5" step="0.01" value="0.05" id="ch14-pg-mp"> <span class="readout" id="ch14-pg-mp-v"></span></label>
+    <label>typical-p <input type="range" min="0.05" max="1" step="0.01" value="1" id="ch14-pg-typ"> <span class="readout" id="ch14-pg-typ-v"></span></label>
+    <label>repetition <input type="range" min="1" max="2" step="0.05" value="1" id="ch14-pg-rep"> <span class="readout" id="ch14-pg-rep-v"></span></label>
+    <label>frequency <input type="range" min="0" max="2" step="0.1" value="0" id="ch14-pg-fp"> <span class="readout" id="ch14-pg-fp-v"></span></label>
+    <label>presence <input type="range" min="0" max="2" step="0.1" value="0" id="ch14-pg-pp"> <span class="readout" id="ch14-pg-pp-v"></span></label>
+  </div>
+  <div class="ch14-stats" id="ch14-pg-stats"></div>
+  <div class="ch14-pg-scroll"><table class="ch14-pg-grid" id="ch14-pg-grid"></table></div>
+  <div class="controls" style="margin-top:14px; margin-bottom:0">
+    <button type="button" class="primary" id="ch14-pg-one">Sample once</button>
+    <button type="button" id="ch14-pg-new">New seed</button>
+    <label>seed <input type="number" id="ch14-pg-seed" value="7" min="0" step="1"></label>
+  </div>
+  <div class="ch14-sentence" id="ch14-pg-out"></div>
+  <div class="ch14-note">Each column is the state after one stage, in the chosen engine's order: the probability each surviving token would have if sampling happened right there (blue), or ✗ if the stage removed it. The last row stands for the other 128,244 tokens (logit −12 each); it shows how many of them survive and their total probability. Penalties assume the output so far already contains <span class="tok">&#9251;mat</span> twice and <span class="tok">&#9251;floor</span> once. "1000×" counts come from 1,000 seeded draws from the final distribution. Illustrative logits; real engines differ in small details such as tie-breaking and <code>min_keep</code>.</div>
+</div>
+
+<p>Things to try: load "Hot", then switch the chain order between llama.cpp and vLLM and watch the last row. Raise min-p to 0.05 in vLLM order. Load "llama.cpp defaults" and drag top-k from 40 down to 3. Set typical-p to 0.3 and see <span class="tok">&#9251;mat</span> disappear. Push the frequency penalty above 0.8 and <span class="tok">&#9251;floor</span> overtakes <span class="tok">&#9251;mat</span> (it appeared fewer times); push the repetition penalty to 1.6 and <span class="tok">&#9251;bed</span>, which never appeared, ties <span class="tok">&#9251;mat</span>.</p>
+</section>
+
+<section>
+<h2>Penalties, DRY and logit bias</h2>
+
+<p><strong>The problem.</strong> Sampling escapes loops sometimes, not always. Models also overuse favorite words. We want to make reuse less attractive without banning it. Every engine offers a few penalty knobs. They all edit logits before temperature, and all of them need the history of generated tokens, kept as a per-sequence count array of size <var>V</var> on the GPU.</p>
+
+<h3>Repetition penalty (multiplicative)</h3>
+<p>Introduced with the CTRL model (Keskar et al., 2019). For every token that has already appeared, shrink its logit by a factor θ:</p>
+<div class="formula">
+  <var>z</var><sub><var>j</var></sub> ← <var>z</var><sub><var>j</var></sub> / θ &#160; if <var>z</var><sub><var>j</var></sub> &gt; 0, &#160;&#160;&#160; <var>z</var><sub><var>j</var></sub> ← <var>z</var><sub><var>j</var></sub> · θ &#160; if <var>z</var><sub><var>j</var></sub> ≤ 0 &#160;&#160;&#160; (only for tokens already seen)
+  <span class="where">θ ≥ 1 is the penalty; the CTRL paper suggests about 1.2. The sign split exists because dividing a negative logit by 1.2 would <em>raise</em> it. It is a yes/no test: seeing a token once or ten times gives the same penalty. Example: <span class="tok">&#9251;mat</span> 4.0 → 3.33, and its probability falls from 0.467 to 0.310.</span>
+</div>
+<p>What counts as "already seen" differs: Hugging Face and vLLM include the prompt, llama.cpp looks at the last 64 tokens by default (<code>penalty_last_n</code>). Including the prompt is a real problem for code and JSON, where you <em>must</em> reuse the prompt's variable names, quotes and brackets.</p>
+
+<h3>Frequency and presence penalties (additive)</h3>
+<p>OpenAI's API documents the exact formula:</p>
+<div class="formula">
+  <var>z</var><sub><var>j</var></sub> ← <var>z</var><sub><var>j</var></sub> − <var>c</var><sub><var>j</var></sub> · α<sub>frequency</sub> − [<var>c</var><sub><var>j</var></sub> &gt; 0] · α<sub>presence</sub>
+  <span class="where"><var>c</var><sub><var>j</var></sub> = how many times token <var>j</var> has been sampled so far. [<var>c</var><sub><var>j</var></sub> &gt; 0] is 1 if it appeared at all. Both coefficients range from −2 to 2 (negative values encourage repetition); OpenAI calls 0.1–1 reasonable. vLLM counts only generated tokens for these two.</span>
+</div>
+<p>Worked example: <span class="tok">&#9251;mat</span> has been generated twice, α<sub>frequency</sub> = 0.5, α<sub>presence</sub> = 0.6. New logit 4.0 − 2 × 0.5 − 0.6 = 2.4. <span class="tok">&#9251;floor</span> was seen once: 3.2 − 0.5 − 0.6 = 2.1. Now <span class="tok">&#9251;mat</span> has probability 0.19 instead of 0.467, <span class="tok">&#9251;floor</span> still trails it, and <span class="tok">&#9251;bed</span> (never seen, logit still 2.5, probability 0.21) is the new favorite. Because the change is additive in logit space, its effect is the same for every token regardless of the logit's scale. That makes it more predictable than the multiplicative penalty.</p>
+
+<h3>DRY: penalize repeated <em>sequences</em>, not tokens</h3>
+<p>The penalties above punish individual tokens, so they also punish "the", commas and every legitimately repeated name. DRY ("Don't Repeat Yourself", proposed by p-e-w for text-generation-webui and now in llama.cpp) targets the actual failure: verbatim loops. At each step it finds the longest suffix of the context that also occurred earlier. The token that followed that earlier occurrence is the token that would continue the loop, and only it gets penalized:</p>
+<div class="formula">
+  penalty = multiplier · base<sup><var>n</var> − allowed_length</sup> &#160;&#160; for <var>n</var> ≥ allowed_length
+  <span class="where"><var>n</var> = length of the repeated suffix. The standard settings are multiplier 0.8, base 1.75, allowed length 2 (llama.cpp ships with the multiplier at 0, i.e. disabled). Matching stops at "sequence breakers" (llama.cpp default: newline, <code>:</code>, <code>"</code>, <code>*</code>), so chat-format prefixes such as "User:" are not penalized. The penalty grows exponentially, so a long verbatim loop becomes impossible.</span>
+</div>
+
+<figure class="wide">
+<svg viewBox="0 0 1000 380" role="img" aria-label="Left: the logit of mat under different penalties, from 4.0 with no penalty down to 2.4 with frequency plus presence. Right: DRY finds the repeated suffix The cat sat on the, five tokens long, and penalizes only mat by 4.29.">
+  <text x="20" y="28" font-size="16" font-weight="700" fill="#1d2433">␣mat already generated twice: its logit (4.0) after each penalty</text>
+  <g font-size="15" fill="#1d2433">
+    <text x="20" y="74">none</text>
+    <text x="20" y="114">repetition θ = 1.2</text>
+    <text x="20" y="154">presence 0.6</text>
+    <text x="20" y="194">frequency 0.5 × 2</text>
+    <text x="20" y="234">frequency + presence</text>
+  </g>
+  <line x1="190" y1="50" x2="190" y2="250" stroke="#687084"/>
+  <g>
+    <rect x="190" y="58" width="220" height="22" rx="3" fill="#7b5cd6"/>
+    <rect x="190" y="98" width="183" height="22" rx="3" fill="#9a82e0"/>
+    <rect x="190" y="138" width="187" height="22" rx="3" fill="#9a82e0"/>
+    <rect x="190" y="178" width="165" height="22" rx="3" fill="#9a82e0"/>
+    <rect x="190" y="218" width="132" height="22" rx="3" fill="#9a82e0"/>
+  </g>
+  <g font-size="15" class="mono" fill="#1d2433">
+    <text x="418" y="74">4.00  p .467</text>
+    <text x="381" y="114">3.33  p .310</text>
+    <text x="385" y="154">3.40  p .324</text>
+    <text x="363" y="194">3.00  p .243</text>
+    <text x="330" y="234">2.40  p .150</text>
+  </g>
+  <text x="20" y="286" font-size="15" fill="#687084">Penalties hit every repeated token, including "the",</text>
+  <text x="20" y="308" font-size="15" fill="#687084">commas and the variable names your code needs.</text>
+  <line x1="565" y1="44" x2="565" y2="360" stroke="#ddd8ce"/>
+  <!-- DRY -->
+  <text x="590" y="28" font-size="16" font-weight="700" fill="#1d2433">DRY: punish extending a repeat</text>
+  <text x="590" y="62" font-size="15" fill="#687084">earlier in the context</text>
+  <g font-size="14" class="mono" text-anchor="middle" fill="#1d2433">
+    <rect x="590" y="72" width="40" height="28" rx="5" fill="#fcecec" stroke="#d64545"/><text x="610" y="91">The</text>
+    <rect x="634" y="72" width="44" height="28" rx="5" fill="#fcecec" stroke="#d64545"/><text x="656" y="91">␣cat</text>
+    <rect x="682" y="72" width="44" height="28" rx="5" fill="#fcecec" stroke="#d64545"/><text x="704" y="91">␣sat</text>
+    <rect x="730" y="72" width="36" height="28" rx="5" fill="#fcecec" stroke="#d64545"/><text x="748" y="91">␣on</text>
+    <rect x="770" y="72" width="44" height="28" rx="5" fill="#fcecec" stroke="#d64545"/><text x="792" y="91">␣the</text>
+    <rect x="818" y="72" width="44" height="28" rx="5" fill="#fcf6e3" stroke="#e5b62b" stroke-width="2"/><text x="840" y="91">␣mat</text>
+    <rect x="866" y="72" width="24" height="28" rx="5" fill="#f3f1ec" stroke="#ddd8ce"/><text x="878" y="91">.</text>
+  </g>
+  <text x="590" y="136" font-size="15" fill="#687084">end of the context now</text>
+  <g font-size="14" class="mono" text-anchor="middle" fill="#1d2433">
+    <rect x="590" y="146" width="40" height="28" rx="5" fill="#fcecec" stroke="#d64545"/><text x="610" y="165">The</text>
+    <rect x="634" y="146" width="44" height="28" rx="5" fill="#fcecec" stroke="#d64545"/><text x="656" y="165">␣cat</text>
+    <rect x="682" y="146" width="44" height="28" rx="5" fill="#fcecec" stroke="#d64545"/><text x="704" y="165">␣sat</text>
+    <rect x="730" y="146" width="36" height="28" rx="5" fill="#fcecec" stroke="#d64545"/><text x="748" y="165">␣on</text>
+    <rect x="770" y="146" width="44" height="28" rx="5" fill="#fcecec" stroke="#d64545"/><text x="792" y="165">␣the</text>
+    <rect x="818" y="146" width="44" height="28" rx="5" fill="#ffffff" stroke="#1d2433" stroke-dasharray="4 3"/><text x="840" y="165">?</text>
+  </g>
+  <path d="M840 100 C 880 118, 880 128, 846 144" stroke="#e5b62b" stroke-width="2" fill="none" marker-end="url(#ch14-arr)"/>
+  <text x="890" y="124" font-size="14" fill="#9a7410">loop would</text>
+  <text x="890" y="140" font-size="14" fill="#9a7410">continue</text>
+  <path d="M590 186 H814" stroke="#d64545" stroke-width="2"/>
+  <path d="M590 181 V191 M814 181 V191" stroke="#d64545" stroke-width="2"/>
+  <text x="702" y="208" text-anchor="middle" font-size="15" fill="#d64545">repeated suffix: n = 5 tokens</text>
+  <g font-size="15" fill="#1d2433">
+    <text x="590" y="246">penalty(␣mat) = 0.8 × 1.75<tspan dy="-6" font-size="12">5 − 2</tspan><tspan dy="6"> = 4.29</tspan></text>
+    <text x="590" y="274">logit 4.0 → −0.29, p .467 → .012</text>
+    <text x="590" y="310" fill="#2f9e6e">every other token: no penalty at all</text>
+    <text x="590" y="338" fill="#687084">matching resets at breakers: \n : " *</text>
+  </g>
+</svg>
+<figcaption><span class="fig-label">Figure 14.8</span> — Left: per-token penalties lower <span class="tok">&#9251;mat</span>'s logit by different amounts (probabilities computed against the other unchanged logits). Right: DRY penalizes only the one token that would extend a repeated sequence, by an amount that grows exponentially with the repeat length. Illustrative logits.</figcaption>
+</figure>
+
+<h3>Logit bias, bans and allow-lists</h3>
+<p>The bluntest tool: add a fixed number to chosen token IDs, <var>z</var><sub><var>j</var></sub> ← <var>z</var><sub><var>j</var></sub> + <var>b</var><sub><var>j</var></sub>. OpenAI accepts biases from −100 to 100; −100 effectively bans a token and +100 effectively forces it. vLLM also has <code>bad_words</code> and <code>allowed_token_ids</code>, and Hugging Face has <code>no_repeat_ngram_size</code>, which hard-bans any repeated <var>n</var>-gram. The catch is that biases act on token IDs, not words. To ban "cat" you must ban <span class="tok">cat</span>, <span class="tok">&#9251;cat</span>, <span class="tok">&#9251;Cat</span>, <span class="tok">CAT</span> and every multi-token spelling (<a href="03-tokens.html">Chapter 3</a>). For anything bigger than a handful of tokens, use constrained decoding instead (later in this chapter).</p>
+</section>
+
+<section>
+<h2>Beam search, and why chat does not use it</h2>
+
+<p><strong>The problem greedy cannot solve.</strong> Greedy commits to the best token now, even if a slightly worse token now leads to a much better sentence. <dfn>Beam search</dfn> keeps several partial sequences ("beams") alive and picks the best complete one at the end. Think of it as a breadth-limited search: at every step expand each of the <var>B</var> beams by its top tokens, score every candidate by its total log-probability, and keep the best <var>B</var>.</p>
+
+<div class="formula">
+  score(<var>y</var><sub>1..<var>t</var></sub>) = Σ<sub><var>s</var>=1..<var>t</var></sub> log <var>p</var>(<var>y</var><sub><var>s</var></sub> | context, <var>y</var><sub>&lt;<var>s</var></sub>) &#160;&#160; (optionally divided by <var>t</var><sup>α</sup>)
+  <span class="where">The total log-probability of the sequence. Summing logs equals multiplying probabilities. Longer sequences always have lower totals, so engines divide by length to the power α (the "length penalty") to avoid favoring short outputs.</span>
+</div>
+
+<figure class="stepper wide" data-steps="5" data-interval="2800">
+<svg viewBox="0 0 1000 400" role="img" aria-label="Stepper: beam search with two beams finds the sequence floor period with total log probability minus 1.85, which beats the greedy sequence mat period at minus 2.03.">
+  <rect x="20" y="180" width="170" height="40" rx="8" fill="#fcf6e3" stroke="#e5b62b"/>
+  <text x="105" y="205" text-anchor="middle" font-size="15" class="mono" fill="#1d2433">The cat sat on the</text>
+  <g data-step="2">
+    <g stroke="#687084" stroke-width="1.5" fill="none">
+      <path d="M190 200 L260 83"/><path d="M190 200 L260 173"/><path d="M190 200 L260 263"/><path d="M190 200 L260 333"/>
+    </g>
+    <g font-size="15" class="mono">
+      <rect x="260" y="66" width="160" height="34" rx="7" fill="#eaf1fd" stroke="#2f6fde" stroke-width="1.6"/><text x="272" y="88" fill="#1d2433">␣mat</text><text x="408" y="88" text-anchor="end" fill="#24539f">−0.76</text>
+      <rect x="260" y="156" width="160" height="34" rx="7" fill="#eaf1fd" stroke="#2f6fde" stroke-width="1.6"/><text x="272" y="178" fill="#1d2433">␣floor</text><text x="408" y="178" text-anchor="end" fill="#24539f">−1.56</text>
+      <rect x="260" y="246" width="160" height="34" rx="7" fill="#f3f1ec" stroke="#ddd8ce"/><text x="272" y="268" fill="#a09a8e">␣bed</text><text x="408" y="268" text-anchor="end" fill="#a09a8e">−2.26</text>
+      <rect x="260" y="316" width="160" height="34" rx="7" fill="#f3f1ec" stroke="#ddd8ce"/><text x="272" y="338" fill="#a09a8e">␣couch</text><text x="408" y="338" text-anchor="end" fill="#a09a8e">−2.66</text>
+    </g>
+    <text x="340" y="380" text-anchor="middle" font-size="14" fill="#687084">keep best B = 2</text>
+  </g>
+  <g data-step="3">
+    <g stroke="#687084" stroke-width="1.5" fill="none">
+      <path d="M420 83 L490 37"/><path d="M420 83 L490 79"/><path d="M420 83 L490 121"/>
+      <path d="M420 173 L490 171"/><path d="M420 173 L490 213"/><path d="M420 173 L490 255"/>
+    </g>
+    <g font-size="15" class="mono" fill="#1d2433">
+      <rect x="490" y="22" width="215" height="30" rx="6" fill="#ffffff" stroke="#5a6b8c"/><text x="502" y="42">mat + "."</text><text x="695" y="42" text-anchor="end">−2.03</text>
+      <rect x="490" y="64" width="215" height="30" rx="6" fill="#ffffff" stroke="#5a6b8c"/><text x="502" y="84">mat + "␣and"</text><text x="695" y="84" text-anchor="end">−2.27</text>
+      <rect x="490" y="106" width="215" height="30" rx="6" fill="#ffffff" stroke="#5a6b8c"/><text x="502" y="126">mat + ","</text><text x="695" y="126" text-anchor="end">−2.48</text>
+      <rect x="490" y="156" width="215" height="30" rx="6" fill="#ffffff" stroke="#5a6b8c"/><text x="502" y="176">floor + "."</text><text x="695" y="176" text-anchor="end">−1.85</text>
+      <rect x="490" y="198" width="215" height="30" rx="6" fill="#ffffff" stroke="#5a6b8c"/><text x="502" y="218">floor + ","</text><text x="695" y="218" text-anchor="end">−3.86</text>
+      <rect x="490" y="240" width="215" height="30" rx="6" fill="#ffffff" stroke="#5a6b8c"/><text x="502" y="260">floor + "␣and"</text><text x="695" y="260" text-anchor="end">−4.37</text>
+    </g>
+  </g>
+  <g data-step="4">
+    <rect x="490" y="22" width="215" height="30" rx="6" fill="none" stroke="#2f6fde" stroke-width="2.4"/>
+    <rect x="490" y="156" width="215" height="30" rx="6" fill="none" stroke="#2f6fde" stroke-width="2.4"/>
+    <g fill="#f3f1ec" opacity=".75"><rect x="490" y="64" width="215" height="30" rx="6"/><rect x="490" y="106" width="215" height="30" rx="6"/><rect x="490" y="198" width="215" height="30" rx="6"/><rect x="490" y="240" width="215" height="30" rx="6"/></g>
+    <text x="597" y="300" text-anchor="middle" font-size="14" fill="#687084">best 2 of 6 survive</text>
+  </g>
+  <g data-step="5">
+    <rect x="720" y="40" width="262" height="300" rx="10" fill="#ffffff" stroke="#ddd8ce"/>
+    <text x="736" y="68" font-size="15" font-weight="700" fill="#1d2433">Result</text>
+    <text x="736" y="98" font-size="15" fill="#2f6fde" font-weight="700">beam: "…the floor."</text>
+    <text x="736" y="120" font-size="15" fill="#1d2433">−1.56 − 0.29 = −1.85</text>
+    <text x="736" y="142" font-size="15" fill="#687084">p = e^−1.85 = 0.157</text>
+    <text x="736" y="180" font-size="15" fill="#d64545" font-weight="700">greedy: "…the mat."</text>
+    <text x="736" y="202" font-size="15" fill="#1d2433">−0.76 − 1.27 = −2.03</text>
+    <text x="736" y="224" font-size="15" fill="#687084">p = 0.131</text>
+    <text x="736" y="264" font-size="14" fill="#687084">Greedy took the best first token</text>
+    <text x="736" y="284" font-size="14" fill="#687084">and missed the better sentence.</text>
+    <text x="736" y="316" font-size="14" fill="#687084">Cost: B sequences, B× decode work.</text>
+  </g>
+</svg>
+<div class="step-captions">
+  <p data-step-only="1"><b>Step 1.</b> Start from the prompt. Beam width <var>B</var> = 2: we will track the two best partial sequences.</p>
+  <p data-step-only="2"><b>Step 2.</b> Score every first token by log-probability (ln 0.467 = −0.76, ln 0.210 = −1.56, …). Keep the best two, prune the rest.</p>
+  <p data-step-only="3"><b>Step 3.</b> Expand each beam with its own next-token distribution. After <span class="tok">&#9251;mat</span> the model is unsure (".", " and", ","); after <span class="tok">&#9251;floor</span> it is confident about "." (0.75, ln = −0.29). Scores are running sums.</p>
+  <p data-step-only="4"><b>Step 4.</b> Rank all 6 candidates together and keep the best 2. "floor ." (−1.85) now beats "mat ." (−2.03).</p>
+  <p data-step-only="5"><b>Step 5.</b> Beam search returns the sequence greedy could not reach. Conditional probabilities after the first token are illustrative.</p>
+</div>
+<figcaption><span class="fig-label">Figure 14.9</span> — Beam search with <var>B</var> = 2 over two steps. It maximizes the probability of the whole sequence, not of each token.</figcaption>
+</figure>
+
+<p><strong>Why chat does not use it.</strong> Beam search is excellent when there is one right answer and the model's most probable sequence is that answer: machine translation and speech recognition used it for years. For open-ended text it is the wrong objective. Holtzman et al. showed that maximizing sequence probability produces bland, generic and repetitive text, the same degeneration greedy has, only more so. It also costs <var>B</var>× the decode work and KV cache (prefixes can be shared copy-on-write, <a href="12-kv-cache.html">Chapter 12</a>), and it cannot stream, because the best beam can change until the very end. Modern ways to spend extra compute on quality, like best-of-<var>N</var> with a verifier or self-consistency voting, are built on sampling instead (<a href="10-reasoning.html">Chapter 10</a>).</p>
+</section>
+
+<section>
+<h2>Stopping: EOS, stop sequences, max_tokens</h2>
+
+<p>The loop has to end. There are four ways, and the API reports which one happened in <code>finish_reason</code> (OpenAI Chat Completions), the response <code>status</code> (OpenAI Responses) or <code>stop_reason</code> (Anthropic).</p>
+
+<ol>
+  <li><strong>A stop token.</strong> The model samples a special end token such as Llama&#160;3's <code>&lt;|eot_id|&gt;</code> (special tokens are covered in <a href="03-tokens.html">Chapter 3</a>). The engine checks every sampled ID against a small set of stop IDs. This is a token-level check and costs nothing.</li>
+  <li><strong>A stop sequence.</strong> The user supplies strings, for example <code>"&lt;/answer&gt;"</code>. This check is on <em>text</em>, not on token IDs, because the same string can be tokenized many ways, and a match can begin in the middle of a token. OpenAI accepts up to 4 stop sequences (and not on its latest reasoning models); the returned text excludes the stop sequence (vLLM has <code>include_stop_str_in_output</code> to keep it).</li>
+  <li><strong>A length limit.</strong> <code>max_tokens</code> (OpenAI now <code>max_completion_tokens</code> in Chat and <code>max_output_tokens</code> in Responses; both also count hidden reasoning tokens) or the context window runs out. The output is cut mid-thought, often mid-sentence or mid-JSON.</li>
+  <li><strong>Other.</strong> A tool call (<code>tool_calls</code> / <code>tool_use</code>, <a href="09-post-training.html">Chapter 9</a>), a content filter, or a refusal.</li>
+</ol>
+
+<p>Streaming makes stop sequences tricky. If the model has produced <code>"&lt;/"</code>, the server cannot send it yet: it might be the start of <code>"&lt;/answer&gt;"</code>, which must not reach the client. So the server keeps a <dfn>holdback buffer</dfn> of text that is a prefix of some stop string, and releases it only when the match fails.</p>
+
+<figure class="stepper wide" data-steps="5" data-interval="2800">
+<svg viewBox="0 0 1000 300" role="img" aria-label="Stepper: matching the stop sequence close-answer tag across three tokens with a holdback buffer during streaming.">
+  <g font-size="15" font-weight="700" fill="#687084">
+    <text x="20" y="40">tokens</text><text x="20" y="130">holdback</text><text x="20" y="220">client sees</text>
+  </g>
+  <text x="980" y="40" text-anchor="end" font-size="15" fill="#d64545">stop = "&lt;/answer&gt;"</text>
+  <g font-size="15" class="mono" text-anchor="middle" fill="#1d2433">
+    <rect x="130" y="20" width="50" height="32" rx="6" fill="#fcf6e3" stroke="#e5b62b"/><text x="155" y="42">The</text>
+    <rect x="186" y="20" width="82" height="32" rx="6" fill="#fcf6e3" stroke="#e5b62b"/><text x="227" y="42">␣answer</text>
+    <rect x="274" y="20" width="44" height="32" rx="6" fill="#fcf6e3" stroke="#e5b62b"/><text x="296" y="42">␣is</text>
+    <rect x="324" y="20" width="44" height="32" rx="6" fill="#fcf6e3" stroke="#e5b62b"/><text x="346" y="42">␣42</text>
+    <g data-step="2"><rect x="374" y="20" width="40" height="32" rx="6" fill="#fcecec" stroke="#d64545"/><text x="394" y="42">&lt;/</text></g>
+    <g data-step="3"><rect x="420" y="20" width="76" height="32" rx="6" fill="#fcecec" stroke="#d64545"/><text x="458" y="42">answer</text></g>
+    <g data-step-range="4-4"><rect x="502" y="20" width="32" height="32" rx="6" fill="#fcecec" stroke="#d64545"/><text x="518" y="42">&gt;</text></g>
+    <g data-step="5"><rect x="502" y="20" width="32" height="32" rx="6" fill="#eaf1fd" stroke="#2f6fde"/><text x="518" y="42">a</text></g>
+  </g>
+  <rect x="130" y="104" width="420" height="40" rx="8" fill="#f3f1ec" stroke="#ddd8ce"/>
+  <g font-size="15" class="mono" fill="#1d2433">
+    <text data-step-only="1" x="144" y="130" fill="#a09a8e">(empty)</text>
+    <text data-step-only="2" x="144" y="130">"&lt;/"</text>
+    <text data-step-only="3" x="144" y="130">"&lt;/answer"</text>
+    <text data-step-only="4" x="144" y="130">"&lt;/answer&gt;"  full match</text>
+    <text data-step-only="5" x="144" y="130" fill="#a09a8e">(empty)</text>
+  </g>
+  <g font-size="15" fill="#687084">
+    <text data-step-only="2" x="570" y="130">prefix of the stop string: hold it</text>
+    <text data-step-only="3" x="570" y="130">still a prefix: keep holding</text>
+    <text data-step-only="4" x="570" y="130" fill="#d64545">match: discard it and stop</text>
+    <text data-step-only="5" x="570" y="130" fill="#2f6fde">"&lt;/answera" is not a prefix: flush</text>
+  </g>
+  <rect x="130" y="194" width="420" height="40" rx="8" fill="#ffffff" stroke="#ddd8ce"/>
+  <g font-size="15" class="mono" fill="#1d2433">
+    <text data-step-range="1-4" x="144" y="220">The answer is 42</text>
+    <text data-step="5" x="144" y="220">The answer is 42&lt;/answera</text>
+  </g>
+  <g data-step-only="4">
+    <rect x="600" y="190" width="380" height="48" rx="8" fill="#fcecec" stroke="#d64545"/>
+    <text x="790" y="220" text-anchor="middle" font-size="15" class="mono" fill="#ad2f2f">finish_reason: "stop"</text>
+  </g>
+  <text data-step-only="5" x="600" y="220" font-size="15" fill="#687084">(alternative ending: generation continues)</text>
+  <text x="500" y="282" text-anchor="middle" font-size="14" fill="#687084">The buffer only ever holds text that could still become a stop string, so the delay is a few tokens at most.</text>
+</svg>
+<div class="step-captions">
+  <p data-step-only="1"><b>Step 1.</b> Normal tokens stream straight to the client. Nothing matches the start of the stop string.</p>
+  <p data-step-only="2"><b>Step 2.</b> The token <code>&lt;/</code> is the beginning of <code>&lt;/answer&gt;</code>. It goes into the holdback buffer instead of the stream.</p>
+  <p data-step-only="3"><b>Step 3.</b> <code>answer</code> extends the partial match. Still held. The client sees nothing new for two tokens.</p>
+  <p data-step-only="4"><b>Step 4.</b> <code>&gt;</code> completes the match. The held text is discarded, generation stops, and the response reports <code>finish_reason: "stop"</code>. The stop sequence spanned three tokens.</p>
+  <p data-step-only="5"><b>Step 5.</b> Alternative: if the third token had been <code>a</code>, the text stops being a prefix. The buffer is flushed to the client and generation continues.</p>
+</div>
+<figcaption><span class="fig-label">Figure 14.10</span> — Stop sequences are matched on detokenized text with a holdback buffer, so they work across token boundaries during streaming. Tokenization illustrative. (Holding back partial UTF-8 bytes is a separate, similar buffer; see <a href="03-tokens.html">Chapter 3</a>.)</figcaption>
+</figure>
+
+<div class="table-wrap">
+<table class="data">
+  <tr><th>Why it stopped</th><th>OpenAI Chat <code>finish_reason</code></th><th>OpenAI Responses</th><th>Anthropic <code>stop_reason</code></th></tr>
+  <tr><td>Model emitted its end token</td><td><code>stop</code></td><td>status <code>completed</code></td><td><code>end_turn</code></td></tr>
+  <tr><td>A user stop sequence matched</td><td><code>stop</code></td><td>—</td><td><code>stop_sequence</code></td></tr>
+  <tr><td>Token limit reached</td><td><code>length</code></td><td>status <code>incomplete</code>, reason <code>max_output_tokens</code></td><td><code>max_tokens</code></td></tr>
+  <tr><td>Model called a tool</td><td><code>tool_calls</code></td><td><code>completed</code>, with function-call output items</td><td><code>tool_use</code></td></tr>
+  <tr><td>Filtered or refused</td><td><code>content_filter</code></td><td><code>incomplete</code>, reason <code>content_filter</code></td><td><code>refusal</code></td></tr>
+  <tr><td>Context window full</td><td>—</td><td>—</td><td><code>model_context_window_exceeded</code></td></tr>
+</table>
+</div>
+
+<p>Two related engine knobs: <code>min_tokens</code> (vLLM) forbids stop tokens until <var>N</var> tokens exist by setting their logits to −∞, and <code>ignore_eos</code> keeps generating past EOS, which is useful for benchmarks that need a fixed output length. Always check the stop reason: a <code>length</code> stop on a JSON response means the JSON is incomplete.</p>
+</section>
+
+<section>
+<h2>Seeds and random number generators</h2>
+
+<p>Computers do not produce true randomness on demand. A <dfn>pseudo-random number generator</dfn> (PRNG) is a deterministic function that turns a <dfn>seed</dfn> into a long stream of numbers that look random. Same seed and same sequence of calls give the same stream, bit for bit. The widgets in this chapter use mulberry32, a 32-bit generator small enough to show in full:</p>
+
+<pre><code><span class="k">function</span> <span class="f">mulberry32</span>(seed) {            <span class="c">// state = one 32-bit integer</span>
+  <span class="k">return function</span> () {
+    seed = (seed + <span class="n">0x6D2B79F5</span>) | <span class="n">0</span>;
+    <span class="k">let</span> t = Math.<span class="f">imul</span>(seed ^ (seed &gt;&gt;&gt; <span class="n">15</span>), <span class="n">1</span> | seed);
+    t = (t + Math.<span class="f">imul</span>(t ^ (t &gt;&gt;&gt; <span class="n">7</span>), <span class="n">61</span> | t)) ^ t;
+    <span class="k">return</span> ((t ^ (t &gt;&gt;&gt; <span class="n">14</span>)) &gt;&gt;&gt; <span class="n">0</span>) / <span class="n">4294967296</span>;   <span class="c">// u in [0, 1)</span>
+  };
+}
+<span class="k">const</span> rand = <span class="f">mulberry32</span>(<span class="n">42</span>);   <span class="c">// seed 42: the same 1,000 draws in every browser</span></code></pre>
+
+<p>Seed 42 gives the same 1,000-draw histogram in your browser, in mine, and in the screenshot tool used to check this page. That works because everything else is fixed too: the logits are constants, the arithmetic is a short sequence of IEEE doubles done in one fixed order, and nothing else shares the computation. Keep those three conditions in mind; a GPU server breaks all of them.</p>
+
+<p><strong>On GPUs</strong>, PyTorch's CUDA generator uses <dfn>Philox</dfn>, a <em>counter-based</em> generator: the random number at position <var>i</var> is a hash-like function of (seed, offset + <var>i</var>). There is no sequential state to pass between threads, so 128,256 threads can each compute their own number independently, like indexing into an infinite random array. This is why the exponential race in Figure 14.3 is cheap.</p>
+
+<p><strong>Seeds in serving.</strong> Without a per-request seed, vLLM fills the noise for the whole batch from one shared generator, so which random numbers your request gets depends on who else is in the batch. With <code>seed</code> set, vLLM gives the request its own generator (its source notes this per-request path is slower). OpenAI's <code>seed</code> parameter is now marked deprecated and was always "best effort", with <code>system_fingerprint</code> to detect backend changes. A seed fixes the random bits. It does not fix the logits, and the logits are where the next problem lives.</p>
+</section>
+
+<section>
+<h2>Why temperature 0 is still not deterministic</h2>
+
+<p>Greedy decoding uses no randomness, so the same prompt should always give the same output. On real servers it does not. Thinking Machines Lab measured this in 2025: 1,000 completions of "Tell me about Richard Feynman" at temperature 0 from Qwen3-235B-A22B-Instruct-2507 on vLLM, 1,000 tokens each, produced <strong>80 different outputs</strong>. All 1,000 agreed for the first 102 tokens. At token 103, 992 continued "Queens, New York" and 8 wrote "New York City". From there the texts went their own ways.</p>
+
+<p><strong>The root cause is floating-point addition order.</strong> Floating-point addition is not associative: (0.1 + 10<sup>20</sup>) − 10<sup>20</sup> = 0, but 0.1 + (10<sup>20</sup> − 10<sup>20</sup>) = 0.1, because the first sum rounds 0.1 away. Every logit is the end of millions of additions: dot products over <var>d</var> = 4,096 in every layer, attention sums, normalization sums. Change the order of any of them and the last bits of the result change.</p>
+
+<p><strong>But the order is fixed for a given kernel</strong>, so why would it change? The popular answer is "GPU threads finish in random order and atomics add in random order". Thinking Machines showed that this is mostly not the issue: the kernels in an LLM forward pass generally do not use atomics and give identical bits when run twice on identical inputs. The real issue is that kernels are not <dfn>batch-invariant</dfn>. To keep all 132 SMs of an H100 busy, a matmul library picks its strategy from the problem shape. With few rows it may split the long reduction dimension across several cores and combine the partial sums at the end (<dfn>split-K</dfn>); with many rows it does not need to. Attention kernels similarly choose how many pieces to split the KV cache into. The batch size changes the shape, the shape changes the strategy, the strategy changes the addition order for <em>your</em> row. And with continuous batching (<a href="15-serving.html">Chapter 15</a>) the batch size at each decode step depends on how many other users happen to be active.</p>
+
+<figure class="stepper wide" data-steps="5" data-interval="3000">
+<svg viewBox="0 0 1000 440" role="img" aria-label="Stepper: the same four FP32 partial sums added in two orders, sequentially at batch 1 and with split-K at batch 64, give 14.5399990 and 14.5400009; against a competing logit of 14.5400000 the argmax flips and the generated text diverges.">
+  <text x="30" y="30" font-size="16" font-weight="700" fill="#1d2433">logit(␣mat) = one long dot product, here as 4 partial sums of 1,024 products each (FP32)</text>
+  <g font-size="16" class="mono" text-anchor="middle" fill="#1d2433">
+    <rect x="30" y="46" width="100" height="36" rx="7" fill="#efebfb" stroke="#7b5cd6"/><text x="80" y="70">−1.88</text>
+    <rect x="140" y="46" width="100" height="36" rx="7" fill="#efebfb" stroke="#7b5cd6"/><text x="190" y="70">6.39</text>
+    <rect x="250" y="46" width="100" height="36" rx="7" fill="#efebfb" stroke="#7b5cd6"/><text x="300" y="70">4.13</text>
+    <rect x="360" y="46" width="100" height="36" rx="7" fill="#efebfb" stroke="#7b5cd6"/><text x="410" y="70">5.90</text>
+  </g>
+  <text x="490" y="70" font-size="15" fill="#687084">exact sum = 14.54; FP32 cannot store most of these exactly</text>
+  <!-- panel A -->
+  <g data-step="2">
+    <rect x="30" y="104" width="450" height="176" rx="10" fill="#ffffff" stroke="#2f9e6e" stroke-width="1.6"/>
+    <text x="46" y="130" font-size="15" font-weight="700" fill="#1f7a53">Quiet server: batch 1, one core walks K in order</text>
+    <g font-size="15" class="mono" fill="#1d2433">
+      <text x="46" y="164">−1.88 + 6.39       = 4.5099998</text>
+      <text x="46" y="192">4.5099998 + 4.13   = 8.6399994</text>
+      <text x="46" y="220">8.6399994 + 5.90   = 14.5399990</text>
+    </g>
+    <text x="46" y="258" font-size="15" fill="#1d2433">logit(␣mat) = <tspan class="mono" font-weight="700">14.5399990</tspan></text>
+  </g>
+  <!-- panel B -->
+  <g data-step="3">
+    <rect x="520" y="104" width="450" height="176" rx="10" fill="#ffffff" stroke="#d64545" stroke-width="1.6"/>
+    <text x="536" y="130" font-size="15" font-weight="700" fill="#ad2f2f">Busy server: batch 64, split-K = 2 kernel</text>
+    <g font-size="15" class="mono" fill="#1d2433">
+      <text x="536" y="164">core 1: −1.88 + 6.39 = 4.5099998</text>
+      <text x="536" y="192">core 2:  4.13 + 5.90 = 10.0300007</text>
+      <text x="536" y="220">combine: 4.5099998 + 10.0300007</text>
+    </g>
+    <text x="536" y="258" font-size="15" fill="#1d2433">logit(␣mat) = <tspan class="mono" font-weight="700">14.5400009</tspan></text>
+  </g>
+  <!-- number line -->
+  <g data-step="4">
+    <line x1="140" y1="340" x2="860" y2="340" stroke="#1d2433" stroke-width="1.6"/>
+    <g stroke="#1d2433" stroke-width="2"><line x1="260" y1="330" x2="260" y2="350"/><line x1="500" y1="330" x2="500" y2="350"/><line x1="740" y1="330" x2="740" y2="350"/></g>
+    <g font-size="15" text-anchor="middle">
+      <text x="260" y="318" fill="#1f7a53" font-weight="700">␣mat, batch 1</text><text x="260" y="370" class="mono" fill="#1d2433">14.5399990</text>
+      <text x="500" y="318" fill="#1d2433" font-weight="700">␣floor</text><text x="500" y="370" class="mono" fill="#1d2433">14.5400000</text>
+      <text x="740" y="318" fill="#ad2f2f" font-weight="700">␣mat, batch 64</text><text x="740" y="370" class="mono" fill="#1d2433">14.5400009</text>
+    </g>
+    <text x="380" y="392" text-anchor="middle" font-size="14" fill="#687084">1 ulp ≈ 9.5 × 10⁻⁷</text>
+    <text x="620" y="392" text-anchor="middle" font-size="14" fill="#687084">1 ulp</text>
+  </g>
+  <g data-step-only="4">
+    <text x="500" y="424" text-anchor="middle" font-size="15" fill="#1d2433">Three neighboring FP32 values. Batch 1 → <tspan font-weight="700" fill="#1f7a53">␣floor</tspan> wins. Batch 64 → <tspan font-weight="700" fill="#ad2f2f">␣mat</tspan> wins.</text>
+  </g>
+  <g data-step="5">
+    <rect x="30" y="402" width="460" height="32" rx="7" fill="#e9f6f0" stroke="#2f9e6e"/>
+    <text x="44" y="424" font-size="15" class="mono" fill="#1d2433">batch 1:  …sat on the floor, and then…</text>
+    <rect x="510" y="402" width="460" height="32" rx="7" fill="#fcecec" stroke="#d64545"/>
+    <text x="524" y="424" font-size="15" class="mono" fill="#1d2433">batch 64: …sat on the mat. It purred…</text>
+  </g>
+</svg>
+<div class="step-captions">
+  <p data-step-only="1"><b>Step 1.</b> A logit is a sum of thousands of products. Kernels add them in chunks. These four partial sums are real FP32 values; their exact decimal total is 14.54.</p>
+  <p data-step-only="2"><b>Step 2.</b> With one sequence in the batch, the kernel uses one core per output tile and accumulates the chunks in order. Every intermediate result is rounded to FP32.</p>
+  <p data-step-only="3"><b>Step 3.</b> With a different batch size the library picks a split-K strategy: two cores each add half, then the halves are combined. Same numbers, different grouping, different rounding: the result is 2 ulps higher.</p>
+  <p data-step-only="4"><b>Step 4.</b> In this context ␣floor's logit is 14.5400000 under both kernels. It sits exactly between the two ␣mat results, so the argmax, and therefore greedy decoding, depends on the batch size.</p>
+  <p data-step-only="5"><b>Step 5.</b> One flipped token changes the context for every later token. The two outputs never meet again. The arithmetic is real (checked with IEEE FP32); the near-tie and the texts are illustrative.</p>
+</div>
+<figcaption><span class="fig-label">Figure 14.11</span> — Floating-point non-associativity plus a batch-size-dependent kernel turns server load into different greedy output. Differences of one or two units in the last place only matter at near-ties, but over a long generation a near-tie eventually happens.</figcaption>
+</figure>
+
+<p><strong>Other sources</strong> add to the same effect:</p>
+<ul>
+  <li><strong>MoE routing.</strong> The router picks the top-<var>k</var> experts per token (<a href="07-mixture-of-experts.html">Chapter 7</a>). A last-bit change can flip which expert wins a near-tie, which changes the whole layer's output for that token. Engines with expert capacity limits can also drop or reroute tokens depending on what else is in the batch.</li>
+  <li><strong>How the prompt is chunked.</strong> Chunked prefill and prefix caching change how much of the attention sum is computed in one piece versus read from the cache, so the same token's attention can be reduced in a different order.</li>
+  <li><strong>Different hardware or software.</strong> A different GPU model, driver, kernel library version, tensor-parallel degree (which changes all-reduce order), quantization, or engine version changes the numerics. Behind one API model name there may be many such deployments.</li>
+  <li><strong>Sampling itself.</strong> With <var>T</var> &gt; 0, a draw <var>u</var> near a segment boundary flips when the boundaries move by a few ulps, even with a fixed seed.</li>
+</ul>
+
+<p><strong>How to get determinism.</strong> Make every kernel batch-invariant: use one reduction strategy for all batch sizes (one tile configuration, no split-K), split attention's KV into chunks of a <em>fixed size</em> rather than a fixed <em>number</em> of chunks, and lay out the KV cache the same way whether a token comes from prefill or decode. Thinking Machines did this on vLLM: all 1,000 Feynman completions became identical. The cost on Qwen3-8B, 1,000 requests: 26 s with default vLLM, 55 s with unoptimized deterministic kernels, 42 s after improving the attention kernel. vLLM now ships this as <code>VLLM_BATCH_INVARIANT=1</code> (Hopper-class GPUs or newer), and its docs add that reproducibility holds only on the same hardware and the same vLLM version. On a local single-user engine, a fixed seed with nothing else in the batch usually reproduces exactly.</p>
+
+<aside class="callout warn"><div class="callout-title">Common misconception</div><p>"Temperature 0 means deterministic." It means <em>no randomness in the sampler</em>. The logits themselves depend on batch composition, hardware and software versions. Deterministic output needs batch-invariant kernels and a pinned deployment. Why it matters beyond debugging: evaluations become repeatable, and in reinforcement learning (<a href="10-reasoning.html">Chapter 10</a>) the inference engine that generates the training samples and the trainer that scores them can compute bit-identical probabilities, so the model is trained on exactly the distribution it sampled from.</p></aside>
+</section>
+
+<section>
+<h2>Structured output: constrained decoding</h2>
+
+<p><strong>The problem.</strong> Programs need output they can parse: JSON matching a schema, a function call, a date in one format, one label from a fixed list. Asking nicely works most of the time. OpenAI reported that training alone got its August 2024 model to 93% on a hard schema-following benchmark; 7% failures is a lot of crashed parsers. Older models scored under 40%.</p>
+
+<p><strong>The idea.</strong> Do not ask; make invalid output impossible. Compile the format into an automaton. At every decoding step, ask the automaton which vocabulary tokens could extend the current output and still lead to a valid document. Set every other token's logit to −∞ before softmax. Their probability becomes exactly 0, the rest are renormalized, and sampling proceeds as usual. Then advance the automaton by the characters of the token that was actually chosen. This is <dfn>constrained decoding</dfn>. With it, OpenAI's Structured Outputs reached 100% schema compliance on that benchmark.</p>
+
+<ul>
+  <li><strong>JSON mode</strong> guarantees syntactically valid JSON, any shape.</li>
+  <li><strong>JSON Schema / Structured Outputs</strong> guarantees the shape: required keys, types, enums. (OpenAI <code>response_format</code> with <code>strict: true</code>; Anthropic <code>output_config.format</code>; vLLM <code>structured_outputs</code>.)</li>
+  <li><strong>Regex and grammars</strong> (llama.cpp's GBNF, Lark/EBNF elsewhere) express arbitrary formats: SQL subsets, a DSL, a tool-call syntax.</li>
+</ul>
+
+<figure class="stepper wide" data-steps="6" data-interval="3200">
+<svg viewBox="0 0 1000 470" role="img" aria-label="Stepper: a JSON schema with name string and age integer is compiled into states; at each state the allowed-token mask sets disallowed logits to minus infinity, forcing valid JSON.">
+  <g font-size="16" font-weight="700" fill="#1d2433">
+    <text x="20" y="28">Schema → automaton</text>
+    <text x="330" y="28">Next-token candidates</text>
+    <text x="720" y="28">Output so far</text>
+  </g>
+  <rect x="20" y="40" width="280" height="80" rx="8" fill="#1b2030"/>
+  <g font-size="14" class="mono" fill="#e6e9f2">
+    <text x="34" y="64">{ "name": string,</text>
+    <text x="34" y="86">  "age":  integer }</text>
+    <text x="34" y="108" fill="#8a93a8">required, no extra keys</text>
+  </g>
+  <!-- states -->
+  <g font-size="14">
+    <rect x="20" y="132" width="280" height="38" rx="7" fill="#ffffff" stroke="#ddd8ce"/><text x="34" y="156" fill="#1d2433"><tspan font-weight="700">S0</tspan>  expect <tspan class="mono">{</tspan></text>
+    <rect x="20" y="178" width="280" height="38" rx="7" fill="#ffffff" stroke="#ddd8ce"/><text x="34" y="202" fill="#1d2433"><tspan font-weight="700">S1</tspan>  <tspan class="mono">"name": "</tspan>  (forced)</text>
+    <rect x="20" y="224" width="280" height="38" rx="7" fill="#ffffff" stroke="#ddd8ce"/><text x="34" y="248" fill="#1d2433"><tspan font-weight="700">S2</tspan>  string chars, then <tspan class="mono">"</tspan></text>
+    <rect x="20" y="270" width="280" height="38" rx="7" fill="#ffffff" stroke="#ddd8ce"/><text x="34" y="294" fill="#1d2433"><tspan font-weight="700">S3</tspan>  <tspan class="mono">, "age": </tspan>  (forced)</text>
+    <rect x="20" y="316" width="280" height="38" rx="7" fill="#ffffff" stroke="#ddd8ce"/><text x="34" y="340" fill="#1d2433"><tspan font-weight="700">S4</tspan>  digits</text>
+    <rect x="20" y="362" width="280" height="38" rx="7" fill="#ffffff" stroke="#ddd8ce"/><text x="34" y="386" fill="#1d2433"><tspan font-weight="700">S5</tspan>  <tspan class="mono">}</tspan> then end of text</text>
+  </g>
+  <g fill="none" stroke="#2f6fde" stroke-width="2.6">
+    <rect data-step-only="2" x="20" y="132" width="280" height="38" rx="7"/>
+    <rect data-step-only="3" x="20" y="178" width="280" height="38" rx="7"/>
+    <rect data-step-only="4" x="20" y="224" width="280" height="38" rx="7"/>
+    <rect data-step-only="5" x="20" y="270" width="280" height="38" rx="7"/>
+    <rect data-step-only="5" x="20" y="316" width="280" height="38" rx="7"/>
+    <rect data-step-only="6" x="20" y="316" width="280" height="38" rx="7"/>
+    <rect data-step-only="6" x="20" y="362" width="280" height="38" rx="7"/>
+  </g>
+  <text x="20" y="430" font-size="14" fill="#687084">Nested or recursive JSON needs a stack:</text>
+  <text x="20" y="450" font-size="14" fill="#687084">a pushdown automaton (CFG), not just an FSM.</text>
+  <!-- candidate table header -->
+  <g font-size="14" font-weight="700" fill="#687084">
+    <text x="330" y="64">token</text><text x="530" y="64" text-anchor="end">model p</text><text x="580" y="64" text-anchor="middle">mask</text><text x="690" y="64" text-anchor="end">after</text>
+  </g>
+  <line x1="330" y1="74" x2="695" y2="74" stroke="#ddd8ce"/>
+  <!-- step 1 -->
+  <g data-step-only="1" font-size="15" fill="#3a4254">
+    <text x="330" y="110">The grammar engine compiles the schema</text>
+    <text x="330" y="134">once into states like S0…S5, then</text>
+    <text x="330" y="158">precomputes which tokens are legal</text>
+    <text x="330" y="182">in each state wherever it can.</text>
+    <text x="330" y="226">At run time, each step costs one mask</text>
+    <text x="330" y="250">lookup or a short parser walk.</text>
+  </g>
+  <!-- step 2: S0 -->
+  <g data-step-only="2" font-size="15" class="mono">
+    <text x="330" y="102" fill="#1d2433">Sure</text><text x="530" y="102" text-anchor="end" fill="#1d2433">.41</text><text x="580" y="102" text-anchor="middle" fill="#d64545">✗</text><text x="690" y="102" text-anchor="end" fill="#d64545">−∞</text>
+    <text x="330" y="132" fill="#1d2433">```</text><text x="530" y="132" text-anchor="end" fill="#1d2433">.22</text><text x="580" y="132" text-anchor="middle" fill="#d64545">✗</text><text x="690" y="132" text-anchor="end" fill="#d64545">−∞</text>
+    <rect x="324" y="144" width="372" height="26" rx="4" fill="#fcf6e3" stroke="#e5b62b"/>
+    <text x="330" y="162" fill="#1d2433">{"</text><text x="530" y="162" text-anchor="end" fill="#1d2433">.19</text><text x="580" y="162" text-anchor="middle" fill="#2f9e6e">✓</text><text x="690" y="162" text-anchor="end" fill="#24539f">.61</text>
+    <text x="330" y="192" fill="#1d2433">{</text><text x="530" y="192" text-anchor="end" fill="#1d2433">.12</text><text x="580" y="192" text-anchor="middle" fill="#2f9e6e">✓</text><text x="690" y="192" text-anchor="end" fill="#24539f">.39</text>
+    <text x="330" y="222" fill="#1d2433">Here</text><text x="530" y="222" text-anchor="end" fill="#1d2433">.06</text><text x="580" y="222" text-anchor="middle" fill="#d64545">✗</text><text x="690" y="222" text-anchor="end" fill="#d64545">−∞</text>
+  </g>
+  <!-- step 3: forced -->
+  <g data-step-only="3" font-size="15" fill="#3a4254">
+    <text x="330" y="102" fill="#1d2433">forced tokens: <tspan class="mono">name</tspan>  ·  <tspan class="mono">":</tspan>  ·  <tspan class="mono">␣"</tspan></text>
+    <text x="330" y="134">Only one continuation is legal, so the</text>
+    <text x="330" y="158">mask has exactly one allowed token at</text>
+    <text x="330" y="182">each step. Engines can append these</text>
+    <text x="330" y="206">tokens without sampling ("jump-forward").</text>
+  </g>
+  <!-- step 4: string -->
+  <g data-step-only="4" font-size="15" class="mono">
+    <rect x="324" y="84" width="372" height="26" rx="4" fill="#fcf6e3" stroke="#e5b62b"/>
+    <text x="330" y="102" fill="#1d2433">Tom</text><text x="530" y="102" text-anchor="end" fill="#1d2433">.55</text><text x="580" y="102" text-anchor="middle" fill="#2f9e6e">✓</text><text x="690" y="102" text-anchor="end" fill="#24539f">.59</text>
+    <text x="330" y="132" fill="#1d2433">Thomas</text><text x="530" y="132" text-anchor="end" fill="#1d2433">.21</text><text x="580" y="132" text-anchor="middle" fill="#2f9e6e">✓</text><text x="690" y="132" text-anchor="end" fill="#24539f">.23</text>
+    <text x="330" y="162" fill="#1d2433">"</text><text x="530" y="162" text-anchor="end" fill="#1d2433">.12</text><text x="580" y="162" text-anchor="middle" fill="#2f9e6e">✓</text><text x="690" y="162" text-anchor="end" fill="#24539f">.13</text>
+    <text x="330" y="192" fill="#1d2433">\n (raw)</text><text x="530" y="192" text-anchor="end" fill="#1d2433">.07</text><text x="580" y="192" text-anchor="middle" fill="#d64545">✗</text><text x="690" y="192" text-anchor="end" fill="#d64545">−∞</text>
+    <text x="330" y="232" style="font-family: var(--sans)" font-size="14" fill="#687084">Inside a string almost everything is legal,</text>
+    <text x="330" y="252" style="font-family: var(--sans)" font-size="14" fill="#687084">except raw control characters. Then: "</text>
+  </g>
+  <!-- step 5: integer -->
+  <g data-step-only="5" font-size="15" class="mono">
+    <text x="330" y="102" fill="#1d2433">␣"</text><text x="530" y="102" text-anchor="end" fill="#1d2433">.38</text><text x="580" y="102" text-anchor="middle" fill="#d64545">✗</text><text x="690" y="102" text-anchor="end" fill="#d64545">−∞</text>
+    <rect x="324" y="114" width="372" height="26" rx="4" fill="#fcf6e3" stroke="#e5b62b"/>
+    <text x="330" y="132" fill="#1d2433">30</text><text x="530" y="132" text-anchor="end" fill="#1d2433">.29</text><text x="580" y="132" text-anchor="middle" fill="#2f9e6e">✓</text><text x="690" y="132" text-anchor="end" fill="#24539f">.73</text>
+    <text x="330" y="162" fill="#1d2433">thirty</text><text x="530" y="162" text-anchor="end" fill="#1d2433">.17</text><text x="580" y="162" text-anchor="middle" fill="#d64545">✗</text><text x="690" y="162" text-anchor="end" fill="#d64545">−∞</text>
+    <text x="330" y="192" fill="#1d2433">3</text><text x="530" y="192" text-anchor="end" fill="#1d2433">.09</text><text x="580" y="192" text-anchor="middle" fill="#2f9e6e">✓</text><text x="690" y="192" text-anchor="end" fill="#24539f">.23</text>
+    <text x="330" y="222" fill="#1d2433">-</text><text x="530" y="222" text-anchor="end" fill="#1d2433">.02</text><text x="580" y="222" text-anchor="middle" fill="#2f9e6e">✓</text><text x="690" y="222" text-anchor="end" fill="#24539f">.05</text>
+    <text x="330" y="256" style="font-family: var(--sans)" font-size="14" fill="#687084">The model wanted a string ("thirty"); the</text>
+    <text x="330" y="276" style="font-family: var(--sans)" font-size="14" fill="#687084">schema says integer, so 55% of its mass is cut.</text>
+  </g>
+  <!-- step 6: close -->
+  <g data-step-only="6" font-size="15" class="mono">
+    <rect x="324" y="84" width="372" height="26" rx="4" fill="#fcf6e3" stroke="#e5b62b"/>
+    <text x="330" y="102" fill="#1d2433">}</text><text x="530" y="102" text-anchor="end" fill="#1d2433">.80</text><text x="580" y="102" text-anchor="middle" fill="#2f9e6e">✓</text><text x="690" y="102" text-anchor="end" fill="#24539f">.94</text>
+    <text x="330" y="132" fill="#1d2433">,</text><text x="530" y="132" text-anchor="end" fill="#1d2433">.10</text><text x="580" y="132" text-anchor="middle" fill="#d64545">✗</text><text x="690" y="132" text-anchor="end" fill="#d64545">−∞</text>
+    <text x="330" y="162" fill="#1d2433">5</text><text x="530" y="162" text-anchor="end" fill="#1d2433">.05</text><text x="580" y="162" text-anchor="middle" fill="#2f9e6e">✓</text><text x="690" y="162" text-anchor="end" fill="#24539f">.06</text>
+    <text x="330" y="196" style="font-family: var(--sans)" font-size="14" fill="#687084">No extra keys allowed, so "," is illegal.</text>
+    <text x="330" y="216" style="font-family: var(--sans)" font-size="14" fill="#687084">After "}", only the end-of-text token is legal.</text>
+  </g>
+  <!-- output box -->
+  <rect x="720" y="40" width="262" height="96" rx="8" fill="#f3f1ec" stroke="#ddd8ce"/>
+  <g font-size="15" class="mono" fill="#1d2433">
+    <text data-step-only="1" x="734" y="66" fill="#a09a8e">(empty)</text>
+    <text data-step-only="2" x="734" y="66">{"</text>
+    <text data-step-only="3" x="734" y="66">{"name": "</text>
+    <text data-step-only="4" x="734" y="66">{"name": "Tom"</text>
+    <g data-step-only="5"><text x="734" y="66">{"name": "Tom",</text><text x="734" y="90"> "age": 30</text></g>
+    <g data-step-only="6"><text x="734" y="66">{"name": "Tom",</text><text x="734" y="90"> "age": 30}</text><text x="734" y="118" fill="#1f7a53" style="font-family: var(--sans)">valid, parses</text></g>
+  </g>
+  <g font-size="14" fill="#3a4254">
+    <text x="720" y="172" font-weight="700" fill="#1d2433">Per step, per sequence</text>
+    <text x="720" y="196">mask: 128,256 bits = 16,032 B</text>
+    <text x="720" y="218">built on CPU while the GPU</text>
+    <text x="720" y="238">runs this step's forward pass</text>
+    <text x="720" y="264">applied by a tiny kernel:</text>
+    <text x="720" y="284" class="mono">logits[~mask] = −inf</text>
+    <text x="720" y="310">then softmax, temperature,</text>
+    <text x="720" y="330">sampling exactly as before</text>
+  </g>
+</svg>
+<div class="step-captions">
+  <p data-step-only="1"><b>Step 1.</b> The schema is compiled into an automaton. Each state knows which characters may come next.</p>
+  <p data-step-only="2"><b>Step 2.</b> State S0. The model's favorite first token is "Sure" (41%), which would break JSON. The mask sets it and every other illegal token to −∞; softmax renormalizes the two legal ones. <code>{"</code> is sampled.</p>
+  <p data-step-only="3"><b>Step 3.</b> The key is fixed by the schema, so there is exactly one legal path. No real choice is made.</p>
+  <p data-step-only="4"><b>Step 4.</b> Inside the string value the mask is almost all ones. The model picks "Tom", then the closing quote.</p>
+  <p data-step-only="5"><b>Step 5.</b> After the forced <code>, "age": </code> the state requires digits. The model wanted to write a string; the mask forbids it, and the surviving digit tokens are renormalized. "30" is sampled.</p>
+  <p data-step-only="6"><b>Step 6.</b> Digits or <code>}</code> are legal; a comma is not (no more keys). After <code>}</code> only end-of-text is legal. The output is guaranteed to parse. Probabilities are illustrative.</p>
+</div>
+<figcaption><span class="fig-label">Figure 14.12</span> — Constrained decoding: schema → automaton state → allowed-token mask → illegal logits set to −∞ → sample → next state.</figcaption>
+</figure>
+
+<h3>How grammar engines make the mask fast</h3>
+<p>The hard part is speed. A naive engine would test all 128,256 tokens against the grammar at every step, each token being a multi-character string. Three designs dominate:</p>
+<ul>
+  <li><strong>Outlines</strong> (Willard &amp; Louf, 2023) turns a regex or simple schema into a finite-state machine and precomputes, for every FSM state, the list of tokens that are legal from it. At run time the mask is a table lookup. The cost moves to compile time and memory.</li>
+  <li><strong>XGrammar</strong> (Dong et al., MLSys 2025) handles full context-free grammars with a pushdown automaton. It splits the vocabulary into <em>context-independent</em> tokens, whose legality depends only on the current grammar position and can be precomputed, and <em>context-dependent</em> tokens, which need the stack and are checked at run time with a persistent stack. It reports up to 100× speedups over earlier engines and overlaps mask computation with GPU work.</li>
+  <li><strong>llguidance</strong> (Microsoft) runs an Earley parser over a regex-derivative lexer and walks a trie of all tokens, pruning whole subtrees at once. It quotes about 50 μs of CPU time per token for a 128K vocabulary with negligible startup, and has powered OpenAI's Structured Outputs since May 2025. It is also integrated into vLLM, SGLang and llama.cpp.</li>
+</ul>
+
+<p>The budget is tight but clear: a decode step of an 8B model on an H100 takes a few milliseconds (<a href="11-inference.html">Chapter 11</a>), and the CPU computes the next mask while the GPU runs the forward pass. If the mask takes longer than the step, decoding stalls.</p>
+
+<aside class="callout warn"><div class="callout-title">Constraints change what the model says</div><p>The mask guarantees form, not content. When the model's preferred tokens are illegal (Step 5), its remaining probability is renormalized among tokens it found less likely, which can lower quality. Practical rules: describe the format in the prompt as well, so the model already wants to produce it; put free-text "reasoning" fields <em>before</em> "answer" fields so the model thinks before it commits; check for <code>length</code> stops, which leave the JSON unfinished; and handle refusals, which OpenAI reports in a separate <code>refusal</code> field.</p></aside>
+</section>
+
+<section>
+<h2>Logprobs: reading the distribution</h2>
+
+<p>The sampler throws away almost everything the model computed: 128,255 of 128,256 probabilities per step. Many APIs let you keep a little of it. With <code>logprobs</code> on, each generated token comes back with its <dfn>log-probability</dfn> (natural log, so always ≤ 0), and with <code>top_logprobs</code> = <var>k</var> (OpenAI allows 0–20) you also get the <var>k</var> most likely alternatives at that position. Convert back with <var>p</var> = <var>e</var><sup>logprob</sup>: −0.34 means 0.71, −2.3 means 0.10. OpenAI also returns each token's raw UTF-8 <code>bytes</code>, because a single character can be split across tokens (<a href="03-tokens.html">Chapter 3</a>).</p>
+
+<figure class="wide">
+<svg viewBox="0 0 1000 290" role="img" aria-label="Token-by-token confidence strip for the answer The capital of Australia is Canberra, with Canberra at probability 0.71 and its top alternatives Sydney 0.22 and Melbourne 0.05, plus the corresponding JSON fields.">
+  <text x="20" y="28" font-size="16" font-weight="700" fill="#1d2433">Answer tokens shaded by the probability of the token that was sampled</text>
+  <g font-size="15" class="mono" text-anchor="middle" fill="#1d2433">
+    <rect x="20" y="44" width="52" height="34" rx="6" fill="#d7f0e4" stroke="#2f9e6e"/><text x="46" y="66">The</text>
+    <rect x="78" y="44" width="92" height="34" rx="6" fill="#d7f0e4" stroke="#2f9e6e"/><text x="124" y="66">␣capital</text>
+    <rect x="176" y="44" width="44" height="34" rx="6" fill="#d7f0e4" stroke="#2f9e6e"/><text x="198" y="66">␣of</text>
+    <rect x="226" y="44" width="110" height="34" rx="6" fill="#d7f0e4" stroke="#2f9e6e"/><text x="281" y="66">␣Australia</text>
+    <rect x="342" y="44" width="44" height="34" rx="6" fill="#d7f0e4" stroke="#2f9e6e"/><text x="364" y="66">␣is</text>
+    <rect x="392" y="44" width="110" height="34" rx="6" fill="#fbefc5" stroke="#e5b62b" stroke-width="2"/><text x="447" y="66">␣Canberra</text>
+    <rect x="508" y="44" width="30" height="34" rx="6" fill="#d7f0e4" stroke="#2f9e6e"/><text x="523" y="66">.</text>
+  </g>
+  <g font-size="14" class="mono" text-anchor="middle" fill="#687084">
+    <text x="46" y="98">.98</text><text x="124" y="98">.96</text><text x="198" y="98">.99</text><text x="281" y="98">.97</text><text x="364" y="98">.95</text><text x="447" y="98" fill="#9a7410" font-weight="700">.71</text><text x="523" y="98">.93</text>
+  </g>
+  <path d="M447 104 V124" stroke="#e5b62b" stroke-width="2"/>
+  <rect x="300" y="124" width="300" height="122" rx="9" fill="#ffffff" stroke="#e5b62b" stroke-width="1.6"/>
+  <text x="316" y="148" font-size="15" font-weight="700" fill="#1d2433">top_logprobs at this position</text>
+  <g font-size="15" class="mono" fill="#1d2433">
+    <text x="316" y="176">␣Canberra</text><text x="470" y="176" text-anchor="end">−0.34</text><rect x="482" y="164" width="85" height="14" rx="2" fill="#e5b62b"/>
+    <text x="316" y="202">␣Sydney</text><text x="470" y="202" text-anchor="end">−1.51</text><rect x="482" y="190" width="26" height="14" rx="2" fill="#e8c766"/>
+    <text x="316" y="228">␣Melbourne</text><text x="470" y="228" text-anchor="end">−3.00</text><rect x="482" y="216" width="6" height="14" rx="2" fill="#efd894"/>
+  </g>
+  <rect x="630" y="44" width="350" height="202" rx="9" fill="#1b2030"/>
+  <g font-size="14" class="mono" fill="#e6e9f2">
+    <text x="644" y="70">{ "token": " Canberra",</text>
+    <text x="644" y="92">  "logprob": <tspan fill="#f78c6c">-0.34</tspan>,</text>
+    <text x="644" y="114">  "bytes": [<tspan fill="#f78c6c">32,67,97,110,...</tspan>],</text>
+    <text x="644" y="136">  "top_logprobs": [</text>
+    <text x="644" y="158">    {"token": " Canberra", <tspan fill="#f78c6c">-0.34</tspan>},</text>
+    <text x="644" y="180">    {"token": " Sydney", <tspan fill="#f78c6c">-1.51</tspan>},</text>
+    <text x="644" y="202">    {"token": " Melbourne", <tspan fill="#f78c6c">-3.00</tspan>}</text>
+    <text x="644" y="224">  ] }</text>
+  </g>
+  <text x="20" y="278" font-size="14" fill="#687084">e^−0.34 = 0.71, e^−1.51 = 0.22, e^−3.00 = 0.05. Field names follow OpenAI's Chat Completions format ("logprob" keys shortened); all values illustrative.</text>
+</svg>
+<figcaption><span class="fig-label">Figure 14.13</span> — Logprobs expose the model's confidence token by token. Most tokens here are near-certain; the one token that carries the actual answer is not, and the alternatives show what the model was choosing between.</figcaption>
+</figure>
+
+<p><strong>Uses.</strong> Flag low-confidence spans (a number or a name with <var>p</var> = 0.4 deserves a second look). Classify with scores instead of text: ask for a one-token label and read the logprobs of each label. Score fixed candidate answers by summing their token logprobs. Compute perplexity for evaluation (<a href="08-pretraining.html">Chapter 8</a>). Debug sampler settings by seeing what was cut.</p>
+
+<p><strong>Caveats.</strong> Which distribution is reported varies: vLLM by default returns logprobs computed from the raw logits, <em>before</em> penalties and temperature; other servers report the processed distribution. Post-training tends to make probabilities less calibrated than a base model's, so a 0.9 does not mean "right 90% of the time". And reasoning models often do not expose logprobs at all: OpenAI's GPT-5.2 accepts <code>logprobs</code> only with reasoning effort <code>none</code>.</p>
+</section>
+
+<section>
+<h2>Recommended settings</h2>
+
+<p>Two principles cover most cases. If the task has one right answer, sample less: low temperature or greedy, plus structured output when a program reads the result. If you want variety, sample more, but cut the tail with min-p or top-p so that variety does not mean junk. Change one knob at a time; OpenAI's own docs advise altering temperature or top-p, not both.</p>
+
+<div class="table-wrap">
+<table class="data">
+  <tr><th>Use case (non-reasoning models)</th><th>Temperature</th><th>Truncation</th><th>Notes</th></tr>
+  <tr><td>Extraction, classification, short factual answers</td><td class="num">0–0.3</td><td>off</td><td>Use structured outputs; read logprobs for confidence.</td></tr>
+  <tr><td>Code generation and edits</td><td class="num">0.2–0.6</td><td>top-p 0.95</td><td>Avoid repetition penalties: code repeats names legitimately.</td></tr>
+  <tr><td>General chat</td><td class="num">0.7–1.0</td><td>top-p 0.9–0.95 or min-p 0.05</td><td>Small presence penalty only if you see loops.</td></tr>
+  <tr><td>Creative writing, brainstorming</td><td class="num">0.9–1.3</td><td>min-p 0.05–0.1</td><td>On local engines, DRY (0.8 / 1.75 / 2) instead of token penalties.</td></tr>
+  <tr><td>Many diverse samples (best-of-<var>N</var>, voting)</td><td class="num">0.7–1.0</td><td>top-p 0.95</td><td><code>n</code> &gt; 1 shares the prompt's KV cache (<a href="12-kv-cache.html">Ch 12</a>).</td></tr>
+</table>
+</div>
+<p class="small muted">Rules of thumb, not measurements. Always check the model card: providers tune their recommendations to how the model was trained.</p>
+
+<h3>Reasoning models want their own temperature</h3>
+
+<p>Reasoning models (<a href="10-reasoning.html">Chapter 10</a>) are trained with reinforcement learning on samples drawn at a specific temperature, and their useful behaviors, such as exploring an alternative or noticing a mistake, were learned under that sampling. Low temperatures and greedy decoding push long chains of thought into loops. As a result, vendors now publish fixed recommendations or simply refuse other values:</p>
+
+<div class="table-wrap">
+<table class="data">
+  <tr><th>Model / API</th><th>Recommended or allowed sampling (checked October 2026)</th></tr>
+  <tr><td>DeepSeek-R1</td><td>Temperature 0.5–0.7, 0.6 recommended, "to prevent endless repetitions or incoherent outputs"; evaluations use top-p 0.95.</td></tr>
+  <tr><td>Qwen3, thinking mode</td><td>T 0.6, top-p 0.95, top-k 20, min-p 0. "DO NOT use greedy decoding".</td></tr>
+  <tr><td>Qwen3, non-thinking mode</td><td>T 0.7, top-p 0.8, top-k 20, min-p 0. Presence penalty 0–2 against endless repetition (high values may cause language mixing).</td></tr>
+  <tr><td>gpt-oss-20b / 120b</td><td>T 1.0, top-p 1.0.</td></tr>
+  <tr><td>Gemini 3 family</td><td>Keep temperature at the default 1.0; lower values "may lead to unexpected behavior, such as looping or degraded performance".</td></tr>
+  <tr><td>OpenAI GPT-5 family</td><td>Reasoning models reject <code>temperature</code> and <code>top_p</code>. GPT-5.2 accepts them, and <code>logprobs</code>, only with reasoning effort <code>none</code>.</td></tr>
+  <tr><td>Anthropic Claude</td><td>Claude Opus 4.7 and later models reject non-default <code>temperature</code>, <code>top_p</code> or <code>top_k</code>. From API version <code>2026-10-21</code>, sending any of the three returns an error on every model; requests sample with temperature 1.0.</td></tr>
+  <tr><td>llama.cpp defaults (any GGUF model)</td><td>T 0.8, top-k 40, top-p 0.95, min-p 0.05, repetition penalty off.</td></tr>
+</table>
+</div>
+
+<aside class="callout key"><div class="callout-title">Key takeaway</div><p>For hosted frontier models the trend is clear: the sampler is becoming part of the model, tuned by the vendor and locked. The knobs in this chapter still matter for open-weight models you run yourself, for non-reasoning modes, and for understanding why outputs vary. When you do set them: temperature for spread, min-p or top-p for the tail, structured outputs for format, and batch-invariant kernels if you need exact repeatability.</p></aside>
+</section>
+
+<section>
+<h2>Further reading</h2>
+<ul>
+  <li>Holtzman et al., <a href="https://arxiv.org/abs/1904.09751">The Curious Case of Neural Text Degeneration</a> (ICLR 2020): why likelihood-maximizing decoding degenerates, and nucleus (top-p) sampling.</li>
+  <li>Nguyen et al., <a href="https://arxiv.org/abs/2407.01082">Turning Up the Heat: Min-p Sampling for Creative and Coherent LLM Outputs</a> (ICLR 2025).</li>
+  <li>Meister et al., <a href="https://arxiv.org/abs/2202.00666">Locally Typical Sampling</a> (TACL 2023): the information-theoretic view of decoding.</li>
+  <li>Keskar et al., <a href="https://arxiv.org/abs/1909.05858">CTRL: A Conditional Transformer Language Model for Controllable Generation</a> (2019): origin of the multiplicative repetition penalty.</li>
+  <li>p-e-w, <a href="https://github.com/oobabooga/text-generation-webui/pull/5677">the DRY sampler pull request</a>: motivation, formula and examples.</li>
+  <li>OpenAI, <a href="https://developers.openai.com/api/docs/guides/advanced-usage">Advanced usage</a>: the exact frequency/presence penalty formula and logprobs.</li>
+  <li>FlashInfer, <a href="https://flashinfer.ai/2025/03/10/sampling.html">Sorting-Free GPU Kernels for LLM Sampling</a> (2025): inverse-CDF, rejection and dual-pivot sampling on GPUs.</li>
+  <li>He et al. (Thinking Machines Lab), <a href="https://thinkingmachines.ai/blog/defeating-nondeterminism-in-llm-inference/">Defeating Nondeterminism in LLM Inference</a> (2025): batch invariance, with code; and vLLM's <a href="https://docs.vllm.ai/en/latest/features/batch_invariance/">batch invariance docs</a>.</li>
+  <li>OpenAI, <a href="https://openai.com/index/introducing-structured-outputs-in-the-api/">Introducing Structured Outputs in the API</a> (2024): constrained decoding with grammars in production.</li>
+  <li>Willard &amp; Louf, <a href="https://arxiv.org/abs/2307.09702">Efficient Guided Generation for Large Language Models</a> (2023), the Outlines paper; Dong et al., <a href="https://arxiv.org/abs/2411.15100">XGrammar</a> (MLSys 2025).</li>
+  <li><a href="https://github.com/guidance-ai/llguidance">llguidance</a>: a fast grammar engine with a clear README on how token masks are computed.</li>
+</ul>
+</section>
+
+<footer id="chapter-nav"></footer>
+</main>
+</div>
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+  "use strict";
+  /* illustrative logits for "The cat sat on the" + a tail of 128,244 tokens at logit -12 */
+  var TOK = [[" mat", 4.0], [" floor", 3.2], [" bed", 2.5], [" couch", 2.1], [" edge", 1.6], [" windowsill", 1.2],
+             [" table", 0.9], [" chair", 0.7], [" roof", 0.5], [" sofa", 0.2], [" keyboard", 0.0], [" moon", -2.0]];
+  var TAILN = 128244, TAILZ = -12;
+  var LN2 = Math.log(2);
+
+  function mulberry32(a) {
+    return function () {
+      a = (a + 0x6D2B79F5) | 0;
+      var t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  function vis(s) { return s.charAt(0) === " " ? "\u2423" + s.slice(1) : s; }
+  function fmtP(p) {
+    if (p >= 0.9995) return "1.000";
+    if (p <= 0) return "0";
+    if (p < 0.0005) return "<.001";
+    return p.toFixed(3).replace(/^0/, "");
+  }
+  function abbr(n) {
+    if (n >= 100000) return Math.round(n / 1000) + "k";
+    if (n >= 10000) return (n / 1000).toFixed(1) + "k";
+    return n.toLocaleString("en-US");
+  }
+  function el(tag, cls, text) {
+    var e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text != null) e.textContent = text;
+    return e;
+  }
+  /* pick an index from masses (array of non-negative numbers) with uniform u */
+  function pick(masses, u) {
+    var tot = 0, i;
+    for (i = 0; i < masses.length; i++) tot += masses[i];
+    var target = u * tot, run = 0;
+    for (i = 0; i < masses.length; i++) { run += masses[i]; if (masses[i] > 0 && run > target) return i; }
+    for (i = masses.length - 1; i >= 0; i--) if (masses[i] > 0) return i;
+    return 0;
+  }
+
+  /* ================= temperature widget ================= */
+  (function () {
+    var root = document.getElementById("ch14-tw");
+    if (!root) return;
+    var tIn = document.getElementById("ch14-tw-t"), tV = document.getElementById("ch14-tw-tv");
+    var tailCb = document.getElementById("ch14-tw-tail"), stats = document.getElementById("ch14-tw-stats");
+    var bars = document.getElementById("ch14-tw-bars"), seedIn = document.getElementById("ch14-tw-seed");
+    var sent = document.getElementById("ch14-tw-sent");
+    var rows = [];
+    ["token", "probability", "1,000 draws"].forEach(function (h) { bars.appendChild(el("div", "h", h)); });
+    TOK.concat([["other 128,244 tokens (sum)", TAILZ]]).forEach(function (t, i) {
+      var isTail = i === TOK.length;
+      var lab = el("div", "lab" + (isTail ? " tail" : ""), isTail ? t[0] : vis(t[0]));
+      var tr1 = el("div", "ch14-track"), f1 = el("div", "ch14-fill" + (isTail ? " tail" : "")), v1 = el("span", "ch14-val");
+      tr1.appendChild(f1); tr1.appendChild(v1);
+      var tr2 = el("div", "ch14-track"), f2 = el("div", "ch14-fill cnt"), v2 = el("span", "ch14-val");
+      tr2.appendChild(f2); tr2.appendChild(v2);
+      bars.appendChild(lab); bars.appendChild(tr1); bars.appendChild(tr2);
+      rows.push({ lab: lab, tr1: tr1, tr2: tr2, f1: f1, v1: v1, f2: f2, v2: v2 });
+    });
+
+    function dist(T, useTail) {
+      var p = [], i, m = 4.0, w = [], Z = 0, wt = 0;
+      if (T <= 0) {
+        for (i = 0; i < TOK.length; i++) p.push(i === 0 ? 1 : 0);
+        return { p: p, pt: 0, each: 0 };
+      }
+      for (i = 0; i < TOK.length; i++) { w.push(Math.exp((TOK[i][1] - m) / T)); Z += w[i]; }
+      if (useTail) { wt = TAILN * Math.exp((TAILZ - m) / T); Z += wt; }
+      for (i = 0; i < TOK.length; i++) p.push(w[i] / Z);
+      return { p: p, pt: wt / Z, each: wt / Z / TAILN };
+    }
+    function entropyBits(d) {
+      var h = 0;
+      d.p.forEach(function (x) { if (x > 0) h -= x * Math.log(x) / LN2; });
+      if (d.pt > 0) h -= d.pt * Math.log(d.each) / LN2;
+      return h;
+    }
+    var stream = null, history = [];
+    function seed() { var s = parseInt(seedIn.value, 10); return isFinite(s) ? s : 0; }
+    function resetStream() { stream = mulberry32((seed() ^ 0x5bd1e995) >>> 0); history = []; }
+    function masses(d) { return d.p.concat([d.pt]); }
+    function label(i, r) {
+      if (i < TOK.length) return vis(TOK[i][0]);
+      return "\u27e8junk token #" + (1 + Math.floor(r * TAILN)).toLocaleString("en-US") + "\u27e9";
+    }
+    function render() {
+      var T = +tIn.value, useTail = tailCb.checked;
+      tV.textContent = T.toFixed(2);
+      var d = dist(T, useTail), H = entropyBits(d);
+      var rng = mulberry32(seed() >>> 0), counts = [], i, ms = masses(d);
+      for (i = 0; i < ms.length; i++) counts.push(0);
+      for (i = 0; i < 1000; i++) counts[pick(ms, rng())]++;
+      ms.forEach(function (pv, k) {
+        var r = rows[k], hide = k === TOK.length && !useTail;
+        [r.lab, r.tr1, r.tr2].forEach(function (n) { n.style.display = hide ? "none" : ""; });
+        r.f1.style.width = (pv * 100).toFixed(2) + "%";
+        r.v1.textContent = pv >= 0.0005 || pv === 0 ? pv.toFixed(3) : pv.toExponential(1);
+        r.f2.style.width = (counts[k] / 10).toFixed(1) + "%";
+        r.v2.textContent = counts[k];
+      });
+      stats.innerHTML = "";
+      var items = [
+        ["entropy", T <= 0 ? "0 bits (greedy)" : H.toFixed(2) + " bits"],
+        ["effective choices 2^H", Math.pow(2, H) >= 100 ? Math.round(Math.pow(2, H)).toLocaleString("en-US") : Math.pow(2, H).toFixed(1)],
+        ["p(\u2423mat)", d.p[0].toFixed(3)],
+        ["junk tail", useTail ? (d.pt * 100).toFixed(d.pt < 0.1 ? 2 : 1) + "%" : "excluded"]
+      ];
+      items.forEach(function (it) {
+        var s = el("span", null, it[0] + " "); var b = el("b", null, it[1]); s.appendChild(b); stats.appendChild(s);
+      });
+    }
+    function showSentence() {
+      sent.innerHTML = "";
+      sent.appendChild(document.createTextNode("The cat sat on the"));
+      if (!history.length) { sent.appendChild(el("span", "muted", "  \u2026 press \u201cSample once\u201d")); return; }
+      var last = history[history.length - 1];
+      var s = el("span", "ch14-new", last.charAt(0) === "\u2423" ? last.slice(1) : last);
+      sent.appendChild(document.createTextNode(" ")); sent.appendChild(s);
+      if (history.length > 1) sent.appendChild(el("span", "muted", "   earlier draws: " + history.slice(-9, -1).reverse().join(", ")));
+    }
+    document.getElementById("ch14-tw-one").addEventListener("click", function () {
+      var d = dist(+tIn.value, tailCb.checked);
+      var i = pick(masses(d), stream());
+      history.push(label(i, stream()));
+      showSentence();
+    });
+    document.getElementById("ch14-tw-new").addEventListener("click", function () {
+      seedIn.value = seed() + 1; resetStream(); render(); showSentence();
+    });
+    seedIn.addEventListener("change", function () { resetStream(); render(); showSentence(); });
+    tIn.addEventListener("input", render);
+    tailCb.addEventListener("change", render);
+    document.getElementById("ch14-tw-presets").addEventListener("click", function (e) {
+      var b = e.target.closest("button"); if (!b) return;
+      tIn.value = b.getAttribute("data-t"); render();
+    });
+    resetStream(); render(); showSentence();
+  })();
+
+  /* ================= sampler playground ================= */
+  (function () {
+    var root = document.getElementById("ch14-pg");
+    if (!root) return;
+    function $(id) { return document.getElementById("ch14-pg-" + id); }
+    var ctl = { order: $("order"), t: $("t"), k: $("k"), p: $("p"), mp: $("mp"), typ: $("typ"), rep: $("rep"), fp: $("fp"), pp: $("pp") };
+    var grid = $("grid"), stats = $("stats"), out = $("out"), seedIn = $("seed");
+    var HIST = [2, 1]; /* " mat" seen twice, " floor" once */
+    var ORDERS = {
+      llama: ["pen", "topk", "typ", "topp", "minp", "temp"],
+      vllm: ["pen", "temp", "minp", "topk", "topp"],
+      hf: ["pen", "temp", "topk", "topp", "minp", "typ"]
+    };
+    var PRESETS = {
+      llama: { order: "llama", t: 0.8, k: 40, p: 0.95, mp: 0.05, typ: 1, rep: 1, fp: 0, pp: 0 },
+      qwen: { order: "vllm", t: 0.6, k: 20, p: 0.95, mp: 0, typ: 1, rep: 1, fp: 0, pp: 0 },
+      hot: { t: 1.5, k: 0, p: 0.95, mp: 0, typ: 1, rep: 1, fp: 0, pp: 0 },
+      greedy: { t: 0 },
+      off: { t: 1, k: 0, p: 1, mp: 0, typ: 1, rep: 1, fp: 0, pp: 0 }
+    };
+    function v(name) { return +ctl[name].value; }
+    function initGroups() {
+      var g = TOK.map(function (t, i) { return { name: t[0], z0: t[1], z: t[1], alive: 1, cnt: HIST[i] || 0, tail: false }; });
+      g.push({ name: "tail", z0: TAILZ, z: TAILZ, alive: TAILN, cnt: 0, tail: true });
+      return g;
+    }
+    function probs(g) {
+      var m = -Infinity, Z = 0;
+      g.forEach(function (x) { if (x.alive > 0 && x.z > m) m = x.z; });
+      g.forEach(function (x) { x.e = x.alive > 0 ? Math.exp(x.z - m) : 0; Z += x.alive * x.e; });
+      g.forEach(function (x) { x.e = x.e / Z; x.mass = x.alive * x.e; });
+    }
+    function byDesc(g, key) { return g.filter(function (x) { return x.alive > 0; }).sort(function (a, b) { return b[key] - a[key]; }); }
+    function keepByMass(sorted, target) {
+      var cum = 0;
+      sorted.forEach(function (x) {
+        if (cum >= target - 1e-12) { x.alive = 0; return; }
+        var need = Math.max(1, Math.ceil((target - cum) / x.e - 1e-9));
+        var keep = Math.min(x.alive, need);
+        cum += keep * x.e; x.alive = keep;
+      });
+    }
+    var STAGES = {
+      pen: function (g, s) {
+        g.forEach(function (x) {
+          if (!x.cnt) return;
+          if (s.rep !== 1) x.z = x.z > 0 ? x.z / s.rep : x.z * s.rep;
+          x.z -= x.cnt * s.fp + (x.cnt > 0 ? s.pp : 0);
+        });
+      },
+      temp: function (g, s) {
+        if (s.t <= 0) {
+          var best = byDesc(g, "z")[0];
+          g.forEach(function (x) { x.alive = x === best ? 1 : 0; });
+          return;
+        }
+        g.forEach(function (x) { x.z = x.z / s.t; });
+      },
+      topk: function (g, s) {
+        var left = s.k;
+        byDesc(g, "z").forEach(function (x) { var keep = Math.min(x.alive, left); x.alive = keep; left -= keep; });
+      },
+      topp: function (g, s) { probs(g); keepByMass(byDesc(g, "e"), s.p); },
+      minp: function (g, s) {
+        probs(g);
+        var pmax = 0; g.forEach(function (x) { if (x.alive > 0 && x.e > pmax) pmax = x.e; });
+        g.forEach(function (x) { if (x.alive > 0 && x.e < s.mp * pmax) x.alive = 0; });
+      },
+      typ: function (g, s) {
+        probs(g);
+        var H = 0; g.forEach(function (x) { if (x.alive > 0) H -= x.mass * Math.log(x.e); });
+        g.forEach(function (x) { x.d = Math.abs(-Math.log(x.e) - H); });
+        var sorted = g.filter(function (x) { return x.alive > 0; }).sort(function (a, b) { return a.d - b.d; });
+        keepByMass(sorted, s.typ);
+      }
+    };
+    function active(stage, s) {
+      if (stage === "pen") return s.rep !== 1 || s.fp > 0 || s.pp > 0;
+      if (stage === "temp") return true;
+      if (s.t <= 0) return false; /* greedy: truncation cannot change the argmax */
+      if (stage === "topk") return s.k > 0;
+      if (stage === "topp") return s.p < 1;
+      if (stage === "minp") return s.mp > 0;
+      if (stage === "typ") return s.typ < 1;
+      return false;
+    }
+    function header(stage, s) {
+      if (stage === "pen") return "penalties";
+      if (stage === "temp") return s.t <= 0 ? "greedy (T 0)" : "temp " + s.t.toFixed(2);
+      if (stage === "topk") return "top-k " + s.k;
+      if (stage === "topp") return "top-p " + s.p.toFixed(2);
+      if (stage === "minp") return "min-p " + s.mp.toFixed(2);
+      if (stage === "typ") return "typical " + s.typ.toFixed(2);
+    }
+    function readouts(s) {
+      $("t-v").textContent = s.t.toFixed(2);
+      $("k-v").textContent = s.k > 0 ? s.k : "off";
+      $("p-v").textContent = s.p < 1 ? s.p.toFixed(2) : "off";
+      $("mp-v").textContent = s.mp > 0 ? s.mp.toFixed(2) : "off";
+      $("typ-v").textContent = s.typ < 1 ? s.typ.toFixed(2) : "off";
+      $("rep-v").textContent = s.rep !== 1 ? s.rep.toFixed(2) : "off";
+      $("fp-v").textContent = s.fp.toFixed(1);
+      $("pp-v").textContent = s.pp.toFixed(1);
+    }
+    var last = null, stream = null, history = [];
+    function seed() { var x = parseInt(seedIn.value, 10); return isFinite(x) ? x : 0; }
+    function resetStream() { stream = mulberry32((seed() ^ 0x27d4eb2f) >>> 0); history = []; }
+    function compute() {
+      var s = { order: ctl.order.value, t: v("t"), k: v("k"), p: v("p"), mp: v("mp"), typ: v("typ"), rep: v("rep"), fp: v("fp"), pp: v("pp") };
+      readouts(s);
+      var g = initGroups(), cols = [];
+      ORDERS[s.order].forEach(function (st) {
+        if (!active(st, s)) return;
+        STAGES[st](g, s);
+        probs(g);
+        cols.push({ name: header(st, s), temp: st === "temp", snap: g.map(function (x) { return { alive: x.alive, mass: x.mass, z: x.z }; }) });
+      });
+      probs(g);
+      return { s: s, g: g, cols: cols };
+    }
+    function render() {
+      var r = compute(); last = r;
+      var s = r.s, g = r.g, cols = r.cols, i;
+      var rng = mulberry32(seed() >>> 0), counts = g.map(function () { return 0; }), ms = g.map(function (x) { return x.mass; });
+      for (i = 0; i < 1000; i++) counts[pick(ms, rng())]++;
+      grid.innerHTML = "";
+      var thead = el("tr");
+      thead.appendChild(el("th", null, "token"));
+      thead.appendChild(el("th", null, "logit"));
+      cols.forEach(function (c) { thead.appendChild(el("th", c.temp ? "stg-temp" : null, c.name)); });
+      thead.appendChild(el("th", null, "final p"));
+      thead.appendChild(el("th", null, "1000\u00d7"));
+      grid.appendChild(thead);
+      var maxMass = 0; g.forEach(function (x) { if (x.mass > maxMass) maxMass = x.mass; });
+      g.forEach(function (x, k) {
+        var tr = el("tr");
+        tr.appendChild(el("td", "tk" + (x.tail ? " tail" : ""), x.tail ? "other 128,244 tokens" : vis(x.name)));
+        var penZ = cols.length && cols[0].name === "penalties" ? cols[0].snap[k].z : x.z0;
+        var zText = x.z0.toFixed(1) + (Math.abs(penZ - x.z0) > 1e-9 ? "\u2192" + penZ.toFixed(2) : "");
+        tr.appendChild(el("td", null, zText));
+        cols.forEach(function (c) {
+          var sn = c.snap[k], td;
+          if (sn.alive <= 0) td = el("td", "dead", "\u2717");
+          else if (x.tail) td = el("td", "live", (sn.alive === TAILN ? "all" : abbr(sn.alive)) + ": " + fmtP(sn.mass));
+          else td = el("td", "live", fmtP(sn.mass));
+          tr.appendChild(td);
+        });
+        var fin = el("td", "fin");
+        var bar = el("span", "ch14-mini"); bar.style.width = Math.max(x.mass > 0 ? 1 : 0, Math.round(90 * x.mass / (maxMass || 1))) + "px";
+        fin.appendChild(bar); fin.appendChild(document.createTextNode(x.alive > 0 ? fmtP(x.mass) : "\u2717"));
+        tr.appendChild(fin);
+        var cc = el("td", null, counts[k] ? String(counts[k]) : "\u00b7");
+        tr.appendChild(cc);
+        grid.appendChild(tr);
+      });
+      var named = 0, junk = 0, H = 0, top = null;
+      g.forEach(function (x) {
+        if (x.alive > 0) {
+          if (x.tail) junk += x.alive; else named++;
+          H -= x.mass * Math.log(x.e) / LN2;
+          if (!top || x.e > top.e) top = x;
+        }
+      });
+      var tail = g[g.length - 1];
+      stats.innerHTML = "";
+      [["survivors", named + " named + " + junk.toLocaleString("en-US") + " junk"],
+       ["final entropy", H.toFixed(2) + " bits"],
+       ["most likely", (top.tail ? "a junk token" : vis(top.name)) + " " + fmtP(top.e)],
+       ["junk share", (tail.mass * 100).toFixed(1) + "%"],
+       ["order", ctl.order.options[ctl.order.selectedIndex].text + (s.order === "vllm" && s.typ < 1 ? " (typical-p ignored: not in vLLM)" : "")]
+      ].forEach(function (it) {
+        var sp = el("span", null, it[0] + " "); sp.appendChild(el("b", null, it[1])); stats.appendChild(sp);
+      });
+      showOut();
+    }
+    function showOut() {
+      out.innerHTML = "";
+      out.appendChild(document.createTextNode("The cat sat on the"));
+      if (!history.length) { out.appendChild(el("span", "muted", "  \u2026 press \u201cSample once\u201d")); return; }
+      var lastTok = history[history.length - 1];
+      out.appendChild(document.createTextNode(" "));
+      out.appendChild(el("span", "ch14-new", lastTok.charAt(0) === "\u2423" ? lastTok.slice(1) : lastTok));
+      if (history.length > 1) out.appendChild(el("span", "muted", "   earlier draws: " + history.slice(-9, -1).reverse().join(", ")));
+    }
+    $("one").addEventListener("click", function () {
+      if (!last) return;
+      var g = last.g, i = pick(g.map(function (x) { return x.mass; }), stream());
+      var lab = g[i].tail ? "\u27e8junk token #" + (1 + Math.floor(stream() * TAILN)).toLocaleString("en-US") + "\u27e9" : vis(g[i].name);
+      history.push(lab); showOut();
+    });
+    $("new").addEventListener("click", function () { seedIn.value = seed() + 1; resetStream(); render(); });
+    seedIn.addEventListener("change", function () { resetStream(); render(); });
+    Object.keys(ctl).forEach(function (key) {
+      ctl[key].addEventListener(key === "order" ? "change" : "input", render);
+    });
+    $("presets").addEventListener("click", function (e) {
+      var b = e.target.closest("button"); if (!b) return;
+      var pr = PRESETS[b.getAttribute("data-preset")];
+      Object.keys(pr).forEach(function (key) { ctl[key].value = pr[key]; });
+      render();
+    });
+    resetStream(); render();
+  })();
+});
+</script>
+</body>
+</html>

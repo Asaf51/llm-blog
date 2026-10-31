@@ -1,0 +1,1463 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>01 · The Big Picture — How LLMs Really Work</title>
+<link rel="stylesheet" href="assets/style.css">
+<script src="assets/blog.js" defer></script>
+<style>
+  /* chapter 01 styles — every selector scoped to #ch01 */
+  /* sections are capped at the text width by main.article > *; let them be wide so .wide figures can grow */
+  #ch01 > section { max-width: var(--wide-w); }
+  #ch01 svg .mono, #ch01 svg .mono text { font-family: var(--mono); }
+  #ch01 .flow { stroke-dasharray: 7 7; animation: ch01-flow 1.1s linear infinite; }
+  #ch01 .flow-slow { stroke-dasharray: 5 9; animation: ch01-flow 2.2s linear infinite; }
+  @keyframes ch01-flow { to { stroke-dashoffset: -14; } }
+
+  /* pipeline map */
+  #ch01 .map a { cursor: pointer; }
+  #ch01 .map a .bx { transition: stroke-width .15s ease, fill .15s ease; }
+  #ch01 .map a:hover .bx { stroke-width: 3.2; }
+  #ch01 .map a:hover .ttl { text-decoration: underline; }
+  #ch01 .map a:focus { outline: none; }
+  #ch01 .map a:focus .bx { stroke-width: 3.2; }
+
+  /* training vs inference */
+  #ch01 .twk { animation: ch01-twinkle 2.6s ease-in-out infinite; }
+  @keyframes ch01-twinkle { 0%,100% { opacity: .25 } 50% { opacity: 1 } }
+  #ch01 .lossbar { animation: ch01-loss 7s ease-in-out infinite; transform-origin: 0 0; transform-box: fill-box; }
+  @keyframes ch01-loss { 0% { transform: scaleX(1) } 80% { transform: scaleX(.18) } 100% { transform: scaleX(.18) } }
+
+  /* autoregressive stepper: context chips slide in */
+  #ch01 .ctxnew { transition: opacity .45s ease; }
+
+  /* sampler widget */
+  #ch01 .smp-text { font-family: var(--mono); font-size: 15px; line-height: 2.1; background: var(--panel); border-radius: 6px; padding: 8px 12px; min-height: 48px; }
+  #ch01 .smp-text .tok { margin-right: 2px; }
+  #ch01 .smp-text .tok.gen { background: #e7f1fc; border-color: #9cc3ea; }
+  #ch01 .smp-bars { margin: 12px 0 6px; }
+  #ch01 .smp-row { display: grid; grid-template-columns: 150px 1fr 70px; gap: 10px; align-items: center; padding: 3px 6px; border-radius: 6px; cursor: pointer; }
+  #ch01 .smp-row:hover { background: var(--panel); }
+  #ch01 .smp-row.other { cursor: default; color: var(--muted); }
+  #ch01 .smp-row.other:hover { background: none; }
+  #ch01 .smp-lab { font-family: var(--mono); font-size: 14px; text-align: right; white-space: pre; overflow: hidden; text-overflow: ellipsis; }
+  #ch01 .smp-track { height: 16px; background: var(--panel); border-radius: 4px; overflow: hidden; }
+  #ch01 .smp-fill { height: 100%; background: var(--token); border-radius: 4px; transition: width .35s ease; }
+  #ch01 .smp-row.other .smp-fill { background: #c9ccd4; }
+  #ch01 .smp-row.picked .smp-fill { background: var(--hot); }
+  #ch01 .smp-pct { font-family: var(--mono); font-size: 13.5px; text-align: right; }
+  #ch01 .smp-note { font-size: 14px; color: var(--muted); min-height: 1.5em; margin-bottom: 10px; }
+  #ch01 .smp-btns { display: flex; flex-wrap: wrap; gap: 8px; }
+  @media (max-width: 640px) { #ch01 .smp-row { grid-template-columns: 96px 1fr 58px; } }
+
+  /* vocabulary table */
+  #ch01 table.vocab td:first-child { white-space: nowrap; font-weight: 700; }
+  #ch01 table.vocab td:last-child { white-space: nowrap; }
+</style>
+</head>
+<body data-chapter="01">
+<div class="layout">
+<nav id="sidebar"></nav>
+<main class="article" id="ch01">
+
+<header class="chapter-head">
+  <div class="kicker">Part I · Chapter 1</div>
+  <h1>The Big Picture: what an LLM actually is</h1>
+  <p class="lede">A large language model is one function, called in a loop, whose behavior lives in 16&#160;GB of learned numbers. This chapter gives you a precise mental model of that function, the loop, those numbers, and the map of everything that the rest of the blog fills in.</p>
+</header>
+
+<div class="tldr">
+  <div class="tldr-title">In this chapter</div>
+  <ul>
+    <li>An LLM maps a sequence of tokens to a probability for every possible next token. Nothing more.</li>
+    <li>Text comes out of a loop: predict, sample, append, repeat, stop. You will watch Llama&#160;3.1&#160;8B do it with its real probabilities.</li>
+    <li>A model is a few hundred lines of code plus billions of learned numbers. You will see the actual files, tensor names and sizes.</li>
+    <li>Training finds the numbers once, at enormous cost. Inference uses them, read-only, for every request.</li>
+    <li>The pipeline map: every stage from text to text, each linked to the chapter that explains it.</li>
+    <li>Why "just predicting the next token" produces real capability, and where that argument stops.</li>
+  </ul>
+</div>
+
+<section>
+<h2>One function: tokens in, probabilities out</h2>
+
+<p>Remove the chat window, the API and the GPU cluster, and an LLM is one mathematical function. You give it a sequence of tokens. It gives back a probability for every token that could come next. Everything else in this blog is about how that function is computed, how its numbers were found, or how to call it quickly and cheaply.</p>
+
+<p>A <strong>token</strong> is a short piece of text, usually a word or part of a word, identified by an integer ID (<a href="03-tokens.html">Chapter 3</a> shows how text is split). The set of all tokens a model knows is its <strong>vocabulary</strong>. Llama&#160;3 has 128,256 of them. Our running sentence, <code>"The cat sat on the"</code>, is five tokens: <span class="tok">The</span> <span class="tok">&#9251;cat</span> <span class="tok">&#9251;sat</span> <span class="tok">&#9251;on</span> <span class="tok">&#9251;the</span>, with IDs 791, 8415, 7731, 389 and 279. (The <span class="tok">&#9251;</span> marks a leading space, which belongs to the token.)</p>
+
+<div class="formula">
+  <var>f</var>(<var>x</var><sub>1</sub>, &#8230;, <var>x</var><sub><var>n</var></sub>) = <var>p</var> &#8712; &#8477;<sup><var>V</var></sup>, &#160; <var>p</var><sub><var>i</var></sub> = P(<var>x</var><sub><var>n</var>+1</sub> = <var>i</var> &#8739; <var>x</var><sub>1</sub>, &#8230;, <var>x</var><sub><var>n</var></sub>), &#160; &#8721;<sub><var>i</var></sub> <var>p</var><sub><var>i</var></sub> = 1
+  <span class="where">where <var>x</var><sub>1</sub>&#8230;<var>x</var><sub><var>n</var></sub> are the token IDs of the input (the <em>context</em>), <var>n</var> is how many there are, <var>V</var> is the vocabulary size (128,256), and <var>p</var><sub><var>i</var></sub> is the probability that the next token is token <var>i</var>. Every <var>p</var><sub><var>i</var></sub> is between 0 and 1 and together they sum to 1.</span>
+</div>
+
+<p>Here is that function evaluated for real. I ran the published Llama&#160;3.1&#160;8B base weights on the five tokens above, using my own NumPy code (numbers rounded). One evaluation of <var>f</var> like this is called a <em>forward pass</em>.</p>
+
+<figure>
+<svg viewBox="0 0 800 300" role="img" aria-label="Five input tokens enter the function Llama 3.1 8B, which outputs probabilities: mat 75.5 percent, matt 0.9, hat 0.8, dog 0.8, window 0.7, all other tokens 21.2 percent.">
+  <defs>
+    <marker id="ch01-ar1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#1d2433"/></marker>
+  </defs>
+  <text x="20" y="34" font-size="15" font-weight="700" fill="#687084">input: token IDs</text>
+  <g font-size="16">
+    <rect x="20" y="52" width="86" height="30" rx="6" fill="#fbefc5" stroke="#e5b62b"/><text x="63" y="72" text-anchor="middle" class="mono" fill="#1d2433">The</text><text x="118" y="72" class="mono" font-size="15" fill="#687084">791</text>
+    <rect x="20" y="92" width="86" height="30" rx="6" fill="#fbefc5" stroke="#e5b62b"/><text x="63" y="112" text-anchor="middle" class="mono" fill="#1d2433">&#9251;cat</text><text x="118" y="112" class="mono" font-size="15" fill="#687084">8415</text>
+    <rect x="20" y="132" width="86" height="30" rx="6" fill="#fbefc5" stroke="#e5b62b"/><text x="63" y="152" text-anchor="middle" class="mono" fill="#1d2433">&#9251;sat</text><text x="118" y="152" class="mono" font-size="15" fill="#687084">7731</text>
+    <rect x="20" y="172" width="86" height="30" rx="6" fill="#fbefc5" stroke="#e5b62b"/><text x="63" y="192" text-anchor="middle" class="mono" fill="#1d2433">&#9251;on</text><text x="118" y="192" class="mono" font-size="15" fill="#687084">389</text>
+    <rect x="20" y="212" width="86" height="30" rx="6" fill="#fbefc5" stroke="#e5b62b"/><text x="63" y="232" text-anchor="middle" class="mono" fill="#1d2433">&#9251;the</text><text x="118" y="232" class="mono" font-size="15" fill="#687084">279</text>
+  </g>
+  <path d="M172 147 H232" stroke="#1d2433" stroke-width="2" marker-end="url(#ch01-ar1)"/>
+  <rect x="240" y="62" width="200" height="170" rx="12" fill="#eef0f5" stroke="#5a6b8c" stroke-width="2"/>
+  <text x="340" y="112" text-anchor="middle" font-size="34" font-style="italic" font-family="Georgia, serif" fill="#1d2433">f</text>
+  <text x="340" y="146" text-anchor="middle" font-size="17" font-weight="700" fill="#1d2433">Llama 3.1 8B</text>
+  <text x="340" y="172" text-anchor="middle" font-size="15" fill="#5a6b8c">8,030,261,248 learned</text>
+  <text x="340" y="191" text-anchor="middle" font-size="15" fill="#5a6b8c">numbers (parameters)</text>
+  <text x="340" y="216" text-anchor="middle" font-size="14" fill="#687084">deterministic</text>
+  <path d="M448 147 H500" stroke="#1d2433" stroke-width="2" marker-end="url(#ch01-ar1)"/>
+  <text x="510" y="34" font-size="15" font-weight="700" fill="#687084">output: P(next token)</text>
+  <g font-size="15">
+    <text x="586" y="72" text-anchor="end" class="mono" fill="#1d2433">&#9251;mat</text>
+    <rect x="596" y="58" width="128" height="18" rx="3" fill="#e5b62b"/><text x="730" y="72" class="mono" fill="#1d2433">75.5%</text>
+    <text x="586" y="102" text-anchor="end" class="mono" fill="#1d2433">&#9251;matt</text>
+    <rect x="596" y="88" width="2" height="18" fill="#e5b62b"/><text x="606" y="102" class="mono" fill="#1d2433">0.9%</text>
+    <text x="586" y="132" text-anchor="end" class="mono" fill="#1d2433">&#9251;hat</text>
+    <rect x="596" y="118" width="2" height="18" fill="#e5b62b"/><text x="606" y="132" class="mono" fill="#1d2433">0.8%</text>
+    <text x="586" y="162" text-anchor="end" class="mono" fill="#1d2433">&#9251;dog</text>
+    <rect x="596" y="148" width="2" height="18" fill="#e5b62b"/><text x="606" y="162" class="mono" fill="#1d2433">0.8%</text>
+    <text x="586" y="192" text-anchor="end" class="mono" fill="#1d2433">&#9251;window</text>
+    <rect x="596" y="178" width="2" height="18" fill="#e5b62b"/><text x="606" y="192" class="mono" fill="#1d2433">0.7%</text>
+    <text x="586" y="222" text-anchor="end" fill="#687084">128,251 others</text>
+    <rect x="596" y="208" width="36" height="18" rx="3" fill="#c9ccd4"/><text x="640" y="222" class="mono" fill="#687084">21.2%</text>
+  </g>
+  <text x="510" y="262" font-size="15" fill="#1d2433">one probability per vocabulary entry:</text>
+  <text x="510" y="282" font-size="15" fill="#1d2433">128,256 numbers that sum to 1</text>
+  <text x="20" y="282" font-size="15" fill="#687084">n = 5 tokens (plus a begin-of-text marker, Ch. 3)</text>
+</svg>
+<figcaption><span class="fig-label">Figure 1.1</span> — The whole interface of an LLM. Real output of Llama&#160;3.1&#160;8B (base) for the running sentence, computed from the published BF16 weights. Most of the probability goes to <span class="tok">&#9251;mat</span>; the rest is spread thinly over a very long tail.</figcaption>
+</figure>
+
+<p>Three properties of this function shape everything that follows.</p>
+<ul>
+  <li><strong>It outputs a distribution, not text.</strong> Turning probabilities into words is a separate, tiny piece of code (next section).</li>
+  <li><strong>It is deterministic.</strong> Same tokens and same weights give the same probabilities (up to floating-point rounding effects that <a href="14-sampling.html">Chapter 14</a> explains). Randomness enters only when a token is chosen.</li>
+  <li><strong>It is stateless.</strong> The function sees only the tokens you pass in. It has no memory of earlier calls. A chat "remembers" because the client sends the whole conversation every time. The maximum number of tokens it can accept is the <strong>context window</strong>: 131,072 for Llama&#160;3.1.</li>
+</ul>
+
+<aside class="callout deep"><div class="callout-title">Low-level view</div>
+<p>The raw output is a vector of 128,256 scores called <em>logits</em>, one per token, which a function called softmax turns into probabilities (<a href="04-neural-net-toolkit.html">Chapter 4</a>). In FP32 that vector is 128,256 &#215; 4&#160;B = 513,024 bytes per position. Computing it for one token costs about 2&#160;&#215;&#160;8.03&#160;billion &#8776; 16&#160;GFLOP, two floating-point operations (a multiply and an add) per parameter (<a href="06-transformer.html">Chapter 6</a> derives this).</p>
+</aside>
+
+</section>
+
+<section>
+<h2>The generation loop</h2>
+
+<p>A function that predicts one token cannot write a paragraph. A loop can. Every LLM product, from autocomplete to a coding agent, runs this loop:</p>
+<ol>
+  <li><strong>Predict.</strong> Run <var>f</var> on the current context to get the distribution over the next token.</li>
+  <li><strong>Sample.</strong> Choose one token from that distribution. Always taking the most likely token is <em>greedy decoding</em>. Drawing at random in proportion to the probabilities is <em>sampling</em>. Settings such as temperature reshape the distribution before the draw (<a href="14-sampling.html">Chapter 14</a>).</li>
+  <li><strong>Append.</strong> Add the chosen token to the end of the context.</li>
+  <li><strong>Repeat</strong> from step 1 with the longer context.</li>
+  <li><strong>Stop</strong> when the model emits a special end-of-text token, when a length limit (<code>max_tokens</code>) is reached, or when a chosen stop string appears.</li>
+</ol>
+<p>This is <strong>autoregressive</strong> generation: each output becomes part of the next input. The model never plans a sentence and then writes it. It only ever chooses the next token, and the loop strings those choices together.</p>
+
+<figure>
+<svg viewBox="0 20 800 265" role="img" aria-label="The autoregressive loop: predict, sample, append, check whether to stop; if not, predict again. A token moves around the loop.">
+  <defs>
+    <marker id="ch01-ar5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#1d2433"/></marker>
+  </defs>
+  <path d="M320 75 H514" stroke="#1d2433" stroke-width="2" marker-end="url(#ch01-ar5)"/>
+  <path d="M620 110 V159" stroke="#1d2433" stroke-width="2" marker-end="url(#ch01-ar5)"/>
+  <path d="M520 200 H326" stroke="#1d2433" stroke-width="2" marker-end="url(#ch01-ar5)"/>
+  <path d="M220 160 V116" stroke="#1d2433" stroke-width="2" marker-end="url(#ch01-ar5)"/>
+  <path d="M120 200 H58" stroke="#1d2433" stroke-width="2" marker-end="url(#ch01-ar5)"/>
+  <circle r="8" fill="#e5b62b" stroke="#9a7410" stroke-width="1.5">
+    <animateMotion dur="6s" repeatCount="indefinite" path="M220 75 H620 V200 H220 Z"/>
+  </circle>
+  <rect x="120" y="40" width="200" height="70" rx="12" fill="#eceef3" stroke="#5a6b8c" stroke-width="1.5"/>
+  <text x="220" y="69" text-anchor="middle" font-size="17" font-weight="700" fill="#1d2433">1 &#183; Predict</text>
+  <text x="220" y="93" text-anchor="middle" font-size="15" fill="#1d2433">run f on the context</text>
+  <rect x="520" y="40" width="200" height="70" rx="12" fill="#ffffff" stroke="#1d2433" stroke-width="1.5"/>
+  <text x="620" y="69" text-anchor="middle" font-size="17" font-weight="700" fill="#1d2433">2 &#183; Sample</text>
+  <text x="620" y="93" text-anchor="middle" font-size="15" fill="#1d2433">choose one token</text>
+  <rect x="520" y="165" width="200" height="70" rx="12" fill="#fcf6e3" stroke="#e5b62b" stroke-width="1.5"/>
+  <text x="620" y="194" text-anchor="middle" font-size="17" font-weight="700" fill="#1d2433">3 &#183; Append</text>
+  <text x="620" y="218" text-anchor="middle" font-size="15" fill="#1d2433">add it to the context</text>
+  <path d="M220 160 L320 200 L220 240 L120 200 Z" fill="#ffffff" stroke="#1d2433" stroke-width="1.5"/>
+  <text x="220" y="206" text-anchor="middle" font-size="17" font-weight="700" fill="#1d2433">4 &#183; Stop?</text>
+  <g font-size="15" fill="#687084">
+    <text x="420" y="60" text-anchor="middle">128,256 probabilities</text>
+    <text x="632" y="142">1 token ID</text>
+    <text x="420" y="186" text-anchor="middle">context grows by 1</text>
+    <text x="232" y="143">no</text>
+    <text x="90" y="190" text-anchor="middle">yes</text>
+    <text x="10" y="205" fill="#1d2433">done</text>
+    <text x="220" y="268" text-anchor="middle">end-of-text token? max_tokens? stop string?</text>
+  </g>
+</svg>
+<figcaption><span class="fig-label">Figure 1.2</span> — The autoregressive loop. The gold dot is one token's trip: it is predicted, chosen, appended, and becomes part of the input for the next prediction.</figcaption>
+</figure>
+
+<p>In code, the whole loop is a few lines. Real engines avoid recomputing the old tokens on every iteration (the KV cache, <a href="12-kv-cache.html">Chapter 12</a>), but the logic is exactly this:</p>
+
+<pre><code><span class="k">def</span> <span class="f">generate</span>(model, ids, max_tokens):
+    <span class="k">for</span> _ <span class="k">in</span> <span class="f">range</span>(max_tokens):
+        probs = <span class="f">model</span>(ids)              <span class="c"># f: 128,256 probabilities for the next token</span>
+        next_id = <span class="f">sample</span>(probs)         <span class="c"># greedy, or a weighted random draw (Ch. 14)</span>
+        <span class="k">if</span> next_id <span class="k">in</span> END_TOKENS:        <span class="c"># e.g. &lt;|eot_id|&gt; = 128009 for chat-tuned Llama 3.1</span>
+            <span class="k">break</span>
+        ids.<span class="f">append</span>(next_id)            <span class="c"># the output becomes input</span>
+        <span class="k">yield</span> next_id                   <span class="c"># stream it to the user</span></code></pre>
+
+<p>Here is the loop running on Llama&#160;3.1&#160;8B for eight steps, with the model's real probabilities at each step. At step 2 the sampler picks <span class="tok">.</span> even though it had only 12%. A random draw does that, and it is why the same prompt can give different answers even though <var>f</var> itself is deterministic.</p>
+
+<figure class="stepper fig-ar" data-steps="8" data-interval="3000">
+<svg viewBox="0 0 900 350" role="img" aria-label="Eight steps of generation by Llama 3.1 8B starting from The cat sat on the. At each step the top five next-token probabilities are shown and the picked token is appended to the context.">
+  <defs>
+    <marker id="ch01-ar6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#1d2433"/></marker>
+  </defs>
+  <text x="20" y="26" font-size="15" font-weight="700" fill="#687084">context (red outline = token appended at this step)</text>
+  <text x="452" y="104" font-size="15" font-weight="700" fill="#687084">P(next token): top 5 of 128,256</text>
+  <path d="M125 80 V108" stroke="#1d2433" stroke-width="2" marker-end="url(#ch01-ar6)"/>
+  <rect x="20" y="114" width="210" height="130" rx="12" fill="#eceef3" stroke="#5a6b8c" stroke-width="1.5"/>
+  <text x="125" y="162" text-anchor="middle" font-size="17" font-weight="700" fill="#1d2433">Llama 3.1 8B</text>
+  <text x="125" y="188" text-anchor="middle" font-size="15" fill="#1d2433">one forward pass</text>
+  <path d="M236 180 H288" stroke="#1d2433" stroke-width="2" marker-end="url(#ch01-ar6)"/>
+  <rect x="20.0" y="40" width="44.2" height="30" rx="6" fill="#fbefc5" stroke="#e5b62b"/><text x="42.1" y="60" text-anchor="middle" class="mono" font-size="15" fill="#1d2433">The</text>
+  <rect x="70.2" y="40" width="53.6" height="30" rx="6" fill="#fbefc5" stroke="#e5b62b"/><text x="97.0" y="60" text-anchor="middle" class="mono" font-size="15" fill="#1d2433">&#9251;cat</text>
+  <rect x="129.8" y="40" width="53.6" height="30" rx="6" fill="#fbefc5" stroke="#e5b62b"/><text x="156.6" y="60" text-anchor="middle" class="mono" font-size="15" fill="#1d2433">&#9251;sat</text>
+  <rect x="189.4" y="40" width="44.2" height="30" rx="6" fill="#fbefc5" stroke="#e5b62b"/><text x="211.5" y="60" text-anchor="middle" class="mono" font-size="15" fill="#1d2433">&#9251;on</text>
+  <rect x="239.6" y="40" width="53.6" height="30" rx="6" fill="#fbefc5" stroke="#e5b62b"/><text x="266.4" y="60" text-anchor="middle" class="mono" font-size="15" fill="#1d2433">&#9251;the</text>
+  <g data-step="1"><rect x="299.2" y="40" width="53.6" height="30" rx="6" fill="#e7f1fc" stroke="#9cc3ea"/><text x="326.0" y="60" text-anchor="middle" class="mono" font-size="15" fill="#1d2433">&#9251;mat</text></g>
+  <rect data-step-only="1" x="295.2" y="36" width="61.6" height="38" rx="8" fill="none" stroke="#d64545" stroke-width="2.5"/>
+  <g data-step="2"><rect x="358.8" y="40" width="25.4" height="30" rx="6" fill="#e7f1fc" stroke="#9cc3ea"/><text x="371.5" y="60" text-anchor="middle" class="mono" font-size="15" fill="#1d2433">.</text></g>
+  <rect data-step-only="2" x="354.8" y="36" width="33.4" height="38" rx="8" fill="none" stroke="#d64545" stroke-width="2.5"/>
+  <g data-step="3"><rect x="390.2" y="40" width="53.6" height="30" rx="6" fill="#e7f1fc" stroke="#9cc3ea"/><text x="417.0" y="60" text-anchor="middle" class="mono" font-size="15" fill="#1d2433">&#9251;The</text></g>
+  <rect data-step-only="3" x="386.2" y="36" width="61.6" height="38" rx="8" fill="none" stroke="#d64545" stroke-width="2.5"/>
+  <g data-step="4"><rect x="449.8" y="40" width="53.6" height="30" rx="6" fill="#e7f1fc" stroke="#9cc3ea"/><text x="476.6" y="60" text-anchor="middle" class="mono" font-size="15" fill="#1d2433">&#9251;dog</text></g>
+  <rect data-step-only="4" x="445.8" y="36" width="61.6" height="38" rx="8" fill="none" stroke="#d64545" stroke-width="2.5"/>
+  <g data-step="5"><rect x="509.4" y="40" width="53.6" height="30" rx="6" fill="#e7f1fc" stroke="#9cc3ea"/><text x="536.2" y="60" text-anchor="middle" class="mono" font-size="15" fill="#1d2433">&#9251;sat</text></g>
+  <rect data-step-only="5" x="505.4" y="36" width="61.6" height="38" rx="8" fill="none" stroke="#d64545" stroke-width="2.5"/>
+  <g data-step="6"><rect x="569.0" y="40" width="44.2" height="30" rx="6" fill="#e7f1fc" stroke="#9cc3ea"/><text x="591.1" y="60" text-anchor="middle" class="mono" font-size="15" fill="#1d2433">&#9251;on</text></g>
+  <rect data-step-only="6" x="565.0" y="36" width="52.2" height="38" rx="8" fill="none" stroke="#d64545" stroke-width="2.5"/>
+  <g data-step="7"><rect x="619.2" y="40" width="53.6" height="30" rx="6" fill="#e7f1fc" stroke="#9cc3ea"/><text x="646.0" y="60" text-anchor="middle" class="mono" font-size="15" fill="#1d2433">&#9251;the</text></g>
+  <rect data-step-only="7" x="615.2" y="36" width="61.6" height="38" rx="8" fill="none" stroke="#d64545" stroke-width="2.5"/>
+  <g data-step="8"><rect x="678.8" y="40" width="53.6" height="30" rx="6" fill="#e7f1fc" stroke="#9cc3ea"/><text x="705.6" y="60" text-anchor="middle" class="mono" font-size="15" fill="#1d2433">&#9251;log</text></g>
+  <rect data-step-only="8" x="674.8" y="36" width="61.6" height="38" rx="8" fill="none" stroke="#d64545" stroke-width="2.5"/>
+  <g data-step-only="1"><text x="300" y="136" font-size="15" font-weight="700" fill="#d64545">picked &#9656;</text>
+    <text x="440" y="136" text-anchor="end" class="mono" font-size="15" fill="#1d2433">&#9251;mat</text>
+    <rect x="452" y="119" width="256.8" height="24" rx="3" fill="#d64545"/>
+    <text x="716.8" y="136" font-size="15" class="mono" fill="#d64545" font-weight="700">75.5%</text>
+    <text x="440" y="174" text-anchor="end" class="mono" font-size="15" fill="#1d2433">&#9251;matt</text>
+    <rect x="452" y="157" width="3.1" height="24" rx="3" fill="#e5b62b"/>
+    <text x="463.1" y="174" font-size="15" class="mono" fill="#1d2433">0.9%</text>
+    <text x="440" y="212" text-anchor="end" class="mono" font-size="15" fill="#1d2433">&#9251;hat</text>
+    <rect x="452" y="195" width="2.8" height="24" rx="3" fill="#e5b62b"/>
+    <text x="462.8" y="212" font-size="15" class="mono" fill="#1d2433">0.8%</text>
+    <text x="440" y="250" text-anchor="end" class="mono" font-size="15" fill="#1d2433">&#9251;dog</text>
+    <rect x="452" y="233" width="2.7" height="24" rx="3" fill="#e5b62b"/>
+    <text x="462.7" y="250" font-size="15" class="mono" fill="#1d2433">0.8%</text>
+    <text x="440" y="288" text-anchor="end" class="mono" font-size="15" fill="#1d2433">&#9251;window</text>
+    <rect x="452" y="271" width="2.5" height="24" rx="3" fill="#e5b62b"/>
+    <text x="462.5" y="288" font-size="15" class="mono" fill="#1d2433">0.7%</text>
+    <text x="440" y="326" text-anchor="end" font-size="15" fill="#687084">all others</text>
+    <rect x="452" y="309" width="72.2" height="24" rx="3" fill="#c9ccd4"/>
+    <text x="532.2" y="326" font-size="15" class="mono" fill="#687084">21.2%</text></g>
+  <text data-step-only="1" x="125" y="216" text-anchor="middle" font-size="15" fill="#687084">pass 1: 5 tokens in</text>
+  <g data-step-only="2"><text x="440" y="136" text-anchor="end" class="mono" font-size="15" fill="#1d2433">&#9251;is</text>
+    <rect x="452" y="119" width="97.6" height="24" rx="3" fill="#e5b62b"/>
+    <text x="557.6" y="136" font-size="15" class="mono" fill="#1d2433">28.7%</text>
+    <text x="440" y="174" text-anchor="end" class="mono" font-size="15" fill="#1d2433">.&#8629;</text>
+    <rect x="452" y="157" width="60.0" height="24" rx="3" fill="#e5b62b"/>
+    <text x="520.0" y="174" font-size="15" class="mono" fill="#1d2433">17.7%</text>
+    <text x="300" y="212" font-size="15" font-weight="700" fill="#d64545">picked &#9656;</text>
+    <text x="440" y="212" text-anchor="end" class="mono" font-size="15" fill="#1d2433">.</text>
+    <rect x="452" y="195" width="40.8" height="24" rx="3" fill="#d64545"/>
+    <text x="500.8" y="212" font-size="15" class="mono" fill="#d64545" font-weight="700">12.0%</text>
+    <text x="440" y="250" text-anchor="end" class="mono" font-size="15" fill="#1d2433">&#8629;</text>
+    <rect x="452" y="233" width="31.4" height="24" rx="3" fill="#e5b62b"/>
+    <text x="491.4" y="250" font-size="15" class="mono" fill="#1d2433">9.2%</text>
+    <text x="440" y="288" text-anchor="end" class="mono" font-size="15" fill="#1d2433">,</text>
+    <rect x="452" y="271" width="26.1" height="24" rx="3" fill="#e5b62b"/>
+    <text x="486.1" y="288" font-size="15" class="mono" fill="#1d2433">7.7%</text>
+    <text x="440" y="326" text-anchor="end" font-size="15" fill="#687084">all others</text>
+    <rect x="452" y="309" width="84.1" height="24" rx="3" fill="#c9ccd4"/>
+    <text x="544.1" y="326" font-size="15" class="mono" fill="#687084">24.7%</text></g>
+  <text data-step-only="2" x="125" y="216" text-anchor="middle" font-size="15" fill="#687084">pass 2: 6 tokens in</text>
+  <g data-step-only="3"><text x="300" y="136" font-size="15" font-weight="700" fill="#d64545">picked &#9656;</text>
+    <text x="440" y="136" text-anchor="end" class="mono" font-size="15" fill="#1d2433">&#9251;The</text>
+    <rect x="452" y="119" width="132.2" height="24" rx="3" fill="#d64545"/>
+    <text x="592.2" y="136" font-size="15" class="mono" fill="#d64545" font-weight="700">38.9%</text>
+    <text x="440" y="174" text-anchor="end" class="mono" font-size="15" fill="#1d2433">&#9251;It</text>
+    <rect x="452" y="157" width="16.8" height="24" rx="3" fill="#e5b62b"/>
+    <text x="476.8" y="174" font-size="15" class="mono" fill="#1d2433">4.9%</text>
+    <text x="440" y="212" text-anchor="end" class="mono" font-size="15" fill="#1d2433">&#9251;That</text>
+    <rect x="452" y="195" width="9.5" height="24" rx="3" fill="#e5b62b"/>
+    <text x="469.5" y="212" font-size="15" class="mono" fill="#1d2433">2.8%</text>
+    <text x="440" y="250" text-anchor="end" class="mono" font-size="15" fill="#1d2433">&#9251;This</text>
+    <rect x="452" y="233" width="9.3" height="24" rx="3" fill="#e5b62b"/>
+    <text x="469.3" y="250" font-size="15" class="mono" fill="#1d2433">2.7%</text>
+    <text x="440" y="288" text-anchor="end" class="mono" font-size="15" fill="#1d2433">&#9251;I</text>
+    <rect x="452" y="271" width="7.8" height="24" rx="3" fill="#e5b62b"/>
+    <text x="467.8" y="288" font-size="15" class="mono" fill="#1d2433">2.3%</text>
+    <text x="440" y="326" text-anchor="end" font-size="15" fill="#687084">all others</text>
+    <rect x="452" y="309" width="164.5" height="24" rx="3" fill="#c9ccd4"/>
+    <text x="624.5" y="326" font-size="15" class="mono" fill="#687084">48.4%</text></g>
+  <text data-step-only="3" x="125" y="216" text-anchor="middle" font-size="15" fill="#687084">pass 3: 7 tokens in</text>
+  <g data-step-only="4"><text x="300" y="136" font-size="15" font-weight="700" fill="#d64545">picked &#9656;</text>
+    <text x="440" y="136" text-anchor="end" class="mono" font-size="15" fill="#1d2433">&#9251;dog</text>
+    <rect x="452" y="119" width="127.1" height="24" rx="3" fill="#d64545"/>
+    <text x="587.1" y="136" font-size="15" class="mono" fill="#d64545" font-weight="700">37.4%</text>
+    <text x="440" y="174" text-anchor="end" class="mono" font-size="15" fill="#1d2433">&#9251;cat</text>
+    <rect x="452" y="157" width="55.5" height="24" rx="3" fill="#e5b62b"/>
+    <text x="515.5" y="174" font-size="15" class="mono" fill="#1d2433">16.3%</text>
+    <text x="440" y="212" text-anchor="end" class="mono" font-size="15" fill="#1d2433">&#9251;mat</text>
+    <rect x="452" y="195" width="37.8" height="24" rx="3" fill="#e5b62b"/>
+    <text x="497.8" y="212" font-size="15" class="mono" fill="#1d2433">11.1%</text>
+    <text x="440" y="250" text-anchor="end" class="mono" font-size="15" fill="#1d2433">&#9251;rat</text>
+    <rect x="452" y="233" width="17.9" height="24" rx="3" fill="#e5b62b"/>
+    <text x="477.9" y="250" font-size="15" class="mono" fill="#1d2433">5.3%</text>
+    <text x="440" y="288" text-anchor="end" class="mono" font-size="15" fill="#1d2433">&#9251;mouse</text>
+    <rect x="452" y="271" width="11.0" height="24" rx="3" fill="#e5b62b"/>
+    <text x="471.0" y="288" font-size="15" class="mono" fill="#1d2433">3.2%</text>
+    <text x="440" y="326" text-anchor="end" font-size="15" fill="#687084">all others</text>
+    <rect x="452" y="309" width="90.8" height="24" rx="3" fill="#c9ccd4"/>
+    <text x="550.8" y="326" font-size="15" class="mono" fill="#687084">26.7%</text></g>
+  <text data-step-only="4" x="125" y="216" text-anchor="middle" font-size="15" fill="#687084">pass 4: 8 tokens in</text>
+  <g data-step-only="5"><text x="300" y="136" font-size="15" font-weight="700" fill="#d64545">picked &#9656;</text>
+    <text x="440" y="136" text-anchor="end" class="mono" font-size="15" fill="#1d2433">&#9251;sat</text>
+    <rect x="452" y="119" width="172.9" height="24" rx="3" fill="#d64545"/>
+    <text x="632.9" y="136" font-size="15" class="mono" fill="#d64545" font-weight="700">50.8%</text>
+    <text x="440" y="174" text-anchor="end" class="mono" font-size="15" fill="#1d2433">&#9251;ate</text>
+    <rect x="452" y="157" width="55.0" height="24" rx="3" fill="#e5b62b"/>
+    <text x="515.0" y="174" font-size="15" class="mono" fill="#1d2433">16.2%</text>
+    <text x="440" y="212" text-anchor="end" class="mono" font-size="15" fill="#1d2433">&#9251;lay</text>
+    <rect x="452" y="195" width="30.9" height="24" rx="3" fill="#e5b62b"/>
+    <text x="490.9" y="212" font-size="15" class="mono" fill="#1d2433">9.1%</text>
+    <text x="440" y="250" text-anchor="end" class="mono" font-size="15" fill="#1d2433">&#9251;ran</text>
+    <rect x="452" y="233" width="8.4" height="24" rx="3" fill="#e5b62b"/>
+    <text x="468.4" y="250" font-size="15" class="mono" fill="#1d2433">2.5%</text>
+    <text x="440" y="288" text-anchor="end" class="mono" font-size="15" fill="#1d2433">&#9251;chased</text>
+    <rect x="452" y="271" width="7.4" height="24" rx="3" fill="#e5b62b"/>
+    <text x="467.4" y="288" font-size="15" class="mono" fill="#1d2433">2.2%</text>
+    <text x="440" y="326" text-anchor="end" font-size="15" fill="#687084">all others</text>
+    <rect x="452" y="309" width="65.5" height="24" rx="3" fill="#c9ccd4"/>
+    <text x="525.5" y="326" font-size="15" class="mono" fill="#687084">19.3%</text></g>
+  <text data-step-only="5" x="125" y="216" text-anchor="middle" font-size="15" fill="#687084">pass 5: 9 tokens in</text>
+  <g data-step-only="6"><text x="300" y="136" font-size="15" font-weight="700" fill="#d64545">picked &#9656;</text>
+    <text x="440" y="136" text-anchor="end" class="mono" font-size="15" fill="#1d2433">&#9251;on</text>
+    <rect x="452" y="119" width="318.6" height="24" rx="3" fill="#d64545"/>
+    <text x="778.6" y="136" font-size="15" class="mono" fill="#d64545" font-weight="700">93.7%</text>
+    <text x="440" y="174" text-anchor="end" class="mono" font-size="15" fill="#1d2433">&#9251;under</text>
+    <rect x="452" y="157" width="7.0" height="24" rx="3" fill="#e5b62b"/>
+    <text x="467.0" y="174" font-size="15" class="mono" fill="#1d2433">2.1%</text>
+    <text x="440" y="212" text-anchor="end" class="mono" font-size="15" fill="#1d2433">&#9251;by</text>
+    <rect x="452" y="195" width="5.9" height="24" rx="3" fill="#e5b62b"/>
+    <text x="465.9" y="212" font-size="15" class="mono" fill="#1d2433">1.7%</text>
+    <text x="440" y="250" text-anchor="end" class="mono" font-size="15" fill="#1d2433">&#9251;at</text>
+    <rect x="452" y="233" width="2.5" height="24" rx="3" fill="#e5b62b"/>
+    <text x="462.5" y="250" font-size="15" class="mono" fill="#1d2433">0.7%</text>
+    <text x="440" y="288" text-anchor="end" class="mono" font-size="15" fill="#1d2433">&#9251;in</text>
+    <rect x="452" y="271" width="2.2" height="24" rx="3" fill="#e5b62b"/>
+    <text x="462.2" y="288" font-size="15" class="mono" fill="#1d2433">0.7%</text>
+    <text x="440" y="326" text-anchor="end" font-size="15" fill="#687084">all others</text>
+    <rect x="452" y="309" width="3.8" height="24" rx="3" fill="#c9ccd4"/>
+    <text x="463.8" y="326" font-size="15" class="mono" fill="#687084">1.1%</text></g>
+  <text data-step-only="6" x="125" y="216" text-anchor="middle" font-size="15" fill="#687084">pass 6: 10 tokens in</text>
+  <g data-step-only="7"><text x="300" y="136" font-size="15" font-weight="700" fill="#d64545">picked &#9656;</text>
+    <text x="440" y="136" text-anchor="end" class="mono" font-size="15" fill="#1d2433">&#9251;the</text>
+    <rect x="452" y="119" width="337.3" height="24" rx="3" fill="#d64545"/>
+    <text x="797.3" y="136" font-size="15" class="mono" fill="#d64545" font-weight="700">99.2%</text>
+    <text x="440" y="174" text-anchor="end" class="mono" font-size="15" fill="#1d2433">&#9251;a</text>
+    <rect x="452" y="157" width="2.0" height="24" rx="3" fill="#e5b62b"/>
+    <text x="462.0" y="174" font-size="15" class="mono" fill="#1d2433">0.2%</text>
+    <text x="440" y="212" text-anchor="end" class="mono" font-size="15" fill="#1d2433">&#9251;that</text>
+    <rect x="452" y="195" width="2.0" height="24" rx="3" fill="#e5b62b"/>
+    <text x="462.0" y="212" font-size="15" class="mono" fill="#1d2433">0.1%</text>
+    <text x="440" y="250" text-anchor="end" class="mono" font-size="15" fill="#1d2433">&#9251;his</text>
+    <rect x="452" y="233" width="2.0" height="24" rx="3" fill="#e5b62b"/>
+    <text x="462.0" y="250" font-size="15" class="mono" fill="#1d2433">0.1%</text>
+    <text x="440" y="288" text-anchor="end" class="mono" font-size="15" fill="#1d2433">&#9251;it</text>
+    <rect x="452" y="271" width="2.0" height="24" rx="3" fill="#e5b62b"/>
+    <text x="462.0" y="288" font-size="15" class="mono" fill="#1d2433">0.03%</text>
+    <text x="440" y="326" text-anchor="end" font-size="15" fill="#687084">all others</text>
+    <rect x="452" y="309" width="2.0" height="24" rx="3" fill="#c9ccd4"/>
+    <text x="462.0" y="326" font-size="15" class="mono" fill="#687084">0.4%</text></g>
+  <text data-step-only="7" x="125" y="216" text-anchor="middle" font-size="15" fill="#687084">pass 7: 11 tokens in</text>
+  <g data-step-only="8"><text x="300" y="136" font-size="15" font-weight="700" fill="#d64545">picked &#9656;</text>
+    <text x="440" y="136" text-anchor="end" class="mono" font-size="15" fill="#1d2433">&#9251;log</text>
+    <rect x="452" y="119" width="102.9" height="24" rx="3" fill="#d64545"/>
+    <text x="562.9" y="136" font-size="15" class="mono" fill="#d64545" font-weight="700">30.3%</text>
+    <text x="440" y="174" text-anchor="end" class="mono" font-size="15" fill="#1d2433">&#9251;rug</text>
+    <rect x="452" y="157" width="74.5" height="24" rx="3" fill="#e5b62b"/>
+    <text x="534.5" y="174" font-size="15" class="mono" fill="#1d2433">21.9%</text>
+    <text x="440" y="212" text-anchor="end" class="mono" font-size="15" fill="#1d2433">&#9251;cat</text>
+    <rect x="452" y="195" width="38.8" height="24" rx="3" fill="#e5b62b"/>
+    <text x="498.8" y="212" font-size="15" class="mono" fill="#1d2433">11.4%</text>
+    <text x="440" y="250" text-anchor="end" class="mono" font-size="15" fill="#1d2433">&#9251;mat</text>
+    <rect x="452" y="233" width="26.3" height="24" rx="3" fill="#e5b62b"/>
+    <text x="486.3" y="250" font-size="15" class="mono" fill="#1d2433">7.7%</text>
+    <text x="440" y="288" text-anchor="end" class="mono" font-size="15" fill="#1d2433">&#9251;rat</text>
+    <rect x="452" y="271" width="10.7" height="24" rx="3" fill="#e5b62b"/>
+    <text x="470.7" y="288" font-size="15" class="mono" fill="#1d2433">3.2%</text>
+    <text x="440" y="326" text-anchor="end" font-size="15" fill="#687084">all others</text>
+    <rect x="452" y="309" width="86.8" height="24" rx="3" fill="#c9ccd4"/>
+    <text x="546.8" y="326" font-size="15" class="mono" fill="#687084">25.5%</text></g>
+  <text data-step-only="8" x="125" y="216" text-anchor="middle" font-size="15" fill="#687084">pass 8: 12 tokens in</text>
+</svg>
+<div class="step-captions">
+  <p data-step-only="1"><b>Step 1.</b> The input is the 5 prompt tokens. One forward pass gives the distribution: <span class="tok">&#9251;mat</span> has 75.5%. It is picked and appended to the context.</p>
+  <p data-step-only="2"><b>Step 2.</b> Now 6 tokens go in, and the model is much less sure: <span class="tok">&#9251;is</span> 28.7% (as in "The cat sat on the mat is a classic sentence"), a period plus newline 17.7%, a plain period 12.0%. The random draw lands on the period, the third choice.</p>
+  <p data-step-only="3"><b>Step 3.</b> A new sentence starts. <span class="tok">&#9251;The</span> gets 38.9%; the other 61% is spread over thousands of other openings.</p>
+  <p data-step-only="4"><b>Step 4.</b> <span class="tok">&#9251;dog</span> 37.4%, <span class="tok">&#9251;cat</span> 16.3%, <span class="tok">&#9251;mat</span> 11.1%. The model starts to echo the shape of the first sentence.</p>
+  <p data-step-only="5"><b>Step 5.</b> <span class="tok">&#9251;sat</span> 50.8%. The pattern from the context gets stronger.</p>
+  <p data-step-only="6"><b>Step 6.</b> <span class="tok">&#9251;on</span> 93.7%. Some steps are nearly forced.</p>
+  <p data-step-only="7"><b>Step 7.</b> <span class="tok">&#9251;the</span> 99.2%. Here greedy and random sampling would almost always agree.</p>
+  <p data-step-only="8"><b>Step 8.</b> <span class="tok">&#9251;log</span> 30.3%, <span class="tok">&#9251;rug</span> 21.9%: rhymes with "mat". We set <code>max_tokens</code> = 8, so the loop stops with "The cat sat on the mat. The dog sat on the log".</p>
+</div>
+<figcaption><span class="fig-label">Figure 1.3</span> &#8212; The autoregressive loop with real numbers from Llama&#160;3.1&#160;8B (base, BF16 weights, my NumPy forward pass, rounded). Each step is one complete call of <var>f</var> on the whole context. Use the buttons or the arrow keys to step.</figcaption>
+</figure>
+
+<p>Two things to notice. The model's confidence swings from near-certain (99.2% for <span class="tok">&#9251;the</span>) to wide open (39% for the top choice after a period). And from step 4 on, it copies the pattern of its own context. Using the context like this, with no change to the weights, is called <em>in-context learning</em>.</p>
+
+<p>Now you be the sampler. The bars are the real top-4 next-token probabilities from Llama&#160;3.1&#160;8B for the text so far. Click a bar to append that token, or let the buttons choose.</p>
+
+<div class="widget" id="ch01-sampler">
+  <div class="widget-title">Try it: you are the sampler</div>
+  <div class="smp-text" id="ch01-smp-text" aria-live="polite"></div>
+  <div class="smp-bars" id="ch01-smp-bars"></div>
+  <div class="smp-note" id="ch01-smp-note"></div>
+  <div class="smp-btns">
+    <button type="button" class="primary" id="ch01-smp-sample">Sample (random draw)</button>
+    <button type="button" id="ch01-smp-greedy">Greedy (take the top)</button>
+    <button type="button" id="ch01-smp-back">Undo</button>
+    <button type="button" id="ch01-smp-reset">Reset</button>
+  </div>
+</div>
+<p class="small muted">Probabilities were precomputed for every path through the top-4 choices, five tokens deep (341 forward passes of the real model). "Sample" draws only among the four shown, in proportion to their probabilities, and ignores the gray remainder; <a href="14-sampling.html">Chapter 14</a> calls that top-<var>k</var> sampling. <span class="tok">&#8629;</span> is a newline token.</p>
+
+<aside class="callout deep"><div class="callout-title">Low-level view: the loop is serial</div>
+<p>Token <var>t</var>+1 cannot be computed before token <var>t</var> exists, so generation cannot be parallelized across the output. Each step is a pass through all 8 billion weights. On one H100 GPU, with 3.35&#160;TB/s of memory bandwidth, just reading 16.06&#160;GB of BF16 weights takes about 4.8&#160;ms. So a single sequence can get at most about 3.35&#215;10<sup>12</sup> &#247; 16.06&#215;10<sup>9</sup> &#8776; 209 tokens per second, no matter how fast the arithmetic is. (This is an approximate upper bound; <a href="11-inference.html">Chapter 11</a> refines it and compares it with measured speeds.) Most of inference engineering is about this bound: process the prompt in one parallel pass, cache what can be cached, batch many users so each weight read serves many tokens, and shrink the weights (<a href="11-inference.html">Ch. 11</a>, <a href="12-kv-cache.html">12</a>, <a href="13-quantization.html">13</a>, <a href="15-serving.html">15</a>).</p>
+</aside>
+</section>
+
+<section>
+<h2>Parameters: the numbers that were learned</h2>
+
+<p>What is inside <var>f</var>? Two things. First, a fixed recipe of operations, mostly matrix multiplications, written by people in a few hundred lines of code. Second, a very large set of numbers that the recipe multiplies by. These are the <strong>parameters</strong>, also called <strong>weights</strong>. Nobody chose them by hand. Training found them, as described two sections below.</p>
+
+<aside class="callout intuition"><div class="callout-title">Intuition</div>
+<p>Think of the architecture code as an interpreter and the weights as the program it runs. It is a 16&#160;GB program, written by an optimizer instead of a programmer, and nobody can read it line by line. Change the weights and the same code becomes a different model.</p>
+</aside>
+
+<p>The basic unit is a weighted sum: <var>y</var> = <var>w</var><sub>1</sub><var>x</var><sub>1</sub> + <var>w</var><sub>2</sub><var>x</var><sub>2</sub> + &#8230;, where the <var>x</var> values come from the input and the <var>w</var> values are parameters. Compute 4,096 such sums over the same 4,096 inputs and you have a matrix&#8211;vector product <var>y</var> = <var>W</var><var>x</var>, where <var>W</var> holds 4,096&#160;&#215;&#160;4,096 = 16,777,216 parameters. (<a href="04-neural-net-toolkit.html">Chapter 4</a> builds layers from this; <a href="02-numbers-and-hardware.html">Chapter 2</a> covers what a matrix multiply costs.) Llama&#160;3.1&#160;8B is 291 such tensors, matrices and vectors, holding 8,030,261,248 numbers in total.</p>
+
+<figure>
+<svg viewBox="0 0 800 330" role="img" aria-label="Zooming out from one weight in a weighted sum, to a heat map of real values from a 4096 by 4096 weight matrix, to the whole model of 291 tensors and 16.06 GB.">
+  <defs>
+    <marker id="ch01-ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#687084"/></marker>
+  </defs>
+  <text x="130" y="30" text-anchor="middle" font-size="16" font-weight="700" fill="#1d2433">one parameter</text>
+  <text x="408" y="30" text-anchor="middle" font-size="16" font-weight="700" fill="#1d2433">one weight matrix</text>
+  <text x="690" y="30" text-anchor="middle" font-size="16" font-weight="700" fill="#1d2433">one model</text>
+  <!-- panel A: weighted sum -->
+  <g font-size="15">
+    <line x1="52" y1="96" x2="188" y2="160" stroke="#5a6b8c" stroke-width="2.5"/>
+    <line x1="52" y1="160" x2="188" y2="160" stroke="#5a6b8c" stroke-width="2.5"/>
+    <line x1="52" y1="224" x2="188" y2="160" stroke="#5a6b8c" stroke-width="2.5"/>
+    <circle cx="40" cy="96" r="15" fill="#e6dff8" stroke="#7b5cd6" stroke-width="2"/><text x="40" y="101" text-anchor="middle" fill="#1d2433">x&#8321;</text>
+    <circle cx="40" cy="160" r="15" fill="#e6dff8" stroke="#7b5cd6" stroke-width="2"/><text x="40" y="165" text-anchor="middle" fill="#1d2433">x&#8322;</text>
+    <circle cx="40" cy="224" r="15" fill="#e6dff8" stroke="#7b5cd6" stroke-width="2"/><text x="40" y="229" text-anchor="middle" fill="#1d2433">x&#8323;</text>
+    <rect x="80" y="92" width="72" height="22" rx="4" fill="#ffffff" stroke="#5a6b8c"/><text x="116" y="108" text-anchor="middle" class="mono" font-size="14" fill="#5a6b8c">+0.0053</text>
+    <rect x="80" y="149" width="72" height="22" rx="4" fill="#ffffff" stroke="#5a6b8c"/><text x="116" y="165" text-anchor="middle" class="mono" font-size="14" fill="#5a6b8c">&#8722;0.0291</text>
+    <rect x="80" y="206" width="72" height="22" rx="4" fill="#ffffff" stroke="#5a6b8c"/><text x="116" y="222" text-anchor="middle" class="mono" font-size="14" fill="#5a6b8c">&#8722;0.0058</text>
+    <circle cx="204" cy="160" r="18" fill="#ffffff" stroke="#1d2433" stroke-width="2"/><text x="204" y="166" text-anchor="middle" font-size="18" fill="#1d2433">&#931;</text>
+    <text x="236" y="166" font-size="16" fill="#1d2433">y</text>
+    <text x="130" y="272" text-anchor="middle" fill="#1d2433">y = &#931; w&#7522; &#183; x&#7522;</text>
+    <text x="130" y="294" text-anchor="middle" fill="#687084">each w is one learned</text>
+    <text x="130" y="313" text-anchor="middle" fill="#687084">number (here: real values)</text>
+  </g>
+  <path d="M256 160 H288" stroke="#687084" stroke-width="2" marker-end="url(#ch01-ar2)"/>
+  <!-- panel B: heat map of real q_proj values -->
+  <g>
+<rect x="300" y="92" width="18" height="18" fill="#ecf2fc"/>
+<rect x="318" y="92" width="18" height="18" fill="#eba4a4"/>
+<rect x="336" y="92" width="18" height="18" fill="#fbecec"/>
+<rect x="354" y="92" width="18" height="18" fill="#f2c7c7"/>
+<rect x="372" y="92" width="18" height="18" fill="#fcf4f4"/>
+<rect x="390" y="92" width="18" height="18" fill="#a3bff0"/>
+<rect x="408" y="92" width="18" height="18" fill="#fefcfc"/>
+<rect x="426" y="92" width="18" height="18" fill="#fefafa"/>
+<rect x="444" y="92" width="18" height="18" fill="#edafaf"/>
+<rect x="462" y="92" width="18" height="18" fill="#d5e1f8"/>
+<rect x="480" y="92" width="18" height="18" fill="#f7dada"/>
+<rect x="498" y="92" width="18" height="18" fill="#fcfdfe"/>
+<rect x="300" y="110" width="18" height="18" fill="#f5d2d2"/>
+<rect x="318" y="110" width="18" height="18" fill="#d64545"/>
+<rect x="336" y="110" width="18" height="18" fill="#fbefef"/>
+<rect x="354" y="110" width="18" height="18" fill="#f8e0e0"/>
+<rect x="372" y="110" width="18" height="18" fill="#e2ebfa"/>
+<rect x="390" y="110" width="18" height="18" fill="#eef3fc"/>
+<rect x="408" y="110" width="18" height="18" fill="#fefdfd"/>
+<rect x="426" y="110" width="18" height="18" fill="#fdf7f7"/>
+<rect x="444" y="110" width="18" height="18" fill="#eeb5b5"/>
+<rect x="462" y="110" width="18" height="18" fill="#fafbfe"/>
+<rect x="480" y="110" width="18" height="18" fill="#e27f7f"/>
+<rect x="498" y="110" width="18" height="18" fill="#fefbfb"/>
+<rect x="300" y="128" width="18" height="18" fill="#f3cccc"/>
+<rect x="318" y="128" width="18" height="18" fill="#e48585"/>
+<rect x="336" y="128" width="18" height="18" fill="#fdf6f6"/>
+<rect x="354" y="128" width="18" height="18" fill="#f1c2c2"/>
+<rect x="372" y="128" width="18" height="18" fill="#f7f9fd"/>
+<rect x="390" y="128" width="18" height="18" fill="#f4cfcf"/>
+<rect x="408" y="128" width="18" height="18" fill="#fefcfc"/>
+<rect x="426" y="128" width="18" height="18" fill="#fdfafa"/>
+<rect x="444" y="128" width="18" height="18" fill="#f4cece"/>
+<rect x="462" y="128" width="18" height="18" fill="#e9effb"/>
+<rect x="480" y="128" width="18" height="18" fill="#f3c9c9"/>
+<rect x="498" y="128" width="18" height="18" fill="#fefefe"/>
+<rect x="300" y="146" width="18" height="18" fill="#bcd1f4"/>
+<rect x="318" y="146" width="18" height="18" fill="#2f6fde"/>
+<rect x="336" y="146" width="18" height="18" fill="#f7f9fd"/>
+<rect x="354" y="146" width="18" height="18" fill="#f9e4e4"/>
+<rect x="372" y="146" width="18" height="18" fill="#cddcf7"/>
+<rect x="390" y="146" width="18" height="18" fill="#eaf1fb"/>
+<rect x="408" y="146" width="18" height="18" fill="#fefdfd"/>
+<rect x="426" y="146" width="18" height="18" fill="#fdfdfe"/>
+<rect x="444" y="146" width="18" height="18" fill="#c4d6f5"/>
+<rect x="462" y="146" width="18" height="18" fill="#f1c3c3"/>
+<rect x="480" y="146" width="18" height="18" fill="#b4cbf3"/>
+<rect x="498" y="146" width="18" height="18" fill="#fefefe"/>
+<rect x="300" y="164" width="18" height="18" fill="#d6e2f8"/>
+<rect x="318" y="164" width="18" height="18" fill="#e07272"/>
+<rect x="336" y="164" width="18" height="18" fill="#f3f7fd"/>
+<rect x="354" y="164" width="18" height="18" fill="#f8dfdf"/>
+<rect x="372" y="164" width="18" height="18" fill="#f5f8fd"/>
+<rect x="390" y="164" width="18" height="18" fill="#eba8a8"/>
+<rect x="408" y="164" width="18" height="18" fill="#fcfdfe"/>
+<rect x="426" y="164" width="18" height="18" fill="#fbfcfe"/>
+<rect x="444" y="164" width="18" height="18" fill="#fcf4f4"/>
+<rect x="462" y="164" width="18" height="18" fill="#d5e2f8"/>
+<rect x="480" y="164" width="18" height="18" fill="#cadaf6"/>
+<rect x="498" y="164" width="18" height="18" fill="#f8fafd"/>
+<rect x="300" y="182" width="18" height="18" fill="#f2c7c7"/>
+<rect x="318" y="182" width="18" height="18" fill="#5e8fe5"/>
+<rect x="336" y="182" width="18" height="18" fill="#f9e7e7"/>
+<rect x="354" y="182" width="18" height="18" fill="#a4c0f0"/>
+<rect x="372" y="182" width="18" height="18" fill="#f5d1d1"/>
+<rect x="390" y="182" width="18" height="18" fill="#d1dff7"/>
+<rect x="408" y="182" width="18" height="18" fill="#fefcfc"/>
+<rect x="426" y="182" width="18" height="18" fill="#fdfafa"/>
+<rect x="444" y="182" width="18" height="18" fill="#e2eafa"/>
+<rect x="462" y="182" width="18" height="18" fill="#fbf0f0"/>
+<rect x="480" y="182" width="18" height="18" fill="#7ca4ea"/>
+<rect x="498" y="182" width="18" height="18" fill="#fdf7f7"/>
+<rect x="300" y="200" width="18" height="18" fill="#ecf1fc"/>
+<rect x="318" y="200" width="18" height="18" fill="#e9effb"/>
+<rect x="336" y="200" width="18" height="18" fill="#eeb2b2"/>
+<rect x="354" y="200" width="18" height="18" fill="#e17b7b"/>
+<rect x="372" y="200" width="18" height="18" fill="#eaf0fb"/>
+<rect x="390" y="200" width="18" height="18" fill="#fefefe"/>
+<rect x="408" y="200" width="18" height="18" fill="#fbfcfe"/>
+<rect x="426" y="200" width="18" height="18" fill="#fefdfd"/>
+<rect x="444" y="200" width="18" height="18" fill="#e2ebfa"/>
+<rect x="462" y="200" width="18" height="18" fill="#c8d9f6"/>
+<rect x="480" y="200" width="18" height="18" fill="#2f6fde"/>
+<rect x="498" y="200" width="18" height="18" fill="#f4f7fd"/>
+<rect x="300" y="218" width="18" height="18" fill="#fefefe"/>
+<rect x="318" y="218" width="18" height="18" fill="#fcf4f4"/>
+<rect x="336" y="218" width="18" height="18" fill="#f7dddd"/>
+<rect x="354" y="218" width="18" height="18" fill="#b0c8f2"/>
+<rect x="372" y="218" width="18" height="18" fill="#93b4ee"/>
+<rect x="390" y="218" width="18" height="18" fill="#e4ecfa"/>
+<rect x="408" y="218" width="18" height="18" fill="#fcfdfe"/>
+<rect x="426" y="218" width="18" height="18" fill="#fafcfe"/>
+<rect x="444" y="218" width="18" height="18" fill="#ecacac"/>
+<rect x="462" y="218" width="18" height="18" fill="#f5d5d5"/>
+<rect x="480" y="218" width="18" height="18" fill="#e69191"/>
+<rect x="498" y="218" width="18" height="18" fill="#fefdfd"/>
+  </g>
+  <rect x="300" y="92" width="216" height="144" fill="none" stroke="#1d2433" stroke-width="1.2"/>
+  <rect x="300" y="92" width="54" height="18" fill="none" stroke="#1d2433" stroke-width="2.5"/>
+  <text x="408" y="74" text-anchor="middle" font-size="14" fill="#687084">blue = positive, red = negative</text>
+  <g font-size="15" text-anchor="middle">
+    <text x="408" y="262" fill="#1d2433">q_proj of layer 0 (real values),</text>
+    <text x="408" y="282" fill="#1d2433">top-left 8 &#215; 12 of 4,096 &#215; 4,096</text>
+    <text x="408" y="304" fill="#5a6b8c" font-weight="700">16.8 M parameters = 33.5 MB</text>
+  </g>
+  <path d="M528 160 H566" stroke="#687084" stroke-width="2" marker-end="url(#ch01-ar2)"/>
+  <!-- panel C: stack of tensors -->
+  <g>
+    <rect x="636" y="64" width="124" height="96" rx="6" fill="#dfe3ec" stroke="#5a6b8c"/>
+    <rect x="626" y="74" width="124" height="96" rx="6" fill="#e5e8ef" stroke="#5a6b8c"/>
+    <rect x="616" y="84" width="124" height="96" rx="6" fill="#eceef3" stroke="#5a6b8c"/>
+    <rect x="606" y="94" width="124" height="96" rx="6" fill="#f3f4f7" stroke="#5a6b8c"/>
+    <rect x="596" y="104" width="124" height="96" rx="6" fill="#ffffff" stroke="#5a6b8c" stroke-width="1.5"/>
+    <text x="658" y="140" text-anchor="middle" font-size="15" fill="#1d2433">291 tensors</text>
+    <text x="658" y="162" text-anchor="middle" font-size="14" fill="#687084">matrices and</text>
+    <text x="658" y="180" text-anchor="middle" font-size="14" fill="#687084">vectors</text>
+  </g>
+  <g font-size="15" text-anchor="middle">
+    <text x="690" y="236" fill="#1d2433">8,030,261,248 numbers</text>
+    <text x="690" y="258" fill="#687084">&#215; 2 bytes each (BF16)</text>
+    <text x="690" y="284" fill="#5a6b8c" font-weight="700" font-size="17">= 16.06 GB</text>
+  </g>
+</svg>
+<figcaption><span class="fig-label">Figure 1.4</span> — Three zoom levels of "parameters". The weights and the heat map are real values read from the Llama&#160;3.1&#160;8B file (the three weights on the left are the first entries of the top row of the heat map). Most weights are small: in this matrix the typical magnitude is about 0.02.</figcaption>
+</figure>
+
+<h3>A model on disk</h3>
+
+<p>Download Llama&#160;3.1&#160;8B from Hugging Face and this is what you get. The weights are almost all of it. Meta's reference implementation of the whole architecture (<code>model.py</code> in the <code>llama3</code> repository) is 302 lines of Python, 10,404 bytes. The weights are about 1.5 million times bigger.</p>
+
+<figure>
+<svg viewBox="0 0 800 400" role="img" aria-label="Directory listing of the Llama 3.1 8B repository with file sizes, and a bar showing where the 8.03 billion parameters live: embedding 6.5 percent, attention 16.7 percent, MLP 70.2 percent, LM head 6.5 percent.">
+  <rect x="10" y="10" width="780" height="238" rx="10" fill="#1b2030"/>
+  <g class="mono" font-size="15" fill="#e6e9f2">
+    <text x="30" y="40" fill="#8a93a8">$ ls -l Llama-3.1-8B/        # sizes in bytes</text>
+    <g text-anchor="end">
+      <text x="160" y="66">826</text><text x="160" y="86">185</text><text x="160" y="106">9,085,658</text><text x="160" y="126">50,500</text><text x="160" y="146">23,950</text>
+      <text x="160" y="166" fill="#f78c6c">4,976,698,672</text><text x="160" y="186" fill="#f78c6c">4,999,802,720</text><text x="160" y="206" fill="#f78c6c">4,915,916,176</text><text x="160" y="226" fill="#f78c6c">1,168,138,808</text>
+    </g>
+    <text x="176" y="66">config.json</text>
+    <text x="176" y="86">generation_config.json</text>
+    <text x="176" y="106">tokenizer.json</text>
+    <text x="176" y="126">tokenizer_config.json</text>
+    <text x="176" y="146">model.safetensors.index.json</text>
+    <text x="176" y="166">model-00001-of-00004.safetensors</text>
+    <text x="176" y="186">model-00002-of-00004.safetensors</text>
+    <text x="176" y="206">model-00003-of-00004.safetensors</text>
+    <text x="176" y="226">model-00004-of-00004.safetensors</text>
+  </g>
+  <g font-size="14" fill="#c3e88d" class="mono">
+    <text x="490" y="66"># architecture: sizes, layers</text>
+    <text x="490" y="106"># vocabulary + merge rules (Ch. 3)</text>
+    <text x="490" y="146"># tensor name &#8594; file</text>
+  </g>
+  <path d="M478 156 h8 v74 h-8" fill="none" stroke="#f78c6c" stroke-width="1.5"/>
+  <g font-size="14" class="mono" fill="#f78c6c">
+    <text x="496" y="182">weights: 16,060,522,496 B</text>
+    <text x="496" y="202">= 8,030,261,248 params &#215; 2 B</text>
+  </g>
+  <!-- parameter breakdown bar -->
+  <text x="20" y="286" font-size="16" font-weight="700" fill="#1d2433">Where the 8.03 B parameters live</text>
+  <rect x="20" y="300" width="49.7" height="30" fill="#7b5cd6"/>
+  <rect x="69.7" y="300" width="127" height="30" fill="#2f6fde"/>
+  <rect x="196.7" y="300" width="533.5" height="30" fill="#5a6b8c"/>
+  <rect x="730.2" y="300" width="49.7" height="30" fill="#a58fe6"/>
+  <text x="133" y="320" text-anchor="middle" font-size="14" fill="#ffffff" font-weight="700">16.7%</text>
+  <text x="463" y="320" text-anchor="middle" font-size="14" fill="#ffffff" font-weight="700">70.2% &#8212; MLP in 32 blocks (5.64 B)</text>
+  <g font-size="14" fill="#1d2433">
+    <path d="M44 334 v10" stroke="#7b5cd6" stroke-width="2"/><text x="20" y="362">embedding</text><text x="20" y="380" fill="#687084">0.53 B, 6.5%</text>
+    <path d="M133 334 v10" stroke="#2f6fde" stroke-width="2"/><text x="112" y="362">attention in 32 blocks</text><text x="112" y="380" fill="#687084">1.34 B, 16.7%</text>
+    <path d="M755 334 v10" stroke="#a58fe6" stroke-width="2"/><text x="780" y="362" text-anchor="end">LM head</text><text x="780" y="380" text-anchor="end" fill="#687084">0.53 B, 6.5%</text>
+    <text x="490" y="362" text-anchor="middle" fill="#687084">norms: 266,240 params (0.003%), too thin to see</text>
+  </g>
+</svg>
+<figcaption><span class="fig-label">Figure 1.5</span> — The official <code>meta-llama/Llama-3.1-8B</code> repository (byte sizes from the Hugging Face file listing), and how the parameters split across the parts of the network. <a href="06-transformer.html">Chapter 6</a> derives every one of these counts and explains why the MLPs hold most of them.</figcaption>
+</figure>
+
+<p>The <code>.safetensors</code> files are simple containers: a small JSON header lists each tensor's name, number type, shape and byte range, and the raw numbers follow, packed back to back. Llama&#160;3.1&#160;8B has 291 named tensors, for example <code>model.embed_tokens.weight</code> with shape [128256,&#160;4096] and <code>model.layers.0.self_attn.q_proj.weight</code> with shape [4096,&#160;4096]. Each of the 32 blocks has the same nine tensors, filled with its own values. You do not need to know what <code>q_proj</code> or <code>gate_proj</code> do yet (<a href="05-attention.html">Chapter 5</a> and <a href="06-transformer.html">Chapter 6</a>). Notice two numbers that appear in almost every shape: 4,096, the width of the vector that represents each token (<var>d</var>), and 128,256, the vocabulary size (<var>V</var>). <a href="06-transformer.html">Chapter 6</a> lists every tensor, adds them up to 8,030,261,248, and takes the file format apart byte by byte.</p>
+
+<aside class="callout key"><div class="callout-title">Key takeaway</div>
+<p>A model is a small amount of code plus a huge array of learned numbers. Its size is <em>parameters &#215; bytes per parameter</em>: 8.03&#160;B &#215; 2&#160;B &#8776; 16.06&#160;GB (14.96&#160;GiB) for Llama&#160;3.1&#160;8B in BF16. Fitting in GPU memory, how fast tokens come out, and what a request costs all start from this one number (<a href="11-inference.html">Chapter 11</a>; <a href="13-quantization.html">Chapter 13</a> shrinks it).</p>
+</aside>
+</section>
+
+<section>
+<h2>The map: from text to text</h2>
+
+<p>Now open the box. Figure&#160;1.6 is the whole pipeline for one step of generation, drawn for Llama&#160;3.1&#160;8B and our running sentence. Every box is a link to the chapter that explains it. Come back to this map whenever you lose your place in the blog.</p>
+
+<figure class="wide map">
+<svg viewBox="0 0 1000 735" role="img" aria-label="Pipeline map. Text goes through the tokenizer to token IDs, then the embedding lookup, then 32 transformer blocks each made of RMSNorm, attention with a KV cache, and an MLP or mixture of experts, added into the residual stream. Then final RMSNorm, LM head, logits and softmax, the sampler, and detokenization. The new token is appended and the loop repeats. Each box links to its chapter.">
+  <defs>
+    <marker id="ch01-m-ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#1d2433"/></marker>
+    <marker id="ch01-m-arp" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="4" markerHeight="4" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#7b5cd6"/></marker>
+    <marker id="ch01-m-art" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#e5b62b"/></marker>
+    <marker id="ch01-m-arkv" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#1aa3a3"/></marker>
+    <g id="ch01-wicon"><rect x="0" y="0" width="16" height="16" rx="3" fill="#5a6b8c"/><path d="M5.3 0 V16 M10.7 0 V16 M0 5.3 H16 M0 10.7 H16" stroke="#ffffff" stroke-width="1"/></g>
+  </defs>
+
+  <!-- ===== the main data path (drawn first, under the boxes) ===== -->
+  <path d="M146 396 V560 H854 V468" fill="none" stroke="#7b5cd6" stroke-width="8" stroke-linejoin="round"/>
+  <path d="M146 396 V560 H854 V468" fill="none" stroke="#ffffff" stroke-opacity=".55" stroke-width="3" class="flow-slow"/>
+  <!-- input arrows -->
+  <path d="M146 124 V144" stroke="#1d2433" stroke-width="2" marker-end="url(#ch01-m-ar)"/>
+  <path d="M146 212 V232" stroke="#1d2433" stroke-width="2" marker-end="url(#ch01-m-ar)"/>
+  <path d="M146 300 V320" stroke="#1d2433" stroke-width="2" marker-end="url(#ch01-m-ar)"/>
+  <!-- output arrows (going up) -->
+  <path d="M854 404 V388" stroke="#1d2433" stroke-width="2" marker-end="url(#ch01-m-ar)"/>
+  <path d="M854 318 V302" stroke="#1d2433" stroke-width="2" marker-end="url(#ch01-m-ar)"/>
+  <path d="M854 232 V216" stroke="#1d2433" stroke-width="2" marker-end="url(#ch01-m-ar)"/>
+  <path d="M854 146 V130" stroke="#1d2433" stroke-width="2" marker-end="url(#ch01-m-ar)"/>
+  <!-- the autoregressive loop -->
+  <path d="M854 60 V26 H18 V268 H30" fill="none" stroke="#e5b62b" stroke-width="3" stroke-linejoin="round" marker-end="url(#ch01-m-art)"/>
+  <path d="M854 60 V26 H18 V268 H30" fill="none" stroke="#9a7410" stroke-width="1.5" class="flow"/>
+  <a href="11-inference.html"><title>Chapter 11: Inference (prefill and decode)</title>
+    <rect class="bx" x="262" y="12" width="476" height="28" rx="14" fill="#fcf6e3" stroke="#e5b62b"/>
+    <text class="ttl" x="500" y="31" text-anchor="middle" font-size="15" font-weight="700" fill="#1d2433">append the new token and run again (the loop &#8594; Ch. 11)</text>
+  </a>
+
+  <!-- ===== bottom band: 32 blocks ===== -->
+  <a href="06-transformer.html"><title>Chapter 6: the transformer, end to end</title>
+    <rect class="bx" x="214" y="500" width="572" height="120" rx="12" fill="#ffffff" fill-opacity="0" stroke="#5a6b8c" stroke-width="1" stroke-dasharray="4 4"/>
+    <rect x="230.0" y="515" width="11" height="90" rx="2" fill="#dfe3ec" stroke="#5a6b8c"/>
+    <rect x="246.9" y="515" width="11" height="90" rx="2" fill="#dfe3ec" stroke="#5a6b8c"/>
+    <rect x="263.8" y="515" width="11" height="90" rx="2" fill="#dfe3ec" stroke="#5a6b8c"/>
+    <rect x="280.6" y="515" width="11" height="90" rx="2" fill="#dfe3ec" stroke="#5a6b8c"/>
+    <rect x="297.5" y="515" width="11" height="90" rx="2" fill="#dfe3ec" stroke="#5a6b8c"/>
+    <rect x="314.4" y="515" width="11" height="90" rx="2" fill="#dfe3ec" stroke="#5a6b8c"/>
+    <rect x="331.2" y="515" width="11" height="90" rx="2" fill="#dfe3ec" stroke="#5a6b8c"/>
+    <rect x="348.1" y="515" width="11" height="90" rx="2" fill="#dfe3ec" stroke="#5a6b8c"/>
+    <rect x="365.0" y="515" width="11" height="90" rx="2" fill="#dfe3ec" stroke="#5a6b8c"/>
+    <rect x="381.9" y="515" width="11" height="90" rx="2" fill="#dfe3ec" stroke="#5a6b8c"/>
+    <rect x="398.8" y="515" width="11" height="90" rx="2" fill="#dfe3ec" stroke="#5a6b8c"/>
+    <rect x="415.6" y="515" width="11" height="90" rx="2" fill="#5a6b8c" stroke="#1d2433" stroke-width="1.5"/>
+    <rect x="432.5" y="515" width="11" height="90" rx="2" fill="#dfe3ec" stroke="#5a6b8c"/>
+    <rect x="449.4" y="515" width="11" height="90" rx="2" fill="#dfe3ec" stroke="#5a6b8c"/>
+    <rect x="466.2" y="515" width="11" height="90" rx="2" fill="#dfe3ec" stroke="#5a6b8c"/>
+    <rect x="483.1" y="515" width="11" height="90" rx="2" fill="#dfe3ec" stroke="#5a6b8c"/>
+    <rect x="500.0" y="515" width="11" height="90" rx="2" fill="#dfe3ec" stroke="#5a6b8c"/>
+    <rect x="516.9" y="515" width="11" height="90" rx="2" fill="#dfe3ec" stroke="#5a6b8c"/>
+    <rect x="533.8" y="515" width="11" height="90" rx="2" fill="#dfe3ec" stroke="#5a6b8c"/>
+    <rect x="550.6" y="515" width="11" height="90" rx="2" fill="#dfe3ec" stroke="#5a6b8c"/>
+    <rect x="567.5" y="515" width="11" height="90" rx="2" fill="#dfe3ec" stroke="#5a6b8c"/>
+    <rect x="584.4" y="515" width="11" height="90" rx="2" fill="#dfe3ec" stroke="#5a6b8c"/>
+    <rect x="601.2" y="515" width="11" height="90" rx="2" fill="#dfe3ec" stroke="#5a6b8c"/>
+    <rect x="618.1" y="515" width="11" height="90" rx="2" fill="#dfe3ec" stroke="#5a6b8c"/>
+    <rect x="635.0" y="515" width="11" height="90" rx="2" fill="#dfe3ec" stroke="#5a6b8c"/>
+    <rect x="651.9" y="515" width="11" height="90" rx="2" fill="#dfe3ec" stroke="#5a6b8c"/>
+    <rect x="668.8" y="515" width="11" height="90" rx="2" fill="#dfe3ec" stroke="#5a6b8c"/>
+    <rect x="685.6" y="515" width="11" height="90" rx="2" fill="#dfe3ec" stroke="#5a6b8c"/>
+    <rect x="702.5" y="515" width="11" height="90" rx="2" fill="#dfe3ec" stroke="#5a6b8c"/>
+    <rect x="719.4" y="515" width="11" height="90" rx="2" fill="#dfe3ec" stroke="#5a6b8c"/>
+    <rect x="736.2" y="515" width="11" height="90" rx="2" fill="#dfe3ec" stroke="#5a6b8c"/>
+    <rect x="753.1" y="515" width="11" height="90" rx="2" fill="#dfe3ec" stroke="#5a6b8c"/>
+    <path d="M226 560 H774" stroke="#7b5cd6" stroke-width="4" stroke-opacity=".9"/>
+    <text x="236" y="638" text-anchor="middle" font-size="15" fill="#687084">block 1</text>
+    <text x="759" y="638" text-anchor="middle" font-size="15" fill="#687084">block 32</text>
+    <text class="ttl" x="500" y="640" text-anchor="middle" font-size="16" font-weight="700" fill="#1d2433">32 transformer blocks (Ch. 6)</text>
+    <text x="500" y="660" text-anchor="middle" font-size="15" fill="#687084">same structure, different weights</text>
+  </a>
+  <path d="M415.6 515 L282 452" stroke="#687084" stroke-width="1.2" stroke-dasharray="4 4"/>
+  <path d="M426.6 515 L718 452" stroke="#687084" stroke-width="1.2" stroke-dasharray="4 4"/>
+
+  <!-- the travelling token / vector -->
+  <circle r="8" fill="#e5b62b" stroke="#ffffff" stroke-width="1.5">
+    <animateMotion dur="14s" repeatCount="indefinite" path="M146 92 V560 H854 V26 H18 V268 H36"/>
+    <animate attributeName="fill" dur="14s" repeatCount="indefinite" values="#e5b62b;#e5b62b;#7b5cd6;#7b5cd6;#d64545;#e5b62b;#e5b62b" keyTimes="0;0.1;0.13;0.48;0.5;0.56;1"/>
+  </circle>
+
+  <!-- ===== left column: input ===== -->
+  <a href="03-tokens.html"><title>Chapter 3: Tokens</title>
+    <rect class="bx" x="36" y="60" width="220" height="64" rx="10" fill="#ffffff" stroke="#1d2433" stroke-width="1.5"/>
+    <text class="ttl" x="50" y="84" font-size="17" font-weight="700" fill="#1d2433">Text</text>
+    <text x="242" y="84" text-anchor="end" font-size="15" fill="#687084">Ch. 3</text>
+    <text x="50" y="110" class="mono" font-size="15" fill="#1d2433">The cat sat on the</text>
+  </a>
+  <a href="03-tokens.html"><title>Chapter 3: Tokens (BPE tokenizer)</title>
+    <rect class="bx" x="36" y="148" width="220" height="64" rx="10" fill="#fcf6e3" stroke="#e5b62b" stroke-width="1.5"/>
+    <text class="ttl" x="50" y="172" font-size="17" font-weight="700" fill="#1d2433">Tokenizer</text>
+    <text x="242" y="172" text-anchor="end" font-size="15" fill="#687084">Ch. 3</text>
+    <text x="50" y="198" font-size="15" fill="#1d2433">text &#8594; token pieces</text>
+  </a>
+  <a href="03-tokens.html"><title>Chapter 3: Tokens (token IDs)</title>
+    <rect class="bx" x="36" y="236" width="220" height="64" rx="10" fill="#fcf6e3" stroke="#e5b62b" stroke-width="1.5"/>
+    <text class="ttl" x="50" y="260" font-size="17" font-weight="700" fill="#1d2433">Token IDs</text>
+    <text x="242" y="260" text-anchor="end" font-size="15" fill="#687084">Ch. 3</text>
+    <text x="50" y="286" class="mono" font-size="15" fill="#1d2433">791 8415 7731 389 279</text>
+  </a>
+  <a href="03-tokens.html"><title>Chapter 3: the embedding lookup</title>
+    <rect class="bx" x="36" y="324" width="220" height="72" rx="10" fill="#efeafb" stroke="#7b5cd6" stroke-width="1.5"/>
+    <text class="ttl" x="50" y="348" font-size="17" font-weight="700" fill="#1d2433">Embedding</text>
+    <text x="242" y="348" text-anchor="end" font-size="15" fill="#687084">Ch. 3</text>
+    <text x="50" y="368" font-size="15" fill="#1d2433">one row per token from</text>
+    <text x="50" y="387" font-size="15" fill="#1d2433">a 128,256 &#215; 4,096 table</text>
+  </a>
+  <use href="#ch01-wicon" x="234" y="374"/>
+  <text x="136" y="474" text-anchor="end" class="mono" font-size="15" fill="#7b5cd6">5 &#215; 4,096</text>
+
+  <!-- ===== center: zoom into one block ===== -->
+  <rect x="282" y="60" width="436" height="392" rx="14" fill="#fbfaf7" stroke="#687084" stroke-width="1.2"/>
+  <a href="06-transformer.html"><title>Chapter 6: one transformer block</title>
+    <text class="ttl" x="500" y="88" text-anchor="middle" font-size="17" font-weight="700" fill="#1d2433">Zoom: one block (block 12)</text>
+  </a>
+  <!-- residual stream inside the block -->
+  <path d="M296 410 H708" stroke="#7b5cd6" stroke-width="8" marker-end="url(#ch01-m-arp)"/>
+  <path d="M296 410 H700" stroke="#ffffff" stroke-opacity=".55" stroke-width="3" class="flow-slow"/>
+  <!-- taps and returns -->
+  <path d="M351 404 V376" stroke="#7b5cd6" stroke-width="2.5" marker-end="url(#ch01-m-ar)"/>
+  <path d="M351 330 V306" stroke="#1d2433" stroke-width="2" marker-end="url(#ch01-m-ar)"/>
+  <path d="M466 300 V394" stroke="#1d2433" stroke-width="2" marker-end="url(#ch01-m-ar)"/>
+  <path d="M569 404 V376" stroke="#7b5cd6" stroke-width="2.5" marker-end="url(#ch01-m-ar)"/>
+  <path d="M569 330 V306" stroke="#1d2433" stroke-width="2" marker-end="url(#ch01-m-ar)"/>
+  <path d="M684 300 V394" stroke="#1d2433" stroke-width="2" marker-end="url(#ch01-m-ar)"/>
+  <!-- KV cache link -->
+  <path d="M391 162 V184" stroke="#1aa3a3" stroke-width="2.5" marker-start="url(#ch01-m-arkv)" marker-end="url(#ch01-m-arkv)"/>
+  <!-- MoE relation -->
+  <path d="M609 162 V190" stroke="#d65c9a" stroke-width="2" stroke-dasharray="4 3"/>
+
+  <a href="04-neural-net-toolkit.html"><title>Chapter 4: normalization (RMSNorm)</title>
+    <rect class="bx" x="306" y="334" width="90" height="38" rx="8" fill="#ffffff" stroke="#687084" stroke-width="1.5"/>
+    <text class="ttl" x="351" y="358" text-anchor="middle" font-size="15" fill="#1d2433">RMSNorm</text>
+  </a>
+  <a href="05-attention.html"><title>Chapter 5: Attention</title>
+    <rect class="bx" x="296" y="190" width="190" height="112" rx="10" fill="#eaf1fd" stroke="#2f6fde" stroke-width="1.5"/>
+    <text class="ttl" x="310" y="214" font-size="17" font-weight="700" fill="#1d2433">Attention</text>
+    <text x="474" y="214" text-anchor="end" font-size="15" fill="#687084">Ch. 5</text>
+    <text x="310" y="238" font-size="15" fill="#1d2433">each token reads</text>
+    <text x="310" y="257" font-size="15" fill="#1d2433">earlier tokens</text>
+    <rect x="310" y="268" width="26" height="22" rx="4" fill="#2f6fde"/><text x="323" y="284" text-anchor="middle" font-size="15" font-weight="700" fill="#ffffff">Q</text>
+    <rect x="342" y="268" width="26" height="22" rx="4" fill="#e8833a"/><text x="355" y="284" text-anchor="middle" font-size="15" font-weight="700" fill="#ffffff">K</text>
+    <rect x="374" y="268" width="26" height="22" rx="4" fill="#2f9e6e"/><text x="387" y="284" text-anchor="middle" font-size="15" font-weight="700" fill="#ffffff">V</text>
+  </a>
+  <use href="#ch01-wicon" x="462" y="278"/>
+  <a href="12-kv-cache.html"><title>Chapter 12: the KV cache</title>
+    <rect class="bx" x="306" y="106" width="170" height="54" rx="10" fill="#e3f5f5" stroke="#1aa3a3" stroke-width="1.5"/>
+    <text class="ttl" x="320" y="128" font-size="16" font-weight="700" fill="#1d2433">KV cache</text>
+    <text x="464" y="128" text-anchor="end" font-size="15" fill="#687084">Ch. 12</text>
+    <text x="320" y="149" font-size="15" fill="#1d2433">kept between steps</text>
+  </a>
+  <a href="04-neural-net-toolkit.html"><title>Chapter 4: normalization (RMSNorm)</title>
+    <rect class="bx" x="524" y="334" width="90" height="38" rx="8" fill="#ffffff" stroke="#687084" stroke-width="1.5"/>
+    <text class="ttl" x="569" y="358" text-anchor="middle" font-size="15" fill="#1d2433">RMSNorm</text>
+  </a>
+  <a href="06-transformer.html"><title>Chapter 6: the MLP (SwiGLU feed-forward)</title>
+    <rect class="bx" x="514" y="190" width="190" height="112" rx="10" fill="#eceef3" stroke="#5a6b8c" stroke-width="1.5"/>
+    <text class="ttl" x="528" y="214" font-size="17" font-weight="700" fill="#1d2433">MLP</text>
+    <text x="692" y="214" text-anchor="end" font-size="15" fill="#687084">Ch. 4, 6</text>
+    <text x="528" y="238" font-size="15" fill="#1d2433">each token on its own;</text>
+    <text x="528" y="257" font-size="15" fill="#1d2433">70% of all weights</text>
+  </a>
+  <use href="#ch01-wicon" x="680" y="278"/>
+  <a href="07-mixture-of-experts.html"><title>Chapter 7: Mixture of Experts</title>
+    <rect class="bx" x="514" y="106" width="190" height="54" rx="10" fill="#fbeaf3" stroke="#d65c9a" stroke-width="1.5"/>
+    <text class="ttl" x="528" y="128" font-size="16" font-weight="700" fill="#1d2433">or: experts (MoE)</text>
+    <text x="692" y="128" text-anchor="end" font-size="15" fill="#687084">Ch. 7</text>
+    <text x="528" y="149" font-size="15" fill="#1d2433">router picks k of E MLPs</text>
+  </a>
+  <a href="04-neural-net-toolkit.html"><title>Chapter 4: residual connections</title>
+    <circle class="bx" cx="466" cy="410" r="13" fill="#ffffff" stroke="#1d2433" stroke-width="2"/>
+    <text x="466" y="416" text-anchor="middle" font-size="18" font-weight="700" fill="#1d2433">+</text>
+    <circle class="bx" cx="684" cy="410" r="13" fill="#ffffff" stroke="#1d2433" stroke-width="2"/>
+    <text x="684" y="416" text-anchor="middle" font-size="18" font-weight="700" fill="#1d2433">+</text>
+    <text class="ttl" x="500" y="442" text-anchor="middle" font-size="15" fill="#5a3fb3">residual stream: 4,096 numbers per token</text>
+  </a>
+
+  <!-- ===== right column: output (flows upward) ===== -->
+  <text x="864" y="500" class="mono" font-size="15" fill="#7b5cd6">5 &#215; 4,096</text>
+  <a href="06-transformer.html"><title>Chapter 6: final norm and LM head</title>
+    <rect class="bx" x="744" y="404" width="220" height="64" rx="10" fill="#ffffff" stroke="#687084" stroke-width="1.5"/>
+    <text class="ttl" x="758" y="428" font-size="17" font-weight="700" fill="#1d2433">Final RMSNorm</text>
+    <text x="950" y="428" text-anchor="end" font-size="15" fill="#687084">Ch. 6</text>
+    <text x="758" y="454" font-size="15" fill="#1d2433">keep the last token's row</text>
+  </a>
+  <a href="06-transformer.html"><title>Chapter 6: the LM head</title>
+    <rect class="bx" x="744" y="318" width="220" height="64" rx="10" fill="#eceef3" stroke="#5a6b8c" stroke-width="1.5"/>
+    <text class="ttl" x="758" y="342" font-size="17" font-weight="700" fill="#1d2433">LM head</text>
+    <text x="950" y="342" text-anchor="end" font-size="15" fill="#687084">Ch. 6</text>
+    <text x="758" y="368" font-size="15" fill="#1d2433">4,096 &#8594; 128,256 matmul</text>
+  </a>
+  <use href="#ch01-wicon" x="940" y="358"/>
+  <a href="04-neural-net-toolkit.html"><title>Chapter 4: logits and softmax</title>
+    <rect class="bx" x="744" y="232" width="220" height="64" rx="10" fill="#fcecec" stroke="#d64545" stroke-width="1.5"/>
+    <text class="ttl" x="758" y="256" font-size="17" font-weight="700" fill="#1d2433">Logits &#8594; softmax</text>
+    <text x="950" y="256" text-anchor="end" font-size="15" fill="#687084">Ch. 4</text>
+    <text x="758" y="282" font-size="15" fill="#1d2433">128,256 probabilities</text>
+  </a>
+  <a href="14-sampling.html"><title>Chapter 14: Sampling and temperature</title>
+    <rect class="bx" x="744" y="146" width="220" height="64" rx="10" fill="#ffffff" stroke="#1d2433" stroke-width="1.5"/>
+    <text class="ttl" x="758" y="170" font-size="17" font-weight="700" fill="#1d2433">Sampler</text>
+    <text x="950" y="170" text-anchor="end" font-size="15" fill="#687084">Ch. 14</text>
+    <text x="758" y="196" font-size="15" fill="#1d2433">choose one token</text>
+  </a>
+  <a href="03-tokens.html"><title>Chapter 3: detokenization and streaming</title>
+    <rect class="bx" x="744" y="60" width="220" height="64" rx="10" fill="#fcf6e3" stroke="#e5b62b" stroke-width="1.5"/>
+    <text class="ttl" x="758" y="84" font-size="17" font-weight="700" fill="#1d2433">Token &#8594; text</text>
+    <text x="950" y="84" text-anchor="end" font-size="15" fill="#687084">Ch. 3</text>
+    <text x="758" y="110" class="mono" font-size="15" fill="#1d2433">5634 &#8594; &#9251;mat</text>
+  </a>
+
+  <!-- ===== bottom: cross-cutting chapters ===== -->
+  <text x="36" y="694" font-size="15" font-weight="700" fill="#687084">Weights made by:</text>
+  <a href="08-pretraining.html"><title>Chapter 8</title><rect class="bx" x="182" y="676" width="148" height="26" rx="13" fill="#f3f1ec" stroke="#ddd8ce"/><text class="ttl" x="256" y="694" text-anchor="middle" font-size="15" fill="#1d2433">8 &#183; pretraining</text></a>
+  <a href="09-post-training.html"><title>Chapter 9</title><rect class="bx" x="338" y="676" width="160" height="26" rx="13" fill="#f3f1ec" stroke="#ddd8ce"/><text class="ttl" x="418" y="694" text-anchor="middle" font-size="15" fill="#1d2433">9 &#183; post-training</text></a>
+  <a href="10-reasoning.html"><title>Chapter 10</title><rect class="bx" x="506" y="676" width="136" height="26" rx="13" fill="#f3f1ec" stroke="#ddd8ce"/><text class="ttl" x="574" y="694" text-anchor="middle" font-size="15" fill="#1d2433">10 &#183; reasoning</text></a>
+  <use href="#ch01-wicon" x="668" y="681"/>
+  <text x="692" y="694" font-size="15" fill="#687084">= has learned weights</text>
+  <text x="36" y="726" font-size="15" font-weight="700" fill="#687084">Runs on / around:</text>
+  <a href="02-numbers-and-hardware.html"><title>Chapter 2</title><rect class="bx" x="182" y="708" width="148" height="26" rx="13" fill="#f3f1ec" stroke="#ddd8ce"/><text class="ttl" x="256" y="726" text-anchor="middle" font-size="15" fill="#1d2433">2 &#183; GPUs, floats</text></a>
+  <a href="13-quantization.html"><title>Chapter 13</title><rect class="bx" x="338" y="708" width="160" height="26" rx="13" fill="#f3f1ec" stroke="#ddd8ce"/><text class="ttl" x="418" y="726" text-anchor="middle" font-size="15" fill="#1d2433">13 &#183; quantization</text></a>
+  <a href="15-serving.html"><title>Chapter 15</title><rect class="bx" x="506" y="708" width="136" height="26" rx="13" fill="#f3f1ec" stroke="#ddd8ce"/><text class="ttl" x="574" y="726" text-anchor="middle" font-size="15" fill="#1d2433">15 &#183; serving</text></a>
+  <a href="16-life-of-a-request.html"><title>Chapter 16</title><rect class="bx" x="650" y="708" width="176" height="26" rx="13" fill="#f3f1ec" stroke="#ddd8ce"/><text class="ttl" x="738" y="726" text-anchor="middle" font-size="15" fill="#1d2433">16 &#183; a full request</text></a>
+</svg>
+<figcaption><span class="fig-label">Figure 1.6</span> — The pipeline map of the whole blog, for one generation step of Llama&#160;3.1&#160;8B. <b>Click any box</b> to jump to its chapter. Gold = tokens, purple = the per-token vectors (the residual stream), slate squares = parts that contain learned weights. The moving dot is one trip around the loop: a token becomes a vector, flows through all 32 blocks, becomes probabilities, then a new token that is appended to the input.</figcaption>
+</figure>
+
+<p>Reading the map from the top left:</p>
+<ol>
+  <li><strong>Tokenize.</strong> Text becomes 5 integer IDs (<a href="03-tokens.html">Ch. 3</a>).</li>
+  <li><strong>Embed.</strong> Each ID selects one row of a 128,256&#160;&#215;&#160;4,096 table, giving a 5&#160;&#215;&#160;4,096 matrix: one vector of <var>d</var> = 4,096 numbers per token (<a href="03-tokens.html">Ch. 3</a>, <a href="04-neural-net-toolkit.html">Ch. 4</a> for what such vectors mean).</li>
+  <li><strong>Transform, 32 times.</strong> Each block reads the vectors and <em>adds</em> an update to them. In <em>attention</em>, each token pulls information from earlier tokens (<a href="05-attention.html">Ch. 5</a>). In the <em>MLP</em>, each token's vector is processed on its own (<a href="06-transformer.html">Ch. 6</a>). Mixture-of-experts models replace the MLP with many expert MLPs and use only a few per token (<a href="07-mixture-of-experts.html">Ch. 7</a>). The shape stays 5&#160;&#215;&#160;4,096 the whole way.</li>
+  <li><strong>Project to the vocabulary.</strong> The last token's vector is normalized and multiplied by a 4,096&#160;&#215;&#160;128,256 matrix, the <em>LM head</em>, giving 128,256 scores called logits (<a href="06-transformer.html">Ch. 6</a>). Softmax turns them into probabilities (<a href="04-neural-net-toolkit.html">Ch. 4</a>).</li>
+  <li><strong>Choose and emit.</strong> The sampler picks ID 5634 (<a href="14-sampling.html">Ch. 14</a>), which is decoded to <span class="tok">&#9251;mat</span> and streamed to you (<a href="03-tokens.html">Ch. 3</a>). Then the ID is appended and the loop runs again.</li>
+</ol>
+
+<aside class="callout deep"><div class="callout-title">Low-level view</div>
+<p>The first pass processes all 5 prompt tokens at once, as a 5-row matrix pushed through every weight matrix. This is <em>prefill</em>. Each later step pushes only the one new token through, which is <em>decode</em> (<a href="11-inference.html">Ch. 11</a>). Decode can skip the old tokens because attention's per-token intermediate results (keys and values) are saved in the <em>KV cache</em>: 128&#160;KiB per token for this model (<a href="12-kv-cache.html">Ch. 12</a>). The same weights are applied at every position. Word order enters mainly inside attention, which rotates query and key vectors by angles that depend on position, a scheme called RoPE (<a href="05-attention.html">Ch. 5</a>).</p>
+</aside>
+</section>
+
+<section>
+<h2>Training vs inference, from 10,000 feet</h2>
+
+<p>Where do 8 billion good numbers come from? From <strong>training</strong>. Using them to answer a prompt is <strong>inference</strong>. These are two very different workloads. Mixing them up is the most common source of wrong intuitions about LLMs, so here is the difference before any details.</p>
+
+<p><strong>Training</strong> starts from random weights, so the model first outputs noise. You show it real text. At every position you ask for the probability of the token that actually came next, and you measure how wrong it was with one number, the <em>loss</em> (<a href="04-neural-net-toolkit.html">Ch. 4</a> defines it). Then, for each of the 8 billion weights, you compute which direction would have made the loss slightly smaller. This is the <em>gradient</em>, found by an algorithm called backpropagation (<a href="08-pretraining.html">Ch. 8</a>). You move every weight a tiny step in that direction and repeat, for trillions of tokens. Nobody teaches the model grammar or facts. The weights drift toward whatever values predict text well.</p>
+
+<p><strong>Inference</strong> is what happens when you send a prompt. The function runs with the weights frozen. Nothing is learned and the weights are only read. Talking to a model does not change it.</p>
+
+<figure>
+<svg viewBox="0 0 800 330" role="img" aria-label="Left: training. Text flows into the model, its prediction is compared with the actual next token, the loss shrinks over time and the weights keep changing. Right: inference. A prompt flows into the model with locked, read-only weights and a token comes out.">
+  <defs>
+    <marker id="ch01-ar4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#1d2433"/></marker>
+    <marker id="ch01-ar4r" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#d64545"/></marker>
+  </defs>
+  <!-- ===== training panel ===== -->
+  <rect x="8" y="8" width="384" height="314" rx="12" fill="#fbfaf7" stroke="#ddd8ce"/>
+  <text x="24" y="36" font-size="17" font-weight="700" fill="#1d2433">Training: find the weights</text>
+  <text x="24" y="57" font-size="15" fill="#687084">once, for months, on thousands of GPUs</text>
+  <!-- documents -->
+  <g fill="#ffffff" stroke="#687084">
+    <rect x="32" y="84" width="44" height="56" rx="4"/><rect x="40" y="78" width="44" height="56" rx="4"/><rect x="48" y="72" width="44" height="56" rx="4"/>
+  </g>
+  <g stroke="#c9ccd4" stroke-width="2"><path d="M56 86 H84 M56 96 H84 M56 106 H78 M56 116 H84"/></g>
+  <text x="62" y="160" text-anchor="middle" font-size="15" fill="#1d2433">text</text>
+  <path d="M100 106 H128" stroke="#1d2433" stroke-width="2" marker-end="url(#ch01-ar4)"/>
+  <!-- model with changing weights -->
+  <rect x="134" y="72" width="128" height="90" rx="10" fill="#eceef3" stroke="#5a6b8c" stroke-width="1.5"/>
+  <g fill="#5a6b8c">
+    <rect class="twk" x="148" y="84" width="16" height="16" rx="2"/><rect class="twk" style="animation-delay:-.7s" x="168" y="84" width="16" height="16" rx="2"/><rect class="twk" style="animation-delay:-1.9s" x="188" y="84" width="16" height="16" rx="2"/><rect class="twk" style="animation-delay:-1.1s" x="208" y="84" width="16" height="16" rx="2"/><rect class="twk" style="animation-delay:-2.3s" x="228" y="84" width="16" height="16" rx="2"/>
+    <rect class="twk" style="animation-delay:-1.4s" x="148" y="104" width="16" height="16" rx="2"/><rect class="twk" style="animation-delay:-.3s" x="168" y="104" width="16" height="16" rx="2"/><rect class="twk" style="animation-delay:-2.0s" x="188" y="104" width="16" height="16" rx="2"/><rect class="twk" style="animation-delay:-.9s" x="208" y="104" width="16" height="16" rx="2"/><rect class="twk" style="animation-delay:-1.6s" x="228" y="104" width="16" height="16" rx="2"/>
+  </g>
+  <text x="198" y="146" text-anchor="middle" font-size="15" fill="#1d2433">weights change</text>
+  <path d="M268 106 H296" stroke="#1d2433" stroke-width="2" marker-end="url(#ch01-ar4)"/>
+  <text x="304" y="96" font-size="15" fill="#1d2433">guess: <tspan class="mono">&#9251;hat</tspan></text>
+  <text x="304" y="120" font-size="15" fill="#1d2433">truth: <tspan class="mono">&#9251;mat</tspan></text>
+  <!-- loss bar -->
+  <text x="24" y="200" font-size="15" fill="#1d2433">loss (how wrong), falling over training</text>
+  <rect x="24" y="210" width="340" height="20" rx="4" fill="#f3f1ec"/>
+  <rect class="lossbar" x="24" y="210" width="340" height="20" rx="4" fill="#d64545"/>
+  <!-- feedback -->
+  <path d="M330 132 C 330 170, 300 178, 262 150" fill="none" stroke="#d64545" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#ch01-ar4r)"/>
+  <text x="24" y="264" font-size="15" fill="#1d2433">gradient: nudge every weight so the</text>
+  <text x="24" y="284" font-size="15" fill="#1d2433">true next token gets more probable</text>
+  <text x="24" y="308" font-size="15" fill="#687084">weights are read <tspan font-weight="700">and written</tspan></text>
+
+  <!-- ===== inference panel ===== -->
+  <rect x="408" y="8" width="384" height="314" rx="12" fill="#fbfaf7" stroke="#ddd8ce"/>
+  <text x="424" y="36" font-size="17" font-weight="700" fill="#1d2433">Inference: use the weights</text>
+  <text x="424" y="57" font-size="15" fill="#687084">every request, milliseconds per token</text>
+  <rect x="424" y="92" width="68" height="28" rx="6" fill="#fbefc5" stroke="#e5b62b"/>
+  <text x="458" y="111" text-anchor="middle" font-size="15" fill="#1d2433">prompt</text>
+  <path d="M498 106 H528" stroke="#1d2433" stroke-width="2"/>
+  <path d="M498 106 H528" stroke="#e5b62b" stroke-width="2" class="flow"/>
+  <rect x="534" y="72" width="128" height="90" rx="10" fill="#eceef3" stroke="#5a6b8c" stroke-width="1.5"/>
+  <g fill="#5a6b8c">
+    <rect x="548" y="84" width="16" height="16" rx="2"/><rect x="568" y="84" width="16" height="16" rx="2" opacity=".55"/><rect x="588" y="84" width="16" height="16" rx="2" opacity=".8"/><rect x="608" y="84" width="16" height="16" rx="2" opacity=".4"/><rect x="628" y="84" width="16" height="16" rx="2" opacity=".7"/>
+    <rect x="548" y="104" width="16" height="16" rx="2" opacity=".6"/><rect x="568" y="104" width="16" height="16" rx="2" opacity=".9"/><rect x="588" y="104" width="16" height="16" rx="2" opacity=".45"/><rect x="608" y="104" width="16" height="16" rx="2"/><rect x="628" y="104" width="16" height="16" rx="2" opacity=".65"/>
+  </g>
+  <!-- lock -->
+  <path d="M680 136 v-6 a7 7 0 0 1 14 0 v6" fill="none" stroke="#1d2433" stroke-width="2.2"/>
+  <rect x="675" y="135" width="24" height="18" rx="3" fill="#1d2433"/>
+  <text x="598" y="146" text-anchor="middle" font-size="15" fill="#1d2433">weights frozen</text>
+  <path d="M668 106 H698" stroke="#1d2433" stroke-width="2"/>
+  <path d="M668 106 H698" stroke="#e5b62b" stroke-width="2" class="flow"/>
+  <rect x="704" y="92" width="72" height="28" rx="6" fill="#fbefc5" stroke="#e5b62b"/>
+  <text x="740" y="111" text-anchor="middle" class="mono" font-size="15" fill="#1d2433">&#9251;mat</text>
+  <text x="424" y="200" font-size="15" fill="#1d2433">no loss, no gradient, no updates</text>
+  <text x="424" y="224" font-size="15" fill="#1d2433">one forward pass per new token</text>
+  <text x="424" y="264" font-size="15" fill="#1d2433">one copy of the weights can serve</text>
+  <text x="424" y="284" font-size="15" fill="#1d2433">many users at once (batching)</text>
+  <text x="424" y="308" font-size="15" fill="#687084">weights are <tspan font-weight="700">only read</tspan></text>
+</svg>
+<figcaption><span class="fig-label">Figure 1.7</span> — The two workloads. In training (left) every weight changes at every step as the loss falls. In inference (right) the weights are a read-only input. The guess <span class="tok">&#9251;hat</span> is illustrative.</figcaption>
+</figure>
+
+<aside class="callout intuition"><div class="callout-title">Analogy</div>
+<p>Training is compiling and inference is running the binary. You compile once, at great cost, and then run the result billions of times. Because the "binary" is read-only, it can be shared by many users at once, cached, memory-mapped and compressed.</p>
+</aside>
+
+<div class="table-wrap">
+<table class="data">
+  <tr><th></th><th>Training (Llama&#160;3.1&#160;8B)</th><th>Inference</th></tr>
+  <tr><td>Goal</td><td>find the weights</td><td>use the weights</td></tr>
+  <tr><td>Weights</td><td>read and written every step</td><td>read-only</td></tr>
+  <tr><td>Data</td><td>~15 trillion tokens of text</td><td>your prompt plus the generated tokens</td></tr>
+  <tr><td>Compute</td><td>&#8776; 6&#183;<var>N</var>&#183;<var>D</var> &#8776; 7.2&#215;10<sup>23</sup> FLOPs</td><td>&#8776; 2&#183;<var>N</var> &#8776; 16 GFLOP per token</td></tr>
+  <tr><td>Time</td><td>1.46 million H100 GPU-hours (Meta's model card)</td><td>milliseconds per token</td></tr>
+  <tr><td>Memory</td><td>~16 bytes per parameter of training state (&#8776; 128 GB) plus activations, spread over many GPUs</td><td>~2 bytes per parameter (&#8776; 16 GB) plus the KV cache</td></tr>
+  <tr><td>Chapters</td><td><a href="08-pretraining.html">8</a>, <a href="09-post-training.html">9</a>, <a href="10-reasoning.html">10</a></td><td><a href="11-inference.html">11</a> to <a href="15-serving.html">15</a></td></tr>
+</table>
+</div>
+
+<aside class="callout math"><div class="callout-title">Worked numbers</div>
+<p><var>N</var> is the parameter count (8.03&#215;10<sup>9</sup>) and <var>D</var> the number of training tokens (~15&#215;10<sup>12</sup>). Training costs about 6 FLOPs per parameter per token: 2 for the forward pass and 4 for the backward pass (<a href="08-pretraining.html">Ch. 8</a>). So 6 &#215; 8.03&#215;10<sup>9</sup> &#215; 15&#215;10<sup>12</sup> &#8776; 7.2&#215;10<sup>23</sup> FLOPs. A 1,000-token answer costs about 2<var>N</var> &#215; 1,000 &#8776; 1.6&#215;10<sup>13</sup> FLOPs. The training run therefore equals roughly 45 billion such answers. At the H100's peak of 989 TFLOPS (BF16), 7.2&#215;10<sup>23</sup> FLOPs would take about 200,000 GPU-hours. Meta reports 1.46 million: real runs reach only a fraction of peak, and the reported figure covers the whole training process, not one ideal pass.</p>
+</aside>
+</section>
+
+<section>
+<h2>The life of a model</h2>
+
+<p>"Training" is really several stages, each with its own data, goal and cost, followed by the steps that turn weights into a product. The model that answers you in a chat app has usually passed through all five of the stages below. Not every model goes through every stage: many open-weight releases publish both the base model and the assistant, and non-reasoning models skip stage 3.</p>
+
+<figure class="stepper fig-life" data-steps="5" data-interval="4200">
+<svg viewBox="0 0 900 326" role="img" aria-label="Model lifecycle in five stages: pretraining, post-training, reasoning reinforcement learning, quantization and packaging, serving. Each step shows what goes in, what happens and what comes out.">
+  <defs>
+    <marker id="ch01-ar7" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#1d2433"/></marker>
+  </defs>
+  <g>
+    <path d="M176 92 H192" stroke="#1d2433" stroke-width="2" marker-end="url(#ch01-ar7)"/>
+    <path d="M352 92 H368" stroke="#1d2433" stroke-width="2" marker-end="url(#ch01-ar7)"/>
+    <path d="M528 92 H544" stroke="#1d2433" stroke-width="2" marker-end="url(#ch01-ar7)"/>
+    <path d="M704 92 H720" stroke="#1d2433" stroke-width="2" marker-end="url(#ch01-ar7)"/>
+  </g>
+  <a href="08-pretraining.html"><title>Chapter 8: Pretraining</title>
+    <rect x="20" y="50" width="156" height="84" rx="10" fill="#eceef3" stroke="#5a6b8c" stroke-width="1.5"/>
+    <text x="98" y="84" text-anchor="middle" font-size="17" font-weight="700" fill="#1d2433">1 &#183; Pretrain</text>
+    <text x="98" y="110" text-anchor="middle" font-size="15" fill="#687084">Ch. 8</text>
+  </a>
+  <a href="09-post-training.html"><title>Chapter 9: Post-training</title>
+    <rect x="196" y="50" width="156" height="84" rx="10" fill="#eceef3" stroke="#5a6b8c" stroke-width="1.5"/>
+    <text x="274" y="84" text-anchor="middle" font-size="17" font-weight="700" fill="#1d2433">2 &#183; Post-train</text>
+    <text x="274" y="110" text-anchor="middle" font-size="15" fill="#687084">Ch. 9</text>
+  </a>
+  <a href="10-reasoning.html"><title>Chapter 10: Reasoning</title>
+    <rect x="372" y="50" width="156" height="84" rx="10" fill="#eceef3" stroke="#5a6b8c" stroke-width="1.5" stroke-dasharray="6 4"/>
+    <text x="450" y="84" text-anchor="middle" font-size="17" font-weight="700" fill="#1d2433">3 &#183; Reasoning RL</text>
+    <text x="450" y="110" text-anchor="middle" font-size="15" fill="#687084">Ch. 10 (optional)</text>
+  </a>
+  <a href="13-quantization.html"><title>Chapter 13: Quantization</title>
+    <rect x="548" y="50" width="156" height="84" rx="10" fill="#e8f1fa" stroke="#3d8bd4" stroke-width="1.5"/>
+    <text x="626" y="84" text-anchor="middle" font-size="17" font-weight="700" fill="#1d2433">4 &#183; Quantize</text>
+    <text x="626" y="110" text-anchor="middle" font-size="15" fill="#687084">Ch. 13</text>
+  </a>
+  <a href="15-serving.html"><title>Chapter 15: Serving</title>
+    <rect x="724" y="50" width="156" height="84" rx="10" fill="#e8f1fa" stroke="#3d8bd4" stroke-width="1.5"/>
+    <text x="802" y="84" text-anchor="middle" font-size="17" font-weight="700" fill="#1d2433">5 &#183; Serve</text>
+    <text x="802" y="110" text-anchor="middle" font-size="15" fill="#687084">Ch. 15</text>
+  </a>
+  <text x="274" y="30" text-anchor="middle" font-size="15" font-weight="700" fill="#5a6b8c">make the weights</text>
+  <path d="M20 38 H528" stroke="#5a6b8c" stroke-width="1.5"/>
+  <text x="714" y="30" text-anchor="middle" font-size="15" font-weight="700" fill="#3d8bd4">use the weights</text>
+  <path d="M548 38 H880" stroke="#3d8bd4" stroke-width="1.5"/>
+  <!-- current-stage highlight -->
+  <rect data-step-only="1" x="15" y="45" width="166" height="94" rx="13" fill="none" stroke="#d64545" stroke-width="3"/>
+  <rect data-step-only="2" x="191" y="45" width="166" height="94" rx="13" fill="none" stroke="#d64545" stroke-width="3"/>
+  <rect data-step-only="3" x="367" y="45" width="166" height="94" rx="13" fill="none" stroke="#d64545" stroke-width="3"/>
+  <rect data-step-only="4" x="543" y="45" width="166" height="94" rx="13" fill="none" stroke="#d64545" stroke-width="3"/>
+  <rect data-step-only="5" x="719" y="45" width="166" height="94" rx="13" fill="none" stroke="#d64545" stroke-width="3"/>
+  <!-- detail card frame -->
+  <rect x="20" y="160" width="860" height="150" rx="12" fill="#fbfaf7" stroke="#ddd8ce"/>
+  <g font-size="15" font-weight="700" fill="#687084">
+    <text x="40" y="190">IN</text><text x="326" y="190">WHAT HAPPENS</text><text x="612" y="190">OUT</text>
+  </g>
+  <path d="M306 176 V296 M592 176 V296" stroke="#ddd8ce"/>
+  <g font-size="15" fill="#1d2433">
+    <g data-step-only="1">
+      <text x="40" y="220">~15 trillion tokens of text:</text><text x="40" y="242">web pages, code, books, math</text>
+      <text x="326" y="220">predict the next token at every</text><text x="326" y="242">position, adjust all weights,</text><text x="326" y="264">repeat. 1.46 M H100-hours for</text><text x="326" y="286">Llama 3.1 8B. Most of the compute.</text>
+      <text x="612" y="220"><tspan font-weight="700">a base model</tspan>: continues any</text><text x="612" y="242">document, but does not reliably</text><text x="612" y="264">follow instructions</text>
+    </g>
+    <g data-step-only="2">
+      <text x="40" y="220">the base model, example</text><text x="40" y="242">conversations, and human</text><text x="40" y="264">preference comparisons</text>
+      <text x="326" y="220">supervised fine-tuning (SFT) on</text><text x="326" y="242">good answers, then preference</text><text x="326" y="264">tuning (RLHF, DPO). Llama 3</text><text x="326" y="286">used six rounds of SFT + DPO.</text>
+      <text x="612" y="220"><tspan font-weight="700">an assistant</tspan>: follows a chat</text><text x="612" y="242">format, answers, declines,</text><text x="612" y="264">calls tools</text>
+    </g>
+    <g data-step-only="3">
+      <text x="40" y="220">problems with checkable</text><text x="40" y="242">answers: math, code, logic</text>
+      <text x="326" y="220">the model writes long chains of</text><text x="326" y="242">reasoning; a checker scores the</text><text x="326" y="264">final answer; reinforcement</text><text x="326" y="286">learning keeps what worked</text>
+      <text x="612" y="220"><tspan font-weight="700">a reasoning model</tspan> that "thinks"</text><text x="612" y="242">in tokens before it answers,</text><text x="612" y="264">e.g. DeepSeek-R1</text>
+    </g>
+    <g data-step-only="4">
+      <text x="40" y="220">BF16 weights: 16.06 GB</text><text x="40" y="242">for Llama 3.1 8B</text>
+      <text x="326" y="220">store each weight in 8 or 4 bits</text><text x="326" y="242">plus shared scale factors; convert</text><text x="326" y="264">to an engine's file format</text>
+      <text x="612" y="220"><tspan font-weight="700">a smaller file</tspan>: roughly 4.5 to</text><text x="612" y="242">5 GB at ~4.5 bits per weight;</text><text x="612" y="264">faster decode, small quality loss</text>
+    </g>
+    <g data-step-only="5">
+      <text x="40" y="220">weights loaded on GPUs, and</text><text x="40" y="242">requests from many users</text>
+      <text x="326" y="220">an inference engine batches users</text><text x="326" y="242">together, manages KV-cache</text><text x="326" y="264">memory and streams tokens back</text><text x="326" y="286">(Ch. 11, 12, 15)</text>
+      <text x="612" y="220"><tspan font-weight="700">an API</tspan> priced per million</text><text x="612" y="242">input and output tokens; one full</text><text x="612" y="264">request is traced in Ch. 16</text>
+    </g>
+  </g>
+</svg>
+<div class="step-captions">
+  <p data-step-only="1"><b>Stage 1, pretraining.</b> The expensive part. Asked a question, a base model may simply continue with more questions.</p>
+  <p data-step-only="2"><b>Stage 2, post-training.</b> Also training, with the same machinery, but on far smaller and more curated data.</p>
+  <p data-step-only="3"><b>Stage 3, reasoning RL.</b> Optional. It teaches the model to spend tokens thinking before it answers.</p>
+  <p data-step-only="4"><b>Stage 4, quantization.</b> The weights are frozen from here on. Fewer bytes per weight means fewer bytes read per token, so faster decode.</p>
+  <p data-step-only="5"><b>Stage 5, serving.</b> Engineering here decides latency, throughput and the price per token.</p>
+</div>
+<figcaption><span class="fig-label">Figure 1.8</span> — The model lifecycle. Stages 1 to 3 change the weights; stages 4 and 5 only use them. Click a stage box to open its chapter. The quantized size is approximate: real files keep some tensors at higher precision.</figcaption>
+</figure>
+</section>
+
+<section>
+<h2>Why predicting the next token is so powerful</h2>
+
+<p>"It just predicts the next word" is true, and it sounds like it should produce autocomplete, not a model that can explain code or solve math problems. Two ideas explain the gap. Neither needs hype.</p>
+
+<h3>Prediction is compression</h3>
+
+<p>A model that predicts well can compress well, and the reverse is also true. This is an old result from information theory. If the model gives the actual next token probability <var>p</var>, an arithmetic coder can store that token in about &#8722;log<sub>2</sub>&#160;<var>p</var> bits. A token predicted with 50% costs 1 bit. A token predicted with 1% costs 6.6 bits. Training with the standard loss (<a href="04-neural-net-toolkit.html">Ch. 4</a>, <a href="08-pretraining.html">Ch. 8</a>) minimizes exactly this number, averaged over trillions of tokens. In other words, pretraining is a search for the shortest description of its training text.</p>
+
+<figure>
+<svg viewBox="0 0 800 330" role="img" aria-label="Bits per token for The cat sat on the mat under Llama 3.1 8B: The 5.3, cat 13.7, sat 8.7, on 0.5, the 0.2, mat 0.4, period 3.1. Total 31.9 bits versus 184 bits of UTF-8.">
+  <line x1="40" y1="250" x2="580" y2="250" stroke="#1d2433" stroke-width="1.5"/>
+  <text x="40" y="32" font-size="15" font-weight="700" fill="#687084">bits = &#8722;log&#8322; p(actual token)</text>
+  <g font-size="15">
+    <rect x="58" y="181.6" width="52" height="68.4" rx="3" fill="#e5b62b"/><text x="84" y="173" text-anchor="middle" fill="#1d2433">5.3</text>
+    <rect x="134" y="72.3" width="52" height="177.7" rx="3" fill="#d64545"/><text x="160" y="64" text-anchor="middle" fill="#1d2433" font-weight="700">13.7</text>
+    <rect x="210" y="136.4" width="52" height="113.6" rx="3" fill="#d64545"/><text x="236" y="128" text-anchor="middle" fill="#1d2433">8.7</text>
+    <rect x="286" y="243.1" width="52" height="6.9" rx="2" fill="#e5b62b"/><text x="312" y="235" text-anchor="middle" fill="#1d2433">0.5</text>
+    <rect x="362" y="247.4" width="52" height="2.6" rx="1" fill="#e5b62b"/><text x="388" y="239" text-anchor="middle" fill="#1d2433">0.2</text>
+    <rect x="438" y="244.8" width="52" height="5.2" rx="2" fill="#e5b62b"/><text x="464" y="237" text-anchor="middle" fill="#1d2433">0.4</text>
+    <rect x="514" y="210.2" width="52" height="39.8" rx="3" fill="#e5b62b"/><text x="540" y="202" text-anchor="middle" fill="#1d2433">3.1</text>
+  </g>
+  <g class="mono" font-size="15" text-anchor="middle" fill="#1d2433">
+    <text x="84" y="274">The</text><text x="160" y="274">&#9251;cat</text><text x="236" y="274">&#9251;sat</text><text x="312" y="274">&#9251;on</text><text x="388" y="274">&#9251;the</text><text x="464" y="274">&#9251;mat</text><text x="540" y="274">.</text>
+  </g>
+  <g class="mono" font-size="14" text-anchor="middle" fill="#687084">
+    <text x="84" y="296">p=.026</text><text x="160" y="296">.00008</text><text x="236" y="296">.0023</text><text x="312" y="296">.69</text><text x="388" y="296">.87</text><text x="464" y="296">.76</text><text x="540" y="296">.12</text>
+  </g>
+  <rect x="606" y="70" width="184" height="190" rx="10" fill="#fbfaf7" stroke="#ddd8ce"/>
+  <text x="698" y="100" text-anchor="middle" font-size="15" fill="#687084">model-coded</text>
+  <text x="698" y="130" text-anchor="middle" font-size="24" font-weight="800" fill="#1f7a53">31.9 bits</text>
+  <text x="698" y="172" text-anchor="middle" font-size="15" fill="#687084">plain UTF-8</text>
+  <text x="698" y="202" text-anchor="middle" font-size="24" font-weight="800" fill="#1d2433">184 bits</text>
+  <text x="698" y="238" text-anchor="middle" font-size="15" fill="#1d2433">&#8776; 17% of the size</text>
+</svg>
+<figcaption><span class="fig-label">Figure 1.9</span> — The cost of each token of "The cat sat on the mat." under Llama&#160;3.1&#160;8B, with real probabilities. <span class="tok">&#9251;cat</span> is a surprise (13.7 bits), but once the model sees "The cat sat", the rest of the famous sentence costs only about 4 bits. The comparison ignores the cost of storing the model itself.</figcaption>
+</figure>
+
+<p>Delétang et al. (2023) measured this directly. Used as a compressor, Chinchilla&#160;70B, trained mostly on text, compressed ImageNet image patches to 43.4% of their size and LibriSpeech audio to 16.4%, beating PNG (58.5%) and FLAC (30.3%), again not counting the model's own size. Here is the point. The cheapest way to compress the internet is to capture what generates it: grammar, facts, arithmetic, the meaning of code, what people in a story want. A model that has not captured these pays bits for every token that depends on them.</p>
+
+<h3>Prediction forces a model of the world</h3>
+
+<p>To predict the next token of many texts, a model has to represent whatever those texts are about. The cleanest evidence comes from a toy experiment. Li et al. (2023) trained a GPT-style model only on lists of moves from the board game Othello. It never saw a board. Yet probes found an internal representation of the board state, and editing that representation changed the model's predicted moves as if the board had changed. Figure 1.10 shows the same pressure on the real model: each prompt can only be completed well by something beyond word statistics.</p>
+
+<figure>
+<svg viewBox="0 0 900 380" role="img" aria-label="Six prompts and Llama 3.1 8B's top next-token guess with probability: The cat sat on the mat 75.5 percent; capital of Australia Canberra 57.2; 23+19= 42 at 34.4; glass shattered 57.0; water freezes at 0 degrees Celsius 66.5; shortest of Tom, Ann, Bob is Bob 23.6.">
+  <g font-size="15" font-weight="700" fill="#687084">
+    <text x="20" y="28">prompt</text><text x="420" y="28">top next token and its probability</text><text x="720" y="28">needs</text>
+  </g>
+  <line x1="20" y1="40" x2="880" y2="40" stroke="#ddd8ce"/>
+  <g class="mono" font-size="15" fill="#1d2433">
+    <text x="20" y="72">The cat sat on the</text>
+    <text x="20" y="124">The capital of Australia is</text>
+    <text x="20" y="176">23+19=</text>
+    <text x="20" y="228">She dropped the glass and it</text>
+    <text x="20" y="280">Water freezes at 0 degrees</text>
+    <text x="20" y="326">Tom is taller than Ann. Ann is taller</text>
+    <text x="20" y="348">than Bob. The shortest of the three is</text>
+  </g>
+  <g font-size="15">
+    <rect x="420" y="54" width="54" height="26" rx="5" fill="#fbefc5" stroke="#e5b62b"/><text x="447.0" y="72" text-anchor="middle" class="mono" fill="#1d2433">&#9251;mat</text>
+    <rect x="484" y="58" width="113.2" height="18" rx="3" fill="#e5b62b"/><text x="605.2" y="72" class="mono" fill="#1d2433">75.5%</text>
+    <text x="720" y="72" fill="#687084">grammar, idiom</text>
+    <rect x="420" y="106" width="101" height="26" rx="5" fill="#fbefc5" stroke="#e5b62b"/><text x="470.5" y="124" text-anchor="middle" class="mono" fill="#1d2433">&#9251;Canberra</text>
+    <rect x="531" y="110" width="85.8" height="18" rx="3" fill="#e5b62b"/><text x="624.8" y="124" class="mono" fill="#1d2433">57.2%</text>
+    <text x="720" y="124" fill="#687084">world facts</text>
+    <rect x="420" y="158" width="35" height="26" rx="5" fill="#fbefc5" stroke="#e5b62b"/><text x="437.5" y="176" text-anchor="middle" class="mono" fill="#1d2433">42</text>
+    <rect x="465" y="162" width="51.6" height="18" rx="3" fill="#e5b62b"/><text x="524.6" y="176" class="mono" fill="#1d2433">34.4%</text>
+    <text x="720" y="176" fill="#687084">arithmetic</text>
+    <rect x="420" y="210" width="110" height="26" rx="5" fill="#fbefc5" stroke="#e5b62b"/><text x="475.0" y="228" text-anchor="middle" class="mono" fill="#1d2433">&#9251;shattered</text>
+    <rect x="540" y="214" width="85.5" height="18" rx="3" fill="#e5b62b"/><text x="633.5" y="228" class="mono" fill="#1d2433">57.0%</text>
+    <text x="720" y="228" fill="#687084">physical sense</text>
+    <rect x="420" y="262" width="91" height="26" rx="5" fill="#fbefc5" stroke="#e5b62b"/><text x="465.5" y="280" text-anchor="middle" class="mono" fill="#1d2433">&#9251;Celsius</text>
+    <rect x="521" y="266" width="99.8" height="18" rx="3" fill="#e5b62b"/><text x="628.8" y="280" class="mono" fill="#1d2433">66.5%</text>
+    <text x="720" y="280" fill="#687084">science</text>
+    <rect x="420" y="320" width="54" height="26" rx="5" fill="#fbefc5" stroke="#e5b62b"/><text x="447.0" y="338" text-anchor="middle" class="mono" fill="#1d2433">&#9251;Bob</text>
+    <rect x="484" y="324" width="35.4" height="18" rx="3" fill="#e5b62b"/><text x="527.4" y="338" class="mono" fill="#1d2433">23.6%</text>
+    <text x="720" y="338" fill="#687084">multi-step logic</text>
+  </g>
+  <g stroke="#ddd8ce"><path d="M20 92 H880 M20 144 H880 M20 196 H880 M20 248 H880 M20 300 H880"/></g>
+</svg>
+<figcaption><span class="fig-label">Figure 1.10</span> — What next-token prediction demands. Real top-1 predictions of Llama&#160;3.1&#160;8B (base model, no chat formatting). Bar length is proportional to the probability. In every row the correct answer is the model's first choice, but often with modest confidence: for the logic puzzle, 76% of the probability goes elsewhere, much of it to formatting choices such as a newline (16%).</figcaption>
+</figure>
+
+<aside class="callout warn"><div class="callout-title">Where the argument stops</div>
+<p>The training objective rewards <em>plausible</em> continuations of the training data, not <em>true</em> ones. A fluent wrong answer and a fluent right answer are produced by the same machinery; a "hallucination" is the model doing exactly what it was trained to do on a question its weights do not answer well. A base model imitates its data, including its errors. Post-training shapes behavior on top of this (<a href="09-post-training.html">Ch. 9</a>). And every token gets the same fixed budget of about 2<var>N</var> FLOPs through a fixed number of layers, which limits how much reasoning fits into one step. Letting the model write intermediate "thinking" tokens buys more computation per answer (<a href="10-reasoning.html">Ch. 10</a>).</p>
+</aside>
+</section>
+
+<section>
+<h2>Vocabulary preview</h2>
+
+<p>These are the terms the rest of the blog uses most. Each gets one line here and a full treatment in the linked chapter. You do not need to remember them now; come back when a word looks unfamiliar.</p>
+
+<div class="table-wrap">
+<table class="data vocab">
+  <tr><th>Term</th><th>In one line</th><th>Chapter</th></tr>
+  <tr><td>Token</td><td>A piece of text with an integer ID; the unit a model reads and writes.</td><td><a href="03-tokens.html">3</a></td></tr>
+  <tr><td>Tokenizer, BPE</td><td>Splits text into tokens using merge rules learned from data.</td><td><a href="03-tokens.html">3</a></td></tr>
+  <tr><td>Context window</td><td>The most tokens the model can take as input at once (131,072 for Llama&#160;3.1).</td><td><a href="05-attention.html">5</a>, <a href="12-kv-cache.html">12</a></td></tr>
+  <tr><td>Embedding</td><td>The vector of <var>d</var> numbers that represents a token inside the model.</td><td><a href="03-tokens.html">3</a>, <a href="04-neural-net-toolkit.html">4</a></td></tr>
+  <tr><td>Tensor</td><td>An array of numbers with any number of dimensions; its shape lists their sizes.</td><td><a href="02-numbers-and-hardware.html">2</a></td></tr>
+  <tr><td>Parameter, weight</td><td>One learned number. Llama&#160;3.1&#160;8B has 8,030,261,248 of them.</td><td><a href="06-transformer.html">6</a></td></tr>
+  <tr><td>BF16, FP8, FP4</td><td>Floating-point formats with 16, 8 and 4 bits per number.</td><td><a href="02-numbers-and-hardware.html">2</a></td></tr>
+  <tr><td>FLOP</td><td>One floating-point operation (an add or a multiply).</td><td><a href="02-numbers-and-hardware.html">2</a></td></tr>
+  <tr><td>Block, layer</td><td>The repeated unit of attention + MLP. Llama&#160;3.1&#160;8B stacks 32.</td><td><a href="06-transformer.html">6</a></td></tr>
+  <tr><td>Attention</td><td>The operation that lets each token read information from earlier tokens.</td><td><a href="05-attention.html">5</a></td></tr>
+  <tr><td>MLP, FFN</td><td>The small network applied to each token separately inside every block.</td><td><a href="04-neural-net-toolkit.html">4</a>, <a href="06-transformer.html">6</a></td></tr>
+  <tr><td>Residual stream</td><td>The per-token vector that every block reads and adds its update to.</td><td><a href="06-transformer.html">6</a></td></tr>
+  <tr><td>Mixture of experts</td><td>Many expert MLPs per block, of which only a few run for each token.</td><td><a href="07-mixture-of-experts.html">7</a></td></tr>
+  <tr><td>Logits, softmax</td><td>Raw scores for every vocabulary token, and the function that turns them into probabilities.</td><td><a href="04-neural-net-toolkit.html">4</a></td></tr>
+  <tr><td>Loss</td><td>How wrong a prediction was: &#8722;log of the probability given to the correct token.</td><td><a href="04-neural-net-toolkit.html">4</a>, <a href="08-pretraining.html">8</a></td></tr>
+  <tr><td>Pretraining</td><td>Learning to predict text, on trillions of tokens.</td><td><a href="08-pretraining.html">8</a></td></tr>
+  <tr><td>SFT, RLHF, DPO</td><td>Post-training methods that turn a base model into an assistant.</td><td><a href="09-post-training.html">9</a></td></tr>
+  <tr><td>Reasoning model</td><td>A model trained to write "thinking" tokens before its answer.</td><td><a href="10-reasoning.html">10</a></td></tr>
+  <tr><td>Prefill, decode</td><td>Processing the prompt in one parallel pass, then generating one token per step.</td><td><a href="11-inference.html">11</a></td></tr>
+  <tr><td>TTFT, tokens/s</td><td>Time to the first token, and generation speed after it.</td><td><a href="11-inference.html">11</a></td></tr>
+  <tr><td>VRAM</td><td>GPU memory. It must hold the weights and the KV cache.</td><td><a href="11-inference.html">11</a></td></tr>
+  <tr><td>KV cache</td><td>Saved attention keys and values of past tokens, so decode does not redo them.</td><td><a href="12-kv-cache.html">12</a></td></tr>
+  <tr><td>Quantization</td><td>Storing weights (or activations, or the KV cache) in fewer bits.</td><td><a href="13-quantization.html">13</a></td></tr>
+  <tr><td>Temperature, top-p</td><td>Knobs that reshape the next-token distribution before sampling.</td><td><a href="14-sampling.html">14</a></td></tr>
+  <tr><td>Batching</td><td>Running many requests together so each weight read serves many tokens.</td><td><a href="11-inference.html">11</a>, <a href="15-serving.html">15</a></td></tr>
+  <tr><td>Input, output tokens</td><td>Tokens you send versus tokens the model generates; priced differently.</td><td><a href="03-tokens.html">3</a>, <a href="15-serving.html">15</a></td></tr>
+</table>
+</div>
+</section>
+
+<section>
+<h2>How to read this blog</h2>
+
+<p>The chapters build on each other in order, and Figure&#160;1.11 shows the route. Part I gives you the tools: numbers and hardware, tokens, and basic neural-network pieces. Part II opens the model. Part III makes the weights. Part IV runs them fast and cheaply. Part V follows one real request end to end and collects every formula in a cheat sheet.</p>
+
+<figure>
+<svg viewBox="0 0 900 340" role="img" aria-label="Route map of the blog: five parts with their chapters, and the color legend used in all figures.">
+  <g font-size="15" font-weight="700" fill="#1d2433">
+    <text x="102" y="26" text-anchor="middle">I &#183; Foundations</text>
+    <text x="276" y="26" text-anchor="middle">II &#183; Architecture</text>
+    <text x="450" y="26" text-anchor="middle">III &#183; Training</text>
+    <text x="624" y="26" text-anchor="middle">IV &#183; Inference</text>
+    <text x="798" y="26" text-anchor="middle">V &#183; Synthesis</text>
+  </g>
+  <g stroke="#ddd8ce" stroke-width="1.5"><path d="M20 38 H184 M194 38 H358 M368 38 H532 M542 38 H706 M716 38 H880"/></g>
+  <g font-size="15" fill="#1d2433">
+    <rect x="20" y="52" width="164" height="34" rx="8" fill="#1d2433"/><text x="34" y="74" fill="#ffffff" font-weight="700">01 Big picture</text>
+    <a href="02-numbers-and-hardware.html"><rect x="20" y="94" width="164" height="34" rx="8" fill="#f3f1ec" stroke="#ddd8ce"/><text x="34" y="116">02 Numbers &amp; GPUs</text></a>
+    <a href="03-tokens.html"><rect x="20" y="136" width="164" height="34" rx="8" fill="#f3f1ec" stroke="#ddd8ce"/><text x="34" y="158">03 Tokens</text></a>
+    <a href="04-neural-net-toolkit.html"><rect x="20" y="178" width="164" height="34" rx="8" fill="#f3f1ec" stroke="#ddd8ce"/><text x="34" y="200">04 Neural nets</text></a>
+    <a href="05-attention.html"><rect x="194" y="52" width="164" height="34" rx="8" fill="#f3f1ec" stroke="#ddd8ce"/><text x="208" y="74">05 Attention</text></a>
+    <a href="06-transformer.html"><rect x="194" y="94" width="164" height="34" rx="8" fill="#f3f1ec" stroke="#ddd8ce"/><text x="208" y="116">06 Transformer</text></a>
+    <a href="07-mixture-of-experts.html"><rect x="194" y="136" width="164" height="34" rx="8" fill="#f3f1ec" stroke="#ddd8ce"/><text x="208" y="158">07 Experts (MoE)</text></a>
+    <a href="08-pretraining.html"><rect x="368" y="52" width="164" height="34" rx="8" fill="#f3f1ec" stroke="#ddd8ce"/><text x="382" y="74">08 Pretraining</text></a>
+    <a href="09-post-training.html"><rect x="368" y="94" width="164" height="34" rx="8" fill="#f3f1ec" stroke="#ddd8ce"/><text x="382" y="116">09 Post-training</text></a>
+    <a href="10-reasoning.html"><rect x="368" y="136" width="164" height="34" rx="8" fill="#f3f1ec" stroke="#ddd8ce"/><text x="382" y="158">10 Reasoning</text></a>
+    <a href="11-inference.html"><rect x="542" y="52" width="164" height="34" rx="8" fill="#f3f1ec" stroke="#ddd8ce"/><text x="556" y="74">11 Inference</text></a>
+    <a href="12-kv-cache.html"><rect x="542" y="94" width="164" height="34" rx="8" fill="#f3f1ec" stroke="#ddd8ce"/><text x="556" y="116">12 KV cache</text></a>
+    <a href="13-quantization.html"><rect x="542" y="136" width="164" height="34" rx="8" fill="#f3f1ec" stroke="#ddd8ce"/><text x="556" y="158">13 Quantization</text></a>
+    <a href="14-sampling.html"><rect x="542" y="178" width="164" height="34" rx="8" fill="#f3f1ec" stroke="#ddd8ce"/><text x="556" y="200">14 Sampling</text></a>
+    <a href="15-serving.html"><rect x="542" y="220" width="164" height="34" rx="8" fill="#f3f1ec" stroke="#ddd8ce"/><text x="556" y="242">15 Serving</text></a>
+    <a href="16-life-of-a-request.html"><rect x="716" y="52" width="164" height="34" rx="8" fill="#f3f1ec" stroke="#ddd8ce"/><text x="730" y="74">16 One request</text></a>
+  </g>
+  <g font-size="15" fill="#687084">
+    <text x="102" y="236" text-anchor="middle">the tools</text>
+    <text x="276" y="194" text-anchor="middle">inside the model</text>
+    <text x="450" y="194" text-anchor="middle">making the weights</text>
+    <text x="798" y="110" text-anchor="middle">end-to-end trace,</text>
+    <text x="798" y="130" text-anchor="middle">cheat sheet, glossary</text>
+  </g>
+  <line x1="20" y1="276" x2="880" y2="276" stroke="#ddd8ce"/>
+  <text x="20" y="300" font-size="15" font-weight="700" fill="#687084">Colors used in every figure</text>
+  <g font-size="15" fill="#1d2433">
+    <rect x="20" y="312" width="14" height="14" rx="3" fill="#e5b62b"/><text x="40" y="324">token</text>
+    <rect x="104" y="312" width="14" height="14" rx="3" fill="#7b5cd6"/><text x="124" y="324">vector</text>
+    <rect x="194" y="312" width="14" height="14" rx="3" fill="#2f6fde"/><text x="214" y="324">Q</text>
+    <rect x="240" y="312" width="14" height="14" rx="3" fill="#e8833a"/><text x="260" y="324">K</text>
+    <rect x="286" y="312" width="14" height="14" rx="3" fill="#2f9e6e"/><text x="306" y="324">V</text>
+    <rect x="332" y="312" width="14" height="14" rx="3" fill="#1aa3a3"/><text x="352" y="324">KV cache</text>
+    <rect x="436" y="312" width="14" height="14" rx="3" fill="#5a6b8c"/><text x="456" y="324">weights</text>
+    <rect x="532" y="312" width="14" height="14" rx="3" fill="#d65c9a"/><text x="552" y="324">experts</text>
+    <rect x="626" y="312" width="14" height="14" rx="3" fill="#d64545"/><text x="646" y="324">compute, hot spot</text>
+    <rect x="782" y="312" width="14" height="14" rx="3" fill="#3d8bd4"/><text x="802" y="324">memory</text>
+  </g>
+</svg>
+<figcaption><span class="fig-label">Figure 1.11</span> — Route map (click a chapter) and the color legend shared by all figures in the blog.</figcaption>
+</figure>
+
+<p>Shortcuts, if you have a specific goal:</p>
+<ul>
+  <li><strong>Inference and serving:</strong> 1 &#8594; 2 &#8594; 3 &#8594; 6 &#8594; 11 &#8594; 12 &#8594; 13 &#8594; 14 &#8594; 15 &#8594; 16.</li>
+  <li><strong>Training and fine-tuning:</strong> 1 &#8594; 2 &#8594; 4 &#8594; 5 &#8594; 6 &#8594; 8 &#8594; 9 &#8594; 10.</li>
+  <li><strong>Just the model:</strong> 1 &#8594; 3 &#8594; 4 &#8594; 5 &#8594; 6 &#8594; 7.</li>
+</ul>
+
+<p>Conventions used throughout:</p>
+<ul>
+  <li><strong>Boxes.</strong> <span class="pill">Intuition</span> is an analogy. <span class="pill">Low-level view</span> is bytes, FLOPs and kernels. <span class="pill">Key takeaway</span> is the one thing to remember. <span class="pill">Misconception</span> corrects a common error. <span class="pill">The math</span> works a formula with numbers. Collapsible "deep dive" sections are optional.</li>
+  <li><strong>Animated figures</strong> have Play, Prev and Next buttons; click the figure and use the arrow keys. <strong>Widgets</strong> compute live in your browser.</li>
+  <li><strong>Running examples.</strong> The sentence "The cat sat on the" &#8594; <span class="tok">&#9251;mat</span>; the model Llama&#160;3.1&#160;8B; the GPU NVIDIA H100 (80&#160;GB, 3.35&#160;TB/s). Numbers that are not real measurements are labeled "illustrative".</li>
+  <li><strong>Units.</strong> GB = 10<sup>9</sup> bytes and GiB = 2<sup>30</sup> bytes; the blog says which one it means.</li>
+</ul>
+
+<div class="table-wrap">
+<table class="data">
+  <tr><th>Symbol</th><th>Meaning</th><th class="num">Llama&#160;3.1&#160;8B</th></tr>
+  <tr><td><var>n</var>, <var>t</var></td><td>number of tokens in the context; position of a token</td><td class="num">&#8804; 131,072</td></tr>
+  <tr><td><var>V</var></td><td>vocabulary size</td><td class="num">128,256</td></tr>
+  <tr><td><var>d</var></td><td>model width: numbers per token vector (d_model)</td><td class="num">4,096</td></tr>
+  <tr><td><var>L</var></td><td>number of blocks (layers)</td><td class="num">32</td></tr>
+  <tr><td><var>h</var>, <var>h</var><sub>kv</sub>, <var>d</var><sub>h</sub></td><td>query heads, key/value heads, numbers per head</td><td class="num">32, 8, 128</td></tr>
+  <tr><td><var>d</var><sub>ff</sub></td><td>hidden size of the MLP</td><td class="num">14,336</td></tr>
+  <tr><td><var>N</var>, <var>D</var></td><td>parameter count; training tokens</td><td class="num">8.03&#215;10<sup>9</sup>; ~15&#215;10<sup>12</sup></td></tr>
+  <tr><td><var>B</var></td><td>batch size (sequences processed together)</td><td class="num">&#8212;</td></tr>
+  <tr><td><var>E</var>, <var>k</var></td><td>experts per MoE layer; experts used per token</td><td class="num">&#8212; (dense)</td></tr>
+</table>
+</div>
+
+<aside class="callout key"><div class="callout-title">The mental model to carry forward</div>
+<p>An LLM is a deterministic function from tokens to a next-token distribution, defined by a few hundred lines of code and billions of learned numbers. Text comes from calling it in a serial loop. Training searches for the numbers once; inference reads them for every token. Every later chapter refines one box of the map in Figure&#160;1.6.</p>
+</aside>
+</section>
+
+<section>
+<h2>Further reading</h2>
+<ul>
+  <li>Vaswani et al., <a href="https://arxiv.org/abs/1706.03762">Attention Is All You Need</a> (2017). The paper that introduced the transformer.</li>
+  <li>Llama Team, Meta, <a href="https://arxiv.org/html/2407.21783">The Llama 3 Herd of Models</a> (2024). Data, architecture, pretraining and post-training of our running model, in detail.</li>
+  <li>Meta, <a href="https://raw.githubusercontent.com/meta-llama/llama-models/main/models/llama3_1/MODEL_CARD.md">Llama 3.1 model card</a>. Token counts, GPU-hours and intended use.</li>
+  <li>Meta, <a href="https://raw.githubusercontent.com/meta-llama/llama3/main/llama/model.py">llama3 <code>model.py</code></a>. The entire architecture in 302 lines.</li>
+  <li>Hugging Face, <a href="https://github.com/huggingface/safetensors">safetensors</a>. The weight file format, specified in a few paragraphs.</li>
+  <li>Delétang et al., <a href="https://arxiv.org/html/2309.10668">Language Modeling Is Compression</a> (2023/ICLR 2024).</li>
+  <li>Li et al., <a href="https://arxiv.org/abs/2210.13382">Emergent World Representations: Exploring a Sequence Model Trained on a Synthetic Task</a> (Othello-GPT).</li>
+  <li>DeepSeek-AI, <a href="https://arxiv.org/abs/2501.12948">DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning</a> (2025). Stage 3 of the lifecycle.</li>
+  <li>Andrej Karpathy, <a href="https://www.youtube.com/watch?v=zjkBMFhNj_g">[1hr Talk] Intro to Large Language Models</a>. The "two files" view of a model, on video.</li>
+  <li>3Blue1Brown, <a href="https://www.3blue1brown.com/lessons/mini-llm/">Large Language Models explained briefly</a>. A short visual companion to this chapter.</li>
+</ul>
+</section>
+
+<footer id="chapter-nav"></footer>
+</main>
+</div>
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+  /* ---------- "you are the sampler" widget ----------
+     Real Llama 3.1 8B (base) next-token distributions, precomputed for a complete
+     4-ary tree of continuations of "The cat sat on the" (depth 0..4, 341 nodes, BFS order).
+     Node i has children 4i+1 .. 4i+4. DIST[i] = [tok0, p0, tok1, p1, ...], p in 1/10000. */
+  var TOK=[" mat", " matt", " hat", " dog", " is", ".\n", ".", "\n", " and", ",", "'s", "\u2019s", " a", " an", " the", " called", "The", "I", "This", "A", " The", " It", " That", " This", "He", " He", " I", " looked", " watched", " stared", "That", " but", " which", " head", " back", " tail", " bed", " What", " Who", " sentence", " famous", " classic", " very", " example", " English", " id", " easy", " most", " cat", " subject", " man", " am", " have", " sat", " like", " entry", " was", " rat", " statement", "'m", " little", " few", " week", " morning", " mouse", ":", ")", " had", " don", " at", " up", " around", " out", " as", " into", " book", " simple", " Cat", " new", " then", " that", " it", " not", " made", " boy", " saw", " happened", " did", " with", " nursery", " tongue", " children", " common", " popular", " of", " for", " grammar", " proverb", "iom", "omatic", "ios", "om", " way", " we", " basic", " commonly", " predicate", "What", "Which", " complement", "-", "-p", " ate", " lay", " ran", " drank", " in", " hit", " on", " going", " been", " to", " never", " down", " next", " cats", " this", " one", " has", " contains", "-level", " level", " my", " sits", " true", " chased", " stood", " black", " raining", " there", " all", " can", " always", " reading", " sitting", " sure", " walks", " girl", " while", " bit", " weeks", " days", " years", " months", " b", " no", " correct", " Why", " his", " hid", " just", " happy", " surprised", "'t", "\u2019t", "\u00b4t", "`t", " me", " her", " through", " said", " got", " birds", " bird", " fly", " butterfly", "It", " space", " nothing", " \"", " fell", " under", " makes", " phrase", " weird", " Sat", " In", " study", " paper", " who", " looking", " he", " she", " didn", " wasn", " upon", " by", " him", " licked", " (", " so", " Then", " \u201c", " walked", "\\'", "?\n", "?", " you", " where", " bigger"];
+  var DIST=[[0,7552,1,90,2,82,3,80],[4,2872,5,1766,6,1201,7,922],[5,2997,6,1238,8,1119,7,913],[5,2512,6,2012,7,1250,9,869],[10,2386,11,1887,5,1309,6,941],[12,5255,13,1409,14,1063,15,192],[16,4384,17,370,18,244,19,222],[20,3887,21,493,22,279,23,274],[16,2861,17,349,19,280,18,236],[16,4286,17,444,19,273,24,203],[20,2884,21,833,25,505,26,364],[27,1163,14,702,28,660,29,557],[16,3113,17,356,19,329,18,170],[16,4325,18,355,17,348,30,210],[20,4480,23,1231,22,353,21,277],[16,2582,19,346,17,241,18,233],[14,2586,8,1717,31,798,32,496],[33,3362,34,1044,0,956,35,789],[33,3172,34,1259,35,953,36,740],[16,4379,19,712,17,355,18,177],[20,5503,21,238,37,178,38,169],[39,1787,40,1059,41,1016,42,871],[43,4704,44,1276,45,510,46,449],[39,2175,47,1307,40,390,48,366],[12,2841,14,897,7,764,49,408],[3,3222,48,1950,50,361,0,356],[51,717,52,600,53,481,54,368],[4,4546,39,1302,55,211,56,204],[48,1179,50,548,6,522,3,259],[3,3737,48,1632,0,1112,57,526],[56,3791,4,941,53,627,10,420],[4,2744,11,2447,10,2105,56,919],[4,5564,39,1812,56,334,58,215],[48,4078,3,1745,0,178,57,160],[52,809,51,667,56,622,59,528],[48,1450,50,298,60,159,61,155],[4,4348,62,303,39,241,63,237],[48,3450,3,1768,64,243,0,227],[51,644,52,636,53,542,56,411],[6,2284,48,807,65,703,66,523],[56,2123,53,826,27,747,67,448],[48,2293,3,2199,64,769,1,562],[56,3897,27,564,4,547,67,520],[56,3187,27,870,67,558,53,455],[53,645,56,440,68,399,51,333],[69,4595,70,834,71,573,72,560],[3,2144,64,1526,0,1274,1,1138],[14,6688,73,448,12,319,5,316],[69,6423,74,586,72,525,5,205],[48,5703,3,608,64,136,0,123],[52,763,56,746,51,620,59,402],[48,1911,6,525,50,283,65,190],[4,3905,63,426,62,388,48,345],[2,4266,48,1343,3,532,57,385],[4,3397,39,1147,55,712,75,306],[51,564,52,515,53,446,68,381],[10,2357,11,2014,4,1928,56,653],[2,6534,3,535,48,412,57,323],[4,4213,39,2076,76,522,2,266],[11,3931,10,3919,4,1183,56,241],[56,2948,4,750,10,660,11,659],[48,5231,2,442,3,380,77,260],[48,1134,78,166,6,149,50,148],[52,775,56,589,51,552,59,542],[4,3506,75,446,62,359,63,319],[2,4920,3,713,57,513,48,471],[14,3491,79,1401,80,529,26,390],[14,5048,79,489,81,400,82,297],[53,3463,56,2458,4,675,83,394],[5,3788,6,1832,7,943,9,692],[5,2968,6,1736,8,1145,9,1040],[5,4494,6,1507,7,1075,9,582],[5,3369,6,1747,7,1071,9,873],[5,3250,6,2069,9,866,7,852],[5,2542,6,1900,8,1280,9,1211],[5,2919,6,2010,9,1054,7,927],[5,2678,6,1998,8,1199,9,1129],[3,5664,48,1190,50,200,84,98],[6,9774,65,26,66,23,39,11],[51,696,52,648,68,480,85,400],[4,3499,39,2072,55,356,58,195],[3,7622,48,896,64,83,50,68],[56,3339,4,1021,10,508,53,426],[4,2154,86,1072,87,856,56,711],[53,2240,56,1931,4,1627,87,679],[6,2970,80,1423,5,1234,88,679],[39,1354,44,1134,89,852,90,789],[43,2887,39,1965,44,757,91,508],[40,2606,92,2276,76,1677,93,930],[94,9770,95,64,39,35,7,29],[39,1739,45,1420,96,1367,97,1349],[98,9957,99,17,100,6,101,6],[39,2101,102,750,44,693,8,681],[6,1902,80,1493,5,1129,103,483],[40,2940,92,2002,104,704,105,637],[39,2028,43,919,44,514,89,420],[53,3830,10,738,11,676,5,657],[76,2004,39,858,58,771,49,630],[49,2549,76,1364,48,624,106,320],[19,4680,16,1634,107,279,108,204],[109,3691,110,2562,111,761,8,556],[53,5286,112,1090,113,639,114,457],[53,5025,112,474,4,386,115,366],[53,3644,116,1365,114,888,117,562],[56,3171,4,3128,53,1408,118,172],[12,1122,82,872,119,724,14,462],[12,2937,120,611,121,488,122,337],[118,8057,116,467,123,340,124,147],[121,3442,14,1308,125,764,126,415],[12,3777,14,2002,13,759,127,430],[4,4495,128,1027,129,366,9,355],[56,9926,4,43,130,2,131,2],[14,2477,12,2321,13,481,132,448],[53,6425,4,957,56,264,133,230],[8,870,4,575,53,516,88,492],[20,2364,134,507,4,455,21,301],[53,2642,4,1191,114,535,135,375],[53,5084,112,1617,113,908,114,248],[53,4579,115,536,56,404,112,398],[56,4374,4,3006,53,868,67,129],[53,6505,112,1048,114,994,136,75],[12,3575,137,821,82,389,42,367],[12,2566,138,1459,14,636,82,341],[118,3751,139,2359,8,885,6,511],[12,2675,138,494,82,483,14,439],[12,5428,14,1191,140,806,82,580],[12,2651,14,1666,140,1246,81,734],[140,2335,12,2106,14,1691,81,653],[14,2707,12,1956,140,897,13,407],[12,5481,14,1368,13,1123,15,222],[4,4448,128,1101,129,525,9,293],[12,2624,14,1602,13,855,82,607],[4,5447,128,487,141,307,9,256],[53,8665,56,84,4,74,112,64],[53,4908,113,1398,112,1271,136,217],[56,2893,4,2329,53,1918,67,175],[53,6079,114,1226,112,922,136,109],[12,2106,120,1464,142,537,121,487],[12,1498,82,828,14,327,119,320],[143,380,119,368,144,341,116,293],[82,1360,12,971,145,677,119,496],[53,6018,4,777,56,321,133,306],[8,924,146,776,4,585,56,541],[147,1995,84,1284,148,560,149,489],[150,2415,151,2144,152,1782,153,1331],[12,3986,14,2002,13,711,127,399],[11,1677,9,1639,26,1554,103,1411],[4,3825,128,1209,129,479,9,397],[26,3757,9,2345,103,614,14,305],[53,6973,56,318,4,254,112,126],[53,4664,113,581,114,453,154,386],[53,4002,114,1255,56,379,112,334],[4,3147,56,2976,53,361,118,345],[12,900,82,880,119,574,144,484],[12,2274,120,820,121,596,155,342],[118,7873,123,468,116,409,14,155],[144,632,119,306,116,301,12,253],[20,1660,134,1214,4,474,156,360],[53,5729,4,1062,56,455,133,245],[37,1205,20,1089,26,652,157,516],[20,2356,4,511,14,282,156,249],[12,1709,42,857,82,305,144,260],[118,6917,139,639,116,294,123,268],[69,3634,70,799,71,716,42,482],[12,3109,120,651,121,297,158,294],[53,4507,56,854,4,407,67,333],[53,3989,113,1039,114,462,154,334],[53,3300,114,1589,56,446,159,301],[56,4958,53,1636,4,1271,67,226],[12,3762,42,472,137,309,14,292],[69,3356,70,948,71,773,54,576],[12,2440,14,705,138,530,82,365],[12,2707,120,1145,160,345,155,184],[12,1688,42,1216,137,279,161,276],[69,3336,71,990,70,938,42,612],[12,2803,120,870,160,440,121,323],[118,4188,139,1915,8,606,42,403],[118,8664,116,242,123,238,124,172],[144,539,162,324,116,310,82,266],[163,5363,164,4381,165,34,166,34],[82,1239,12,736,145,563,119,497],[14,5822,167,1440,158,477,168,380],[69,6049,6,844,5,779,121,323],[6,2806,5,2029,14,1543,9,516],[94,4610,14,3563,69,505,169,150],[53,3536,113,896,112,423,114,322],[53,2335,114,1879,56,333,112,313],[53,4589,56,2186,118,361,4,215],[53,3103,56,2773,170,240,171,221],[64,1403,172,870,173,827,3,575],[14,6427,12,418,158,388,26,342],[64,1648,173,1375,174,499,175,241],[16,3054,17,493,176,423,24,347],[14,6787,167,982,158,288,168,274],[177,5533,14,3569,178,120,12,95],[94,4381,14,3972,69,703,74,304],[16,2703,17,607,176,507,24,340],[53,8573,56,152,4,108,133,54],[53,4541,113,674,114,377,136,333],[53,2764,114,1379,56,420,170,310],[4,2627,56,2491,53,670,118,391],[12,2050,120,1418,142,520,121,466],[144,486,116,356,143,354,119,341],[12,1308,82,898,14,364,144,310],[82,1462,12,807,145,529,119,444],[53,5624,4,804,56,512,133,286],[118,1577,20,811,116,690,14,472],[8,900,56,684,146,484,53,467],[20,2200,37,609,26,579,179,459],[12,3920,14,1717,13,680,132,400],[26,3632,9,2264,103,543,14,429],[11,1885,26,1529,9,1460,103,1309],[53,3327,4,1606,56,807,128,455],[53,6741,56,726,180,419,4,237],[53,5722,116,722,112,257,56,190],[53,3709,112,1619,135,493,149,388],[53,7450,112,808,114,364,149,66],[12,3730,14,2065,13,869,127,379],[4,3881,128,834,9,439,56,318],[56,9975,4,15,131,1,128,1],[4,4404,56,1278,128,720,9,221],[12,1112,82,1002,14,510,119,464],[12,2726,121,710,120,630,155,623],[118,8449,116,404,123,181,181,133],[163,5371,164,4521,165,14,166,10],[14,2242,140,1662,12,1059,81,977],[14,2098,140,1367,12,1259,81,1010],[14,2479,12,2232,140,1431,82,750],[14,3828,12,1369,140,688,132,320],[53,5998,56,715,180,414,4,121],[112,2958,53,2801,136,338,113,288],[53,4980,87,316,112,291,56,264],[53,5866,112,1001,114,471,56,140],[12,3321,82,2456,14,2388,13,451],[4,5021,129,884,128,734,182,458],[39,8853,183,258,9,199,58,140],[4,2892,53,1979,56,1415,6,431],[14,4660,140,1774,81,942,82,744],[82,6913,14,1102,140,714,184,294],[82,3630,140,2186,14,1694,12,1141],[14,3227,12,1095,140,811,82,420],[12,3676,14,589,82,463,13,269],[12,2465,82,652,14,597,138,516],[12,2426,82,818,14,466,138,293],[12,3055,82,798,14,509,13,327],[53,9132,116,147,136,70,8,49],[53,6439,56,840,180,191,170,180],[53,3457,112,2917,113,601,136,260],[116,5542,53,1644,185,1340,186,804],[53,6016,4,524,133,465,8,273],[187,1045,75,542,48,347,188,159],[20,833,118,519,116,468,14,437],[8,837,146,570,4,559,189,549],[12,2260,120,1437,121,597,142,407],[143,488,119,378,116,359,190,324],[12,1368,82,890,14,322,119,289],[82,1441,12,908,145,585,119,484],[12,3712,14,1909,13,626,132,442],[4,4229,56,1232,128,704,9,274],[9,1781,26,1500,11,1480,103,1295],[26,3559,9,2467,103,587,14,308],[53,6183,56,679,118,341,180,272],[53,2721,112,1942,27,370,136,329],[53,5599,112,765,114,322,118,174],[53,5499,118,251,87,204,112,195],[2,4621,48,1320,57,492,3,480],[14,5202,81,934,191,331,9,330],[56,3721,11,1505,10,1405,4,880],[53,748,68,463,56,448,51,426],[2,8354,48,309,57,228,3,67],[14,5216,81,1409,191,378,192,360],[56,2170,193,1109,194,683,10,634],[118,4564,14,2309,116,355,95,270],[118,9235,116,206,195,153,196,41],[118,2567,12,928,82,654,14,412],[12,1491,82,1099,118,905,14,669],[14,5247,81,1259,197,935,168,662],[16,2943,19,1640,17,393,18,176],[20,4150,21,319,37,291,25,245],[16,1957,19,538,17,391,18,293],[8,2002,14,1026,31,796,32,487],[16,3540,19,922,17,392,24,237],[20,3965,21,388,25,373,37,251],[14,1608,198,549,170,433,27,359],[8,1924,31,726,14,709,32,385],[16,3034,19,1198,17,500,24,197],[20,4365,21,330,37,245,199,196],[16,1969,19,525,17,387,18,281],[8,1519,14,1308,31,1105,32,442],[16,2816,19,1778,17,406,24,191],[20,4071,21,338,37,291,25,271],[16,1960,19,540,17,363,18,265],[8,2107,31,897,14,810,200,801],[16,3850,19,508,17,379,18,288],[20,4558,21,447,25,276,201,238],[8,1977,14,1038,31,625,32,490],[16,1972,19,489,17,394,18,313],[16,3810,19,589,17,378,18,221],[20,4659,21,569,25,343,202,244],[14,1668,198,520,27,406,170,375],[8,1765,14,641,31,528,32,337],[16,3426,19,726,17,406,18,260],[20,4614,21,485,25,314,23,214],[8,2152,14,922,31,755,32,755],[16,2141,19,465,17,358,18,275],[16,4038,19,513,17,404,18,228],[20,4821,21,739,25,419,202,316],[14,1034,27,689,198,581,28,347],[8,1304,31,517,14,414,190,377],[53,3353,154,777,135,769,112,461],[53,3802,4,590,56,437,8,327],[53,1351,112,412,4,390,203,365],[53,1370,4,483,112,359,117,341],[20,2352,134,967,4,491,21,260],[20,1822,37,1127,157,695,26,561],[20,3515,4,816,134,744,14,411],[4,2727,88,1055,54,841,141,747],[12,1105,82,977,119,582,14,559],[12,3236,120,538,121,475,155,449],[163,6619,164,3228,204,28,166,18],[14,3796,12,3229,197,234,81,216],[12,3919,14,1576,13,947,127,357],[4,4038,128,720,141,343,9,302],[56,9922,4,48,128,3,131,2],[4,4693,141,377,128,370,9,309],[53,2334,154,1208,56,674,135,518],[53,2121,56,1145,4,957,112,295],[53,2230,114,1666,112,974,56,381],[53,1438,203,523,112,408,117,370],[12,3396,14,573,42,347,138,271],[12,2286,138,715,14,641,82,518],[12,2124,82,662,138,554,14,457],[118,4785,139,1480,95,485,6,346],[14,6537,134,404,81,302,12,252],[124,3355,121,2677,205,2285,206,620],[14,6206,81,1550,191,633,207,521],[14,7106,118,381,134,369,81,277],[118,9249,208,248,205,76,206,61],[118,4150,144,1272,14,839,116,262],[118,2588,14,1116,144,977,209,332],[14,5922,81,1825,191,553,205,478]];
+  var PROMPT = ["The", " cat", " sat", " on", " the"];
+  var root = document.getElementById("ch01-sampler");
+  if (!root) return;
+  var textEl = document.getElementById("ch01-smp-text");
+  var barsEl = document.getElementById("ch01-smp-bars");
+  var noteEl = document.getElementById("ch01-smp-note");
+  var bSample = document.getElementById("ch01-smp-sample");
+  var bGreedy = document.getElementById("ch01-smp-greedy");
+  var bBack = document.getElementById("ch01-smp-back");
+  var bReset = document.getElementById("ch01-smp-reset");
+  var path = [];
+  var lastPick = null;
+
+  function disp(s) {
+    s = s.replace(/\n/g, "\u21b5");
+    if (s.charAt(0) === " ") s = "\u2423" + s.slice(1);
+    return s;
+  }
+  function nodeAt(p) {
+    var i = 0;
+    for (var j = 0; j < p.length; j++) i = 4 * i + 1 + p[j];
+    return i;
+  }
+  function pct(p) { return (p * 100).toFixed(p < 0.001 ? 2 : 1) + "%"; }
+  function chip(s, gen, title) {
+    var c = document.createElement("span");
+    c.className = "tok" + (gen ? " gen" : "");
+    c.textContent = disp(s);
+    if (title) c.title = title;
+    return c;
+  }
+  function render() {
+    var i, j, k;
+    textEl.innerHTML = "";
+    PROMPT.forEach(function (s) { textEl.appendChild(chip(s, false)); textEl.appendChild(document.createTextNode(" ")); });
+    var seqP = 1;
+    for (j = 0; j < path.length; j++) {
+      var parent = DIST[nodeAt(path.slice(0, j))];
+      var tok = TOK[parent[2 * path[j]]], p = parent[2 * path[j] + 1] / 10000;
+      seqP *= p;
+      textEl.appendChild(chip(tok, true, "p = " + pct(p)));
+      textEl.appendChild(document.createTextNode(" "));
+    }
+    i = nodeAt(path);
+    barsEl.innerHTML = "";
+    var atEnd = i >= DIST.length;
+    if (!atEnd) {
+      var row = DIST[i], sum = 0;
+      for (k = 0; k < 4; k++) {
+        var p4 = row[2 * k + 1] / 10000;
+        sum += p4;
+        barsEl.appendChild(makeRow(disp(TOK[row[2 * k]]), p4, k, false));
+      }
+      barsEl.appendChild(makeRow("all others", Math.max(0, 1 - sum), -1, true));
+    } else {
+      var msg = document.createElement("div");
+      msg.className = "smp-note";
+      msg.textContent = "End of the precomputed tree (5 tokens deep). Use Undo or Reset to explore another branch.";
+      barsEl.appendChild(msg);
+    }
+    var note = "";
+    if (lastPick) note = lastPick + " ";
+    if (path.length) note += "This " + path.length + "-token continuation has probability " + pct(seqP) + " (the product of its step probabilities).";
+    else note = "Step 1 of up to 5. The bars are P(next token | text so far).";
+    noteEl.textContent = note;
+    bSample.disabled = atEnd; bGreedy.disabled = atEnd; bBack.disabled = path.length === 0;
+  }
+  function makeRow(label, p, k, other) {
+    var r = document.createElement("div");
+    r.className = "smp-row" + (other ? " other" : "");
+    var l = document.createElement("div"); l.className = "smp-lab"; l.textContent = label;
+    var t = document.createElement("div"); t.className = "smp-track";
+    var f = document.createElement("div"); f.className = "smp-fill"; f.style.width = (p * 100).toFixed(2) + "%";
+    t.appendChild(f);
+    var v = document.createElement("div"); v.className = "smp-pct"; v.textContent = pct(p);
+    r.appendChild(l); r.appendChild(t); r.appendChild(v);
+    if (!other) {
+      r.setAttribute("role", "button");
+      r.setAttribute("tabindex", "0");
+      r.title = "Append this token";
+      r.addEventListener("click", function () { pick(k, "You picked"); });
+      r.addEventListener("keydown", function (e) { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(k, "You picked"); } });
+    }
+    return r;
+  }
+  function pick(k, how) {
+    var i = nodeAt(path);
+    if (i >= DIST.length) return;
+    var row = DIST[i];
+    lastPick = how + " " + disp(TOK[row[2 * k]]) + " (" + pct(row[2 * k + 1] / 10000) + ", choice " + (k + 1) + " of the 4 shown).";
+    path.push(k);
+    render();
+  }
+  bSample.addEventListener("click", function () {
+    var i = nodeAt(path);
+    if (i >= DIST.length) return;
+    var row = DIST[i], tot = 0, k;
+    for (k = 0; k < 4; k++) tot += row[2 * k + 1];
+    var u = Math.random() * tot;
+    for (k = 0; k < 3; k++) { u -= row[2 * k + 1]; if (u < 0) break; }
+    pick(k, "The random draw picked");
+  });
+  bGreedy.addEventListener("click", function () { pick(0, "Greedy took the top token,"); });
+  bBack.addEventListener("click", function () { path.pop(); lastPick = null; render(); });
+  bReset.addEventListener("click", function () { path = []; lastPick = null; render(); });
+  render();
+});
+</script>
+</body>
+</html>
