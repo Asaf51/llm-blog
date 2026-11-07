@@ -296,7 +296,7 @@
 </aside>
 
 <h3>Decontamination, safety and PII</h3>
-<p>If benchmark questions leak into training data, scores become memorization tests. <strong>Decontamination</strong> removes training documents that share long n-grams with evaluation sets (8- to 13-gram overlap checks are common). Labs also drop domains with lots of personal data (PII) or unsafe content, and some anonymize emails and IP addresses (FineWeb does). None of this is perfect, which is why evaluation (<a href="09-post-training.html">Chapter 9</a>) treats contamination as a standing risk.</p>
+<p>If benchmark questions leak into training data, scores become memorization tests (the train/test leakage problem: <a href="p1-machine-learning.html#p1-regularization">Primer&#160;1</a>). <strong>Decontamination</strong> removes training documents that share long n-grams with evaluation sets (8- to 13-gram overlap checks are common). Labs also drop domains with lots of personal data (PII) or unsafe content, and some anonymize emails and IP addresses (FineWeb does). None of this is perfect, which is why evaluation (<a href="09-post-training.html">Chapter 9</a>) treats contamination as a standing risk.</p>
 
 <h3>The mixture</h3>
 <p>The cleaned sources are not used in proportion to their size. A <strong>data mixture</strong> sets the fraction of each batch that comes from each source. Llama 3's final mix was roughly <strong>50% general knowledge, 25% math and reasoning, 17% code, and 8% multilingual</strong> tokens. Mixtures are chosen by training small "proxy" models on candidate mixes and checking benchmark results, then confirming on a bigger model. Mixtures also change over time: Llama 3 increased the non-English and math share during training, and every modern run ends with a high-quality phase (covered later under <a href="#ch08-anneal">annealing</a>).</p>
@@ -305,7 +305,7 @@
 <p>High-quality human text is finite, so labs now generate more with existing models. Qwen3's report describes using earlier Qwen2.5 models to synthesize "trillions" of tokens of textbooks, question–answer pairs, instructions and code, and using a vision model to extract text from PDFs. Kimi K2 rephrases high-quality documents into new wordings to get more learning out of each fact. The risk is quality drift and homogeneity, so synthetic data is filtered like everything else.</p>
 
 <h3>How much data, and how it is stored</h3>
-<p>Modern runs use 15–36T tokens (table above). If you run out of unique data you can repeat it; studies of data-constrained training found that up to about four epochs of repetition is nearly as good as fresh data, with diminishing returns after that.</p>
+<p>Modern runs use 15–36T tokens (table above). If you run out of unique data you can repeat it; studies of data-constrained training found that up to about four epochs of repetition is nearly as good as fresh data, with diminishing returns after that (an epoch is one full pass over the data; <a href="p1-machine-learning.html#p1-batches">Primer&#160;1</a>).</p>
 
 <aside class="callout deep"><div class="callout-title">Low-level deep dive: the data loader</div>
 <p>Tokenization (<a href="03-tokens.html">Chapter 3</a>) is done once, offline. Llama 3's vocabulary has 128,256 entries, which does not fit in 16 bits, so token IDs are stored as <code>uint32</code>: 15T tokens × 4 B = <strong>60 TB</strong> of binary shards. Documents are concatenated with an end-of-text token between them and cut into fixed-length rows (8,192 tokens for most of Llama 3's run). This <strong>packing</strong> wastes no compute on padding. Llama 3 adds a <strong>document mask</strong> so tokens cannot attend across a document boundary inside a row.</p>
@@ -441,7 +441,7 @@
 </div>
 
 <h3>Perplexity: the loss in friendlier units</h3>
-<p>Loss in nats is abstract. <strong>Perplexity</strong> is e<sup><var>L</var></sup>: the size of a uniform choice that would be equally uncertain. In Figure 8.3, the mean loss is 1.97 nats, so the perplexity is e<sup>1.97</sup> ≈ 7.2: on average the model is as unsure as if it were picking fairly among about 7 tokens. Two anchor points:</p>
+<p>Loss in nats is abstract. <strong>Perplexity</strong> is e<sup><var>L</var></sup>: the size of a uniform choice that would be equally uncertain (entropy and cross-entropy: <a href="p4-probability-and-information.html#p4-entropy">Primer&#160;4</a>; perplexity for pre-Transformer models: <a href="p6-before-transformers.html#p6-perplexity">Primer&#160;6</a>). In Figure 8.3, the mean loss is 1.97 nats, so the perplexity is e<sup>1.97</sup> ≈ 7.2: on average the model is as unsure as if it were picking fairly among about 7 tokens. Two anchor points:</p>
 <ul>
   <li><strong>At initialization</strong> the loss is ln 128,256 ≈ <strong>11.76 nats</strong> (uniform guessing, <a href="04-neural-net-toolkit.html">Chapter 4</a>), so the perplexity is 128,256. If your first training step does not show a loss near 11.8 for a Llama-3-sized vocabulary, something is wrong with the setup. This is a standard sanity check.</li>
   <li><strong>Bits per token</strong> = loss / ln 2. 1.97 nats = 2.84 bits. With arithmetic coding, a model with that loss could compress the text to 2.84 bits per token. This is the precise sense in which a language model is a compressor.</li>
@@ -464,7 +464,7 @@
 <section>
 <h2>Anatomy of one training step</h2>
 
-<p>A training run is one loop executed about a million times. Each iteration is a <strong>step</strong>, and each step has four phases:</p>
+<p>A training run is one loop executed about a million times (the same loop in miniature, in PyTorch: <a href="p5-tools.html#p5-training-loop">Primer&#160;5</a>). Each iteration is a <strong>step</strong>, and each step has four phases:</p>
 <ol>
   <li><strong>Forward.</strong> Run the batch through all layers, as at inference. Unlike inference, keep the intermediate results ("activations") that the backward pass will need.</li>
   <li><strong>Loss.</strong> Compare the outputs with the targets (previous section).</li>
@@ -536,7 +536,7 @@
 <section>
 <h2>Backpropagation</h2>
 
-<p>The problem: Llama 3.1 8B has 8,030,261,248 weights, and we need the derivative of the loss with respect to each of them. The naive way, nudging one weight and re-running the model to see how the loss changes, would cost 8 billion forward passes per step. <strong>Backpropagation</strong> computes all 8 billion derivatives for about twice the cost of a single forward pass.</p>
+<p>The problem: Llama 3.1 8B has 8,030,261,248 weights, and we need the derivative of the loss with respect to each of them. The naive way, nudging one weight and re-running the model to see how the loss changes, would cost 8 billion forward passes per step. <strong>Backpropagation</strong> computes all 8 billion derivatives for about twice the cost of a single forward pass. <a href="p3-derivatives-and-backprop.html#p3-backprop">Primer&#160;3</a> works scalar backprop and autograd with numbers; this section scales the same idea up to matrices, so if you did Primer&#160;3 you can skim the scalar part.</p>
 
 <h3>The idea: the chain rule, run backwards</h3>
 <p>Any model is a graph of simple operations: multiply, add, ReLU, softmax, matmul. If you know how the loss changes with an operation's output, the chain rule tells you how it changes with the operation's inputs: multiply by the operation's local derivative. Start at the loss with "∂<var>L</var>/∂<var>L</var> = 1", walk the graph in reverse topological order, and every node gets its gradient exactly once. It is dynamic programming over the graph: the gradient of a shared intermediate value is computed once and reused by everything upstream, instead of being recomputed for each weight. (The technique's general name is <em>reverse-mode automatic differentiation</em>.)</p>
@@ -708,10 +708,10 @@
   <var>w</var> &#8592; <var>w</var> &#8722; <var>&#951;</var> &#183; <var>g</var>
   <span class="where"><var>w</var> = a weight, <var>g</var> = ∂<var>L</var>/∂<var>w</var> (its gradient), <var>&#951;</var> (eta) = the <strong>learning rate</strong>, a small number like 10<sup>−4</sup> that sets the step size. Figure 8.5's update used <var>&#951;</var> = 0.1.</span>
 </div>
-<p>The true loss is an average over all the training data, but nobody computes the full gradient. Each step uses a <strong>mini-batch</strong> (a few million tokens), which gives a noisy but unbiased estimate. That is <strong>stochastic gradient descent (SGD)</strong>. The noise is not a bug: it lets training make progress after seeing a tiny fraction of the data, and it helps the optimizer avoid sharp, brittle minima.</p>
+<p>The true loss is an average over all the training data, but nobody computes the full gradient. Each step uses a <strong>mini-batch</strong> (a few million tokens), which gives a noisy but unbiased estimate (mini-batches in miniature: <a href="p1-machine-learning.html#p1-batches">Primer&#160;1</a>). That is <strong>stochastic gradient descent (SGD)</strong>. The noise is not a bug: it lets training make progress after seeing a tiny fraction of the data, and it helps the optimizer avoid sharp, brittle minima.</p>
 
 <h3>Momentum: a heavy ball</h3>
-<p>Loss surfaces of neural nets have long, narrow valleys: very steep across, almost flat along. Plain gradient descent bounces from wall to wall and crawls along the floor. <strong>Momentum</strong> keeps a running velocity:</p>
+<p>Loss surfaces of neural nets have long, narrow valleys: very steep across, almost flat along (curvature, refresher: <a href="p3-derivatives-and-backprop.html#p3-curvature">Primer&#160;3</a>). Plain gradient descent bounces from wall to wall and crawls along the floor. <strong>Momentum</strong> keeps a running velocity:</p>
 <div class="formula">
   <var>v</var> &#8592; <var>&#946;</var>&#183;<var>v</var> + <var>g</var>  &#160;&#160;&#160;&#160; <var>w</var> &#8592; <var>w</var> &#8722; <var>&#951;</var>&#183;<var>v</var>
   <span class="where"><var>&#946;</var> ≈ 0.9: how much of the old velocity survives each step. Components that flip sign every step (the bouncing) cancel out; components that point the same way every step (along the valley) add up, giving an effective step up to <var>&#951;</var> / (1 − <var>&#946;</var>) = 10<var>&#951;</var>.</span>
@@ -838,14 +838,14 @@
 </ul>
 
 <h3>Gradient accumulation</h3>
-<p>If the batch is bigger than what fits in memory, split it into <strong>micro-batches</strong>: run forward and backward on each, <em>add</em> the gradients into the same buffer, and only then run the optimizer once. The math is identical to one big batch because the loss is an average. The global batch in tokens is:</p>
+<p>If the batch is bigger than what fits in memory, split it into <strong>micro-batches</strong>: run forward and backward on each, <em>add</em> the gradients into the same buffer (in PyTorch this works because <code>.grad</code> adds up across <code>backward()</code> calls; <a href="p5-tools.html#p5-autograd">Primer&#160;5</a>), and only then run the optimizer once. The math is identical to one big batch because the loss is an average. The global batch in tokens is:</p>
 <div class="formula">
   tokens per step = micro-batch rows &#215; accumulation steps &#215; data-parallel replicas &#215; sequence length
   <span class="where">Llama 3 405B, first stage: 32 rows per data-parallel group (fed through the pipeline as micro-batches) × 64 groups × 8,192 tokens = 16.8M tokens per step.</span>
 </div>
 
 <h3>Gradient clipping and loss spikes</h3>
-<p>Occasionally a batch produces a huge gradient. <strong>Gradient clipping</strong> computes the global L2 norm of all gradients, ‖<var>g</var>‖ = √(Σ <var>g</var><sub><var>i</var></sub><sup>2</sup>) over every weight in the model, and if it exceeds a threshold (1.0 is standard), scales every gradient by 1.0/‖<var>g</var>‖. Direction is kept, length is capped. When weights are sharded across GPUs, this needs one extra all-reduce of the partial sums of squares.</p>
+<p>Occasionally a batch produces a huge gradient. <strong>Gradient clipping</strong> computes the global L2 norm of all gradients, ‖<var>g</var>‖ = √(Σ <var>g</var><sub><var>i</var></sub><sup>2</sup>) over every weight in the model, and if it exceeds a threshold (1.0 is standard), scales every gradient by 1.0/‖<var>g</var>‖. Direction is kept, length is capped. (Clipping was invented for the exploding gradients of recurrent networks: <a href="p6-before-transformers.html#p6-backprop-through-time">Primer&#160;6</a>.) When weights are sharded across GPUs, this needs one extra all-reduce of the partial sums of squares.</p>
 <p>Big runs still see <strong>loss spikes</strong>: the loss suddenly jumps and either recovers or diverges. Common causes are attention logits growing without bound, bad data batches, and too-high learning rates. Remedies include rolling back to a checkpoint and skipping the offending data, lowering the rate, normalizing queries and keys (QK-norm) or capping attention logits (Kimi's QK-Clip). Llama 3 reports "few loss spikes", DeepSeek-V3 "no irrecoverable loss spikes", and Kimi K2 shows a spike-free curve. Stability is a headline feature because a diverged run at this scale costs millions.</p>
 
 <p>One more knob: <strong>initialization</strong>. Weights start as small random values (in GPT-2-style code, normal with standard deviation 0.02, with residual-output projections scaled down by depth). Getting the scale right per layer, so that hyperparameters tuned on small models transfer to big ones, is an active area; Meta's Llama 4 post calls its method MetaP.</p>
@@ -1509,7 +1509,7 @@
 <section>
 <h2>Scaling laws</h2>
 
-<p>With a fixed compute budget <var>C</var>, should you train a bigger model on fewer tokens or a smaller one on more? Training many small models revealed a surprise: loss falls as a smooth <strong>power law</strong> in parameters, data and compute, over many orders of magnitude. That makes the outcome of a giant run predictable from small ones.</p>
+<p>With a fixed compute budget <var>C</var>, should you train a bigger model on fewer tokens or a smaller one on more? Training many small models revealed a surprise: loss falls as a smooth <strong>power law</strong> (a straight line on log–log axes; <a href="p4-probability-and-information.html#p4-logs">Primer&#160;4</a>) in parameters, data and compute, over many orders of magnitude. That makes the outcome of a giant run predictable from small ones.</p>
 
 <h3>Kaplan (2020)</h3>
 <p>OpenAI's Kaplan et al. fit laws like <var>L</var>(<var>N</var>) = (<var>N</var><sub>c</sub>/<var>N</var>)<sup>0.076</sup> for loss versus (non-embedding) parameters, with similar laws for data and compute. Their allocation rule said to grow parameters much faster than data (<var>N</var> ∝ <var>C</var><sup>0.73</sup>). GPT-3 followed that philosophy: 175B parameters on only 300B tokens, 1.7 tokens per parameter.</p>

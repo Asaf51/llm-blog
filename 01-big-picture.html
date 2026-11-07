@@ -83,7 +83,7 @@
 <section>
 <h2>One function: tokens in, probabilities out</h2>
 
-<p>Remove the chat window, the API and the GPU cluster, and an LLM is one mathematical function. You give it a sequence of tokens. It gives back a probability for every token that could come next. Everything else in this blog is about how that function is computed, how its numbers were found, or how to call it quickly and cheaply.</p>
+<p>Remove the chat window, the API and the GPU cluster, and an LLM is one mathematical function. You give it a sequence of tokens. It gives back a probability for every token that could come next. Everything else in this blog is about how that function is computed, how its numbers were found, or how to call it quickly and cheaply. If machine learning or its math is new to you, the Primer before this chapter (starting at <a href="p1-machine-learning.html">Primer&#160;1</a>) teaches the basics that later chapters assume.</p>
 
 <p>A <strong>token</strong> is a short piece of text, usually a word or part of a word, identified by an integer ID (<a href="03-tokens.html">Chapter 3</a> shows how text is split). The set of all tokens a model knows is its <strong>vocabulary</strong>. Llama&#160;3 has 128,256 of them. Our running sentence, <code>"The cat sat on the"</code>, is five tokens: <span class="tok">The</span> <span class="tok">&#9251;cat</span> <span class="tok">&#9251;sat</span> <span class="tok">&#9251;on</span> <span class="tok">&#9251;the</span>, with IDs 791, 8415, 7731, 389 and 279. (The <span class="tok">&#9251;</span> marks a leading space, which belongs to the token.)</p>
 
@@ -916,7 +916,7 @@
 
 <p>Where do 8 billion good numbers come from? From <strong>training</strong>. Using them to answer a prompt is <strong>inference</strong>. These are two very different workloads. Mixing them up is the most common source of wrong intuitions about LLMs, so here is the difference before any details.</p>
 
-<p><strong>Training</strong> starts from random weights, so the model first outputs noise. You show it real text. At every position you ask for the probability of the token that actually came next, and you measure how wrong it was with one number, the <em>loss</em> (<a href="04-neural-net-toolkit.html">Ch. 4</a> defines it). Then, for each of the 8 billion weights, you compute which direction would have made the loss slightly smaller. This is the <em>gradient</em>, found by an algorithm called backpropagation (<a href="08-pretraining.html">Ch. 8</a>). You move every weight a tiny step in that direction and repeat, for trillions of tokens. Nobody teaches the model grammar or facts. The weights drift toward whatever values predict text well.</p>
+<p><strong>Training</strong> starts from random weights, so the model first outputs noise. You show it real text. At every position you ask for the probability of the token that actually came next, and you measure how wrong it was with one number, the <em>loss</em> (<a href="04-neural-net-toolkit.html">Ch. 4</a> defines it; <a href="p1-machine-learning.html#p1-four-ingredients">Primer&#160;1</a> shows where it sits among the four ingredients of learning). Then, for each of the 8 billion weights, you compute which direction would have made the loss slightly smaller. This is the <em>gradient</em>, found by an algorithm called backpropagation (<a href="08-pretraining.html">Ch. 8</a>). You move every weight a tiny step in that direction and repeat, for trillions of tokens. Nobody teaches the model grammar or facts. The weights drift toward whatever values predict text well.</p>
 
 <p><strong>Inference</strong> is what happens when you send a prompt. The function runs with the weights frozen. Nothing is learned and the weights are only read. Talking to a model does not change it.</p>
 
@@ -1112,7 +1112,7 @@
 
 <h3>Prediction is compression</h3>
 
-<p>A model that predicts well can compress well, and the reverse is also true. This is an old result from information theory. If the model gives the actual next token probability <var>p</var>, an arithmetic coder can store that token in about &#8722;log<sub>2</sub>&#160;<var>p</var> bits. A token predicted with 50% costs 1 bit. A token predicted with 1% costs 6.6 bits. Training with the standard loss (<a href="04-neural-net-toolkit.html">Ch. 4</a>, <a href="08-pretraining.html">Ch. 8</a>) minimizes exactly this number, averaged over trillions of tokens. In other words, pretraining is a search for the shortest description of its training text.</p>
+<p>A model that predicts well can compress well, and the reverse is also true. This is an old result from information theory. If the model gives the actual next token probability <var>p</var>, an arithmetic coder can store that token in about &#8722;log<sub>2</sub>&#160;<var>p</var> bits (refresher on logarithms and entropy: <a href="p4-probability-and-information.html#p4-entropy">Primer&#160;4</a>). A token predicted with 50% costs 1 bit. A token predicted with 1% costs 6.6 bits. Training with the standard loss (<a href="04-neural-net-toolkit.html">Ch. 4</a>, <a href="08-pretraining.html">Ch. 8</a>) minimizes exactly this number, averaged over trillions of tokens. In other words, pretraining is a search for the shortest description of its training text.</p>
 
 <figure>
 <svg viewBox="0 0 800 330" role="img" aria-label="Bits per token for The cat sat on the mat under Llama 3.1 8B: The 5.3, cat 13.7, sat 8.7, on 0.5, the 0.2, mat 0.4, period 3.1. Total 31.9 bits versus 184 bits of UTF-8.">
@@ -1235,10 +1235,22 @@
 <section>
 <h2>How to read this blog</h2>
 
-<p>The chapters build on each other in order, and Figure&#160;1.11 shows the route. Part I gives you the tools: numbers and hardware, tokens, and basic neural-network pieces. Part II opens the model. Part III makes the weights. Part IV runs them fast and cheaply. Part V follows one real request end to end and collects every formula in a cheat sheet.</p>
+<p>The chapters build on each other in order, and Figure&#160;1.11 shows the route. Part 0, the Primer, covers the prerequisites for readers new to machine learning: how a model learns from examples, the math it uses (vectors and matrices, derivatives, probability), NumPy, PyTorch and Hugging Face, and the language models that came before transformers. Part I gives you the tools: numbers and hardware, tokens, and basic neural-network pieces. Part II opens the model. Part III makes the weights. Part IV runs them fast and cheaply. Part V follows one real request end to end and collects every formula in a cheat sheet.</p>
 
 <figure>
-<svg viewBox="0 0 900 340" role="img" aria-label="Route map of the blog: five parts with their chapters, and the color legend used in all figures.">
+<svg viewBox="0 0 900 470" role="img" aria-label="Route map of the blog: the six-chapter Primer, then five parts with their chapters, and the color legend used in all figures.">
+  <text x="450" y="26" text-anchor="middle" font-size="15" font-weight="700" fill="#1d2433">0 &#183; Primer</text>
+  <path d="M20 38 H880" stroke="#ddd8ce" stroke-width="1.5"/>
+  <g font-size="15" fill="#1d2433">
+    <a href="p1-machine-learning.html"><rect x="20" y="52" width="135" height="34" rx="8" fill="#f3f1ec" stroke="#ddd8ce"/><text x="34" y="74">P1 What ML is</text></a>
+    <a href="p2-vectors-and-matrices.html"><rect x="165" y="52" width="135" height="34" rx="8" fill="#f3f1ec" stroke="#ddd8ce"/><text x="179" y="74">P2 Vectors</text></a>
+    <a href="p3-derivatives-and-backprop.html"><rect x="310" y="52" width="135" height="34" rx="8" fill="#f3f1ec" stroke="#ddd8ce"/><text x="324" y="74">P3 Derivatives</text></a>
+    <a href="p4-probability-and-information.html"><rect x="455" y="52" width="135" height="34" rx="8" fill="#f3f1ec" stroke="#ddd8ce"/><text x="469" y="74">P4 Probability</text></a>
+    <a href="p5-tools.html"><rect x="600" y="52" width="135" height="34" rx="8" fill="#f3f1ec" stroke="#ddd8ce"/><text x="614" y="74">P5 Tools</text></a>
+    <a href="p6-before-transformers.html"><rect x="745" y="52" width="135" height="34" rx="8" fill="#f3f1ec" stroke="#ddd8ce"/><text x="759" y="74">P6 Early LMs</text></a>
+  </g>
+  <text x="450" y="110" text-anchor="middle" font-size="15" fill="#687084">the prerequisites, if machine learning is new to you</text>
+  <g transform="translate(0 130)">
   <g font-size="15" font-weight="700" fill="#1d2433">
     <text x="102" y="26" text-anchor="middle">I &#183; Foundations</text>
     <text x="276" y="26" text-anchor="middle">II &#183; Architecture</text>
@@ -1286,9 +1298,16 @@
     <rect x="626" y="312" width="14" height="14" rx="3" fill="#d64545"/><text x="646" y="324">compute, hot spot</text>
     <rect x="782" y="312" width="14" height="14" rx="3" fill="#3d8bd4"/><text x="802" y="324">memory</text>
   </g>
+  </g>
 </svg>
 <figcaption><span class="fig-label">Figure 1.11</span> — Route map (click a chapter) and the color legend shared by all figures in the blog.</figcaption>
 </figure>
+
+<p>Where to start depends on what you already know:</p>
+<ul>
+  <li><strong>New to machine learning, or rusty on the math:</strong> <a href="p1-machine-learning.html">Primer&#160;1</a> &#8594; 2 &#8594; 3 &#8594; 4 &#8594; 5 &#8594; 6, then Parts I&#8211;V in order or one of the shortcuts below.</li>
+  <li><strong>Already comfortable with gradient descent, probability and PyTorch:</strong> carry on from here; links point into the Primer wherever a later chapter relies on it.</li>
+</ul>
 
 <p>Shortcuts, if you have a specific goal:</p>
 <ul>
@@ -1353,11 +1372,11 @@
 </ul>
 
 <h3>Setup</h3>
-<p>Accept the Llama&#160;3.1 license on its Hugging Face page, then fetch the weights. Develop every milestone on <code>Qwen/Qwen2.5-0.5B</code> (ungated, about 1&#160;GB, seconds per experiment), and run the checks on Llama&#160;3.1&#160;8B: every reference number below is for that model. Its BF16 weights take 16.06&#160;GB of VRAM, so a 24&#160;GB card works if you keep contexts to a few thousand tokens. Budget about 35&#160;GB of disk for the base and Instruct models. The <code>safetensors</code> package is only there to check your reader against.</p>
+<p>Accept the Llama&#160;3.1 license on its Hugging Face page, then fetch the weights (<a href="p5-tools.html#p5-hub">Primer&#160;5</a> covers <code>hf</code> login, gated access and the cache). Develop every milestone on <code>Qwen/Qwen2.5-0.5B</code> (ungated, about 1&#160;GB, seconds per experiment), and run the checks on Llama&#160;3.1&#160;8B: every reference number below is for that model. Its BF16 weights take 16.06&#160;GB of VRAM, so a 24&#160;GB card works if you keep contexts to a few thousand tokens. Budget about 35&#160;GB of disk for the base and Instruct models. The <code>safetensors</code> package is only there to check your reader against.</p>
 <pre><code>pip install torch transformers accelerate safetensors numpy matplotlib pytest
 hf auth login
 hf download meta-llama/Llama-3.1-8B \
-    --include <span class="s">"*.json"</span> <span class="s">"*.safetensors"</span> --local-dir models/Llama-3.1-8B
+    --include <span class="s">"*.json"</span> --include <span class="s">"*.safetensors"</span> --local-dir models/Llama-3.1-8B
 hf download Qwen/Qwen2.5-0.5B --local-dir models/Qwen2.5-0.5B
 
 llmzip/
@@ -1391,7 +1410,7 @@ llmzip/
   </li>
   <li>
     <div class="ms-title">Wrap the numbers as the function <var>f</var></div>
-    <p>Build the architecture from <code>config.json</code> alone with <code>AutoModelForCausalLM.from_config</code>: this is the "few hundred lines of code". Fill it from your reader with <code>load_state_dict(strict=True)</code>. That one call is the chapter's Intuition box made literal: an interpreter, and a 16&#160;GB program loaded into it. Wrap the result as <code>next_token_probs</code>: token IDs in, 128,256 probabilities out, with the softmax taken in float32 over the last position's logits. Test the three properties from <em>One function: tokens in, probabilities out</em>: it is a distribution, it is deterministic, it is stateless. Then count its cost. Run a 128-token forward pass (logits for every position, the default) inside <code>torch.utils.flop_counter.FlopCounterMode</code>, with the model loaded using <code>attn_implementation="eager"</code> so every matmul is visible to the counter.</p>
+    <p>Build the architecture from <code>config.json</code> alone with <code>AutoModelForCausalLM.from_config</code>: this is the "few hundred lines of code". Fill it from your reader with <code>load_state_dict(strict=True)</code> (what a <code>state_dict</code> is: <a href="p5-tools.html#p5-modules">Primer&#160;5</a>). That one call is the chapter's Intuition box made literal: an interpreter, and a 16&#160;GB program loaded into it. Wrap the result as <code>next_token_probs</code>: token IDs in, 128,256 probabilities out, with the softmax taken in float32 over the last position's logits. Test the three properties from <em>One function: tokens in, probabilities out</em>: it is a distribution, it is deterministic, it is stateless. Then count its cost. Run a 128-token forward pass (logits for every position, the default) inside <code>torch.utils.flop_counter.FlopCounterMode</code>, with the model loaded using <code>attn_implementation="eager"</code> so every matmul is visible to the counter.</p>
     <pre><code><span class="c"># fn.py</span>
 <span class="k">def</span> <span class="f">load_model</span>(model_dir: Path, device=<span class="s">"cuda"</span>) -&gt; torch.nn.Module:
     <span class="s">"""Code from config.json, numbers from st_reader. No from_pretrained."""</span>

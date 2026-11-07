@@ -71,7 +71,7 @@
 
 <p>The Transformer was introduced in 2017 to translate sentences, for example French to English. That job has two
 different halves. First you must <em>read</em> the whole source sentence. Then you must <em>write</em> the target
-sentence one token at a time. So the original design had two stacks of layers.</p>
+sentence one token at a time. So the original design had two stacks of layers (the recurrent encoder–decoder with attention that it replaced is told in <a href="p6-before-transformers.html#p6-seq2seq-and-attention">Primer&nbsp;6</a>).</p>
 
 <ul>
   <li>The <b>encoder</b> reads the source. Its attention is bidirectional: every source token may look at every other
@@ -460,7 +460,7 @@ cosmetic, but it decides whether a deep model trains at all.</p>
 there is no clean route from the output back to the early layers. Xiong et al. (2020) showed that at the start of
 training, post-norm gradients near the output are large, which is why the original Transformer needed a careful
 learning-rate warm-up (very small weight updates for the first steps of training, <a href="08-pretraining.html">Chapter 8</a>). Pre-norm keeps the identity path clean: the gradient of the output with respect to
-<var>x</var><sub>0</sub> contains a plain "1" term from the sum. GPT-2 moved its normalization to the input of each
+<var>x</var><sub>0</sub> contains a plain "1" term from the sum (chain-rule refresher: <a href="p3-derivatives-and-backprop.html#p3-chain-rule">Primer&nbsp;3</a>). GPT-2 moved its normalization to the input of each
 sub-block, and almost every large model since has done the same. One cost: the stream itself is never normalized
 inside the stack, which is why a <b>final norm</b> is needed before the LM head.</p>
 
@@ -1271,7 +1271,7 @@ attention. Short prompts are dominated by the FFN; very long contexts by attenti
 <p>Here is everything above as runnable code. It follows the Hugging Face <code>LlamaForCausalLM</code> math: the same
 RMSNorm, the Llama 3.1 RoPE frequency rescaling, the same GQA head mapping, SwiGLU, untied LM head. Weight names map
 one-to-one onto the checkpoint (loader below). It is written for clarity, not speed: full precision, no batching, no KV
-cache.</p>
+cache. If the <code>einsum</code> strings or <code>keepdims=True</code> look cryptic, see <a href="p2-vectors-and-matrices.html#p2-tensors">Primer&nbsp;2</a> and <a href="p5-tools.html#p5-broadcasting">Primer&nbsp;5</a>.</p>
 
 <pre><code><!--GEN:code_ref--><span class="k">import</span> numpy <span class="k">as</span> np               <span class="c"># full precision for clarity; engines use BF16</span>
 
@@ -1993,7 +1993,7 @@ SmolLM2-135M first (it loads in a second and runs in FP32 anywhere), then point 
 <code>load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="test")</code>.</p>
 <pre><code>pip install torch numpy safetensors transformers datasets matplotlib pytest
 hf auth login     <span class="c"># first accept the license on the meta-llama/Llama-3.1-8B model page</span>
-hf download meta-llama/Llama-3.1-8B --include "*.json" "*.safetensors" --local-dir ckpt/llama-3.1-8b
+hf download meta-llama/Llama-3.1-8B --include "*.json" --include "*.safetensors" --local-dir ckpt/llama-3.1-8b
 hf download HuggingFaceTB/SmolLM2-135M --local-dir ckpt/smollm2-135m   <span class="c"># tied, tiny</span>
 hf download Qwen/Qwen2.5-0.5B --local-dir ckpt/qwen2.5-0.5b            <span class="c"># tied + q/k/v biases</span>
 

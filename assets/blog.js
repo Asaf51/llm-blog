@@ -9,6 +9,12 @@
   "use strict";
 
   var CHAPTERS = [
+    { n: "P1", file: "p1-machine-learning.html", title: "What Machine Learning Is", part: "Part 0 · Primer" },
+    { n: "P2", file: "p2-vectors-and-matrices.html", title: "Vectors & Matrices", part: "Part 0 · Primer" },
+    { n: "P3", file: "p3-derivatives-and-backprop.html", title: "Derivatives & Backprop", part: "Part 0 · Primer" },
+    { n: "P4", file: "p4-probability-and-information.html", title: "Probability & Information", part: "Part 0 · Primer" },
+    { n: "P5", file: "p5-tools.html", title: "Tools: NumPy, PyTorch & Hugging Face", part: "Part 0 · Primer" },
+    { n: "P6", file: "p6-before-transformers.html", title: "Language Models Before Transformers", part: "Part 0 · Primer" },
     { n: "01", file: "01-big-picture.html", title: "The Big Picture", part: "Part I · Foundations" },
     { n: "02", file: "02-numbers-and-hardware.html", title: "Numbers & the Machine", part: "Part I · Foundations" },
     { n: "03", file: "03-tokens.html", title: "Tokens", part: "Part I · Foundations" },

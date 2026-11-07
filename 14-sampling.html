@@ -1400,7 +1400,7 @@ exact tests. Run the real experiments on <code>meta-llama/Llama-3.1-8B-Instruct<
 128,256-entry vocabulary is the chapter's <var>V</var>. The repetition experiment uses the base model, because
 open-ended continuation is where greedy loops show up most clearly. Prompts come from
 <code>Salesforce/wikitext</code> (<code>wikitext-2-raw-v1</code>) and <code>openai/gsm8k</code> (<code>main</code>).
-Install vLLM in its own environment, because it pins its own PyTorch.</p>
+Install vLLM in its own environment, because it pins its own PyTorch (<a href="p5-tools.html#p5-environments">Primer&#160;5</a> explains virtual environments).</p>
 <pre><code>pip install torch transformers accelerate datasets scipy jsonschema xgrammar matplotlib pytest
 hf auth login                                  <span class="c"># accept the license on the meta-llama model pages first</span>
 hf download meta-llama/Llama-3.1-8B-Instruct

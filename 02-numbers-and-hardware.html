@@ -84,7 +84,7 @@
   <li>A tensor with three or more axes is usually just called a tensor. A batch of activations has shape [<var>B</var>, <var>n</var>, <var>d</var>]: <var>B</var> sequences, <var>n</var> tokens each, <var>d</var> numbers per token.</li>
 </ul>
 
-<p>The number of axes is the <b>rank</b> (also "number of dimensions"). The list of axis lengths is the <b>shape</b>. The element type is the <b>dtype</b> (for example <code>bfloat16</code>). Two facts follow directly:</p>
+<p>The number of axes is the <b>rank</b> (also "number of dimensions"; not the same as matrix rank, see <a href="p2-vectors-and-matrices.html#p2-rank">Primer&nbsp;2</a>). The list of axis lengths is the <b>shape</b>. The element type is the <b>dtype</b> (for example <code>bfloat16</code>). Two facts follow directly:</p>
 
 <div class="formula">
   elements = product of the shape &nbsp;&nbsp;&nbsp;&nbsp; bytes = elements × bytes per element
@@ -165,7 +165,7 @@
 <figcaption><span class="fig-label">Figure 2.1</span> — Left: tensors of increasing rank, with shapes from Llama 3.1 8B. Right: row-major layout. Each row is contiguous. The strides say how far to jump in memory per index step, so a transpose can be a new set of strides over the same bytes.</figcaption>
 </figure>
 
-<p>This is the same thing as a C array <code>float a[3][4]</code>. In PyTorch a tensor is a pointer to storage plus shape, strides, dtype and device. Operations like <code>transpose</code>, slicing or <code>view</code> often just create new strides over the same bytes: no copy. The catch is <b>contiguity</b>. Fast GPU loads want neighboring threads to read neighboring addresses (we come back to this in the kernel section). So a library will sometimes copy a strided view into a fresh contiguous buffer before a heavy operation. A <code>.contiguous()</code> call is a real memory copy.</p>
+<p>This is the same thing as a C array <code>float a[3][4]</code>. In PyTorch a tensor is a pointer to storage plus shape, strides, dtype and device. Operations like <code>transpose</code>, slicing or <code>view</code> often just create new strides over the same bytes: no copy. The catch is <b>contiguity</b>. Fast GPU loads want neighboring threads to read neighboring addresses (we come back to this in the kernel section). So a library will sometimes copy a strided view into a fresh contiguous buffer before a heavy operation. A <code>.contiguous()</code> call is a real memory copy (views versus copies in NumPy and PyTorch: <a href="p5-tools.html#p5-arrays">Primer&nbsp;5</a>).</p>
 
 <aside class="callout warn"><div class="callout-title">A convention that trips people up</div><p>PyTorch's <code>nn.Linear</code> stores its weight as [out_features, in_features] and computes <var>y</var> = <var>x</var>·<var>W</var><sup>T</sup>. Model files store weights in that orientation. When this blog writes <var>x</var>·<var>W</var> with <var>W</var> of shape [<var>k</var>, <var>n</var>], it means the math, not the storage layout. The cost is the same either way.</p></aside>
 </section>
@@ -173,7 +173,7 @@
 <section>
 <h2>Matrix multiplication: where the FLOPs go</h2>
 
-<p>Almost every learned operation in a transformer is "multiply a block of token vectors by a weight matrix". So the cost of an LLM is mostly the cost of matrix multiplication. Let us count it exactly.</p>
+<p>Almost every learned operation in a transformer is "multiply a block of token vectors by a weight matrix". So the cost of an LLM is mostly the cost of matrix multiplication. Let us count it exactly. If matrix products are rusty, start with <a href="p2-vectors-and-matrices.html#p2-matmul">Primer&nbsp;2</a>.</p>
 
 <p>Take <var>A</var> with shape [<var>m</var>, <var>k</var>] and <var>B</var> with shape [<var>k</var>, <var>n</var>]. The product <var>C</var> = <var>A</var>·<var>B</var> has shape [<var>m</var>, <var>n</var>], and each output is a dot product of a row of <var>A</var> with a column of <var>B</var>:</p>
 
@@ -1118,7 +1118,7 @@ mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32  {d0,d1,d2,d3}, {a0,a1,a2,a3
 
 <h3>Launch overhead</h3>
 
-<p>A kernel launch is not free. The CPU, the driver and the GPU's front end need on the order of a few microseconds per launch (approximate; it depends on the system). Launches are asynchronous, so this only hurts when kernels are short. Then the GPU finishes each kernel before the CPU has issued the next one and sits idle in between. That is exactly the situation in LLM decoding at batch size 1: one step runs a handful of kernels per layer times 32 layers, several hundred launches, each doing very little work. A few hundred launches at a few microseconds each is around a millisecond, a big share of the roughly 5 ms that one token of Llama 3.1 8B can take on an H100. Small kernels also cannot fill 132 SMs. Serving engines fight this with <b>kernel fusion</b> (one kernel does several ops) and <b>CUDA Graphs</b> (record a whole sequence of launches once, then replay it with a single launch). Both are covered in <a href="15-serving.html">Chapter 15</a>.</p>
+<p>A kernel launch is not free. The CPU, the driver and the GPU's front end need on the order of a few microseconds per launch (approximate; it depends on the system). Launches are asynchronous (<a href="p5-tools.html#p5-tensors">Primer&nbsp;5</a> shows how that looks in PyTorch), so this only hurts when kernels are short. Then the GPU finishes each kernel before the CPU has issued the next one and sits idle in between. That is exactly the situation in LLM decoding at batch size 1: one step runs a handful of kernels per layer times 32 layers, several hundred launches, each doing very little work. A few hundred launches at a few microseconds each is around a millisecond, a big share of the roughly 5 ms that one token of Llama 3.1 8B can take on an H100. Small kernels also cannot fill 132 SMs. Serving engines fight this with <b>kernel fusion</b> (one kernel does several ops) and <b>CUDA Graphs</b> (record a whole sequence of launches once, then replay it with a single launch). Both are covered in <a href="15-serving.html">Chapter 15</a>.</p>
 </section>
 
 <section>

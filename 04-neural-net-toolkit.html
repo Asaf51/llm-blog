@@ -159,7 +159,7 @@
 <p>The real picture differs in one important way. The axes are not special. Training is free to use <em>any direction</em> in the 4,096-D space as a feature, and it usually does. "Animal-ness" is more likely a direction such as 0.3·axis<sub>17</sub> − 0.2·axis<sub>940</sub> + … spread over many coordinates. To measure how much of a feature a vector contains, you project the vector onto that feature's direction. That projection is a dot product.</p>
 
 <h3>Dot product and cosine similarity</h3>
-<p>The <dfn>dot product</dfn> of two vectors of the same length multiplies them element by element and adds the results:</p>
+<p>The <dfn>dot product</dfn> of two vectors of the same length multiplies them element by element and adds the results (refresher: <a href="p2-vectors-and-matrices.html#p2-dot">Primer&#160;2</a>):</p>
 <div class="formula">
   <var>a</var> · <var>b</var> = Σ<sub><var>i</var></sub> <var>a</var><sub><var>i</var></sub> <var>b</var><sub><var>i</var></sub> = |<var>a</var>| |<var>b</var>| cos θ
   <span class="where">where <var>a</var><sub><var>i</var></sub>, <var>b</var><sub><var>i</var></sub> are the <var>i</var>-th coordinates, |<var>a</var>| = √(<var>a</var>·<var>a</var>) is the length (norm) of <var>a</var>, and θ is the angle between the two arrows.</span>
@@ -234,7 +234,7 @@
 </aside>
 
 <h3>Analogy arithmetic, and its caveats</h3>
-<p>The famous demo comes from word2vec (Mikolov et al., 2013): take the vector for <i>King</i>, subtract <i>Man</i>, add <i>Woman</i>, and the nearest word vector is <i>Queen</i>. The reading is that the difference <i>woman − man</i> captures a "gender" direction, and adding it to <i>king</i> moves you along that direction. Figure 4.1 shows this as a parallelogram.</p>
+<p>The famous demo comes from word2vec (Mikolov et al., 2013; <a href="p6-before-transformers.html#p6-neural-language-model">Primer&#160;6</a> tells its backstory): take the vector for <i>King</i>, subtract <i>Man</i>, add <i>Woman</i>, and the nearest word vector is <i>Queen</i>. The reading is that the difference <i>woman − man</i> captures a "gender" direction, and adding it to <i>king</i> moves you along that direction. Figure 4.1 shows this as a parallelogram.</p>
 <p>The idea is real but oversold. Three caveats:</p>
 <ol>
   <li><strong>The standard test cheats a little.</strong> The usual analogy code is not allowed to return any of the three input words. Nissim et al. (2019) removed that rule. On the standard Google analogy test set, accuracy for the usual method fell from 0.74 to 0.21. Most of the time the "answer" was simply the input word: <i>man is to king as woman is to king</i>.</li>
@@ -253,7 +253,7 @@
 <p>Pick two random directions in 2-D and the angle between them can be anything. Pick two random directions in 4,096-D and they are almost always within a degree or so of perpendicular. The reason is the law of large numbers. The cosine is a sum of 4,096 small products with random signs, divided by the lengths. Those products mostly cancel. The typical size of what is left shrinks like 1/√<var>d</var>:</p>
 <div class="formula">
   std(cos θ) ≈ <span class="frac"><span>1</span><span>√<var>d</var></span></span> &#160;&#160;→&#160;&#160; <var>d</var> = 4,096: &#160; 1/64 ≈ 0.016
-  <span class="where">For two independent random directions in <var>d</var> dimensions. In 2-D the spread covers the whole range [−1, 1]. At <var>d</var> = 4,096, a cosine of 0.1 is more than six standard deviations out, so it practically never happens by chance.</span>
+  <span class="where">For two independent random directions in <var>d</var> dimensions. In 2-D the spread covers the whole range [−1, 1]. At <var>d</var> = 4,096, a cosine of 0.1 is more than six standard deviations out (<a href="p4-probability-and-information.html#p4-sqrt-n">Primer&#160;4</a> explains why such spreads shrink like 1/√<var>d</var>), so it practically never happens by chance.</span>
 </div>
 
 <div class="widget" id="ch04-hd">
@@ -432,7 +432,7 @@
 <p>A <dfn>layer</dfn> is <var>m</var> neurons that all read the same input. Stack their weight vectors as the rows of a matrix <var>W</var> with <var>m</var> rows and <var>d</var> columns. Then all <var>m</var> weighted sums are one matrix–vector product:</p>
 <div class="formula">
   <var>y</var> = <var>W</var> <var>x</var> + <var>b</var> &#160;&#160;&#160;&#160; <var>W</var> ∈ ℝ<sup><var>m</var>×<var>d</var></sup>, &#160;<var>x</var> ∈ ℝ<sup><var>d</var></sup>, &#160;<var>b</var>, <var>y</var> ∈ ℝ<sup><var>m</var></sup>
-  <span class="where">ℝ<sup><var>m</var>×<var>d</var></sup> means "a grid of real numbers with <var>m</var> rows and <var>d</var> columns". Output <var>y</var>[<var>i</var>] is the dot product of row <var>i</var> of <var>W</var> with <var>x</var>, plus <var>b</var>[<var>i</var>].</span>
+  <span class="where">ℝ<sup><var>m</var>×<var>d</var></sup> means "a grid of real numbers with <var>m</var> rows and <var>d</var> columns" (refresher: <a href="p2-vectors-and-matrices.html#p2-matvec">Primer&#160;2</a>). Output <var>y</var>[<var>i</var>] is the dot product of row <var>i</var> of <var>W</var> with <var>x</var>, plus <var>b</var>[<var>i</var>].</span>
 </div>
 <p>This is called a <dfn>linear layer</dfn> (also "dense" or "fully connected" layer, or a "projection"). Strictly, with a bias it is <em>affine</em>; people say "linear" anyway. Llama's linear layers have no bias at all (its config sets <code>attention_bias</code> and <code>mlp_bias</code> to false), so for Llama, <var>y</var> = <var>Wx</var> exactly.</p>
 <p>There is a geometric reading too. <var>W</var> maps a point in <var>d</var>-dimensional space to a point in <var>m</var>-dimensional space. It can rotate, stretch, squash, shear and project, but it keeps straight lines straight and keeps the origin fixed. Column <var>j</var> of <var>W</var> is where the <var>j</var>-th axis direction lands. Figure 4.7 below shows this on a 2-D grid.</p>
@@ -543,7 +543,7 @@
 </figure>
 
 <h3>How W sits in memory</h3>
-<p>PyTorch's <code>nn.Linear</code> stores its weight with shape <code>[out_features, in_features]</code>, here <code>[14336, 4096]</code>, in row-major order. Row-major layout was covered in <a href="02-numbers-and-hardware.html">Chapter 2</a>. So the 4,096 weights of one output neuron sit next to each other: one contiguous 8 KiB run. The dot product for <var>y</var>[<var>i</var>] streams through that run front to back. On a CPU this is exactly the pattern hardware prefetchers love. On a GPU, neighbouring threads read neighbouring addresses, so their loads <em>coalesce</em> into wide memory transactions.</p>
+<p>PyTorch's <code>nn.Linear</code> stores its weight with shape <code>[out_features, in_features]</code>, here <code>[14336, 4096]</code>, in row-major order (why this is the transpose of the math notation: <a href="p2-vectors-and-matrices.html#p2-transpose">Primer&#160;2</a>). Row-major layout was covered in <a href="02-numbers-and-hardware.html">Chapter 2</a>. So the 4,096 weights of one output neuron sit next to each other: one contiguous 8 KiB run. The dot product for <var>y</var>[<var>i</var>] streams through that run front to back. On a CPU this is exactly the pattern hardware prefetchers love. On a GPU, neighbouring threads read neighbouring addresses, so their loads <em>coalesce</em> into wide memory transactions.</p>
 
 <figure class="wide">
 <svg viewBox="0 0 960 470" role="img" aria-label="Row-major memory layout of W: each row is a contiguous 8 KiB block; address formula; and batched matrix multiply Y equals X times W transposed.">
@@ -617,7 +617,7 @@
 <p>Stacking linear layers does not make a network more powerful. Two linear layers in a row are just one linear layer:</p>
 <div class="formula">
   <var>W</var><sub>2</sub>(<var>W</var><sub>1</sub><var>x</var> + <var>b</var><sub>1</sub>) + <var>b</var><sub>2</sub> = (<var>W</var><sub>2</sub><var>W</var><sub>1</sub>)<var>x</var> + (<var>W</var><sub>2</sub><var>b</var><sub>1</sub> + <var>b</var><sub>2</sub>) = <var>W</var>′<var>x</var> + <var>b</var>′
-  <span class="where">Matrix multiplication is associative, so the two matrices fold into one, <var>W</var>′ = <var>W</var><sub>2</sub><var>W</var><sub>1</sub>. Example: <var>W</var><sub>1</sub> = [[1, 2], [0, 1]] and <var>W</var><sub>2</sub> = [[2, 0], [1, 1]] give <var>W</var>′ = [[2, 4], [1, 3]]. A hundred stacked linear layers still compute one linear function.</span>
+  <span class="where">Matrix multiplication is associative (<a href="p2-vectors-and-matrices.html#p2-linear-maps">Primer&#160;2</a> covers composing linear maps), so the two matrices fold into one, <var>W</var>′ = <var>W</var><sub>2</sub><var>W</var><sub>1</sub>. Example: <var>W</var><sub>1</sub> = [[1, 2], [0, 1]] and <var>W</var><sub>2</sub> = [[2, 0], [1, 1]] give <var>W</var>′ = [[2, 4], [1, 3]]. A hundred stacked linear layers still compute one linear function.</span>
 </div>
 <p>A compiler would constant-fold this, and so does the math. Geometrically, a linear map keeps grid lines straight, parallel and evenly spaced. It cannot fold, bend or cut space. But nearly every interesting function needs that: "if this feature is present, do this, otherwise do something else."</p>
 <p>The fix is a cheap <dfn>nonlinear</dfn> function φ applied to each number on its own (<dfn>elementwise</dfn>) after a linear layer. With φ in between, stacked layers no longer collapse. A network with one hidden layer and enough neurons can approximate any continuous function on a bounded region; this result is the <dfn>universal approximation theorem</dfn>. With ReLU, each hidden neuron adds one "crease" (the line where it switches on), and the network becomes a piecewise-linear function with many creases. Figure 4.7 computes this live on a 2-D grid.</p>
@@ -675,7 +675,7 @@
 <p>Three activation functions cover almost every LLM you will meet:</p>
 <div class="formula">
   ReLU(<var>x</var>) = max(0, <var>x</var>) &#160;&#160;&#160; GELU(<var>x</var>) = <var>x</var> · Φ(<var>x</var>) &#160;&#160;&#160; SiLU(<var>x</var>) = <var>x</var> · σ(<var>x</var>) = <span class="frac"><span><var>x</var></span><span>1 + <var>e</var><sup>−<var>x</var></sup></span></span>
-  <span class="where">Φ(<var>x</var>) is the standard normal cumulative distribution function: the probability that a bell-curve random number is below <var>x</var>. σ(<var>x</var>) = 1/(1 + <var>e</var><sup>−<var>x</var></sup>) is the logistic sigmoid, an S-curve from 0 to 1.</span>
+  <span class="where">Φ(<var>x</var>) is the standard normal cumulative distribution function: the probability that a bell-curve random number is below <var>x</var> (bell curve: <a href="p4-probability-and-information.html#p4-normal">Primer&#160;4</a>). σ(<var>x</var>) = 1/(1 + <var>e</var><sup>−<var>x</var></sup>) is the logistic sigmoid, an S-curve from 0 to 1.</span>
 </div>
 <ul>
   <li><strong>ReLU</strong> (rectified linear unit) passes positive values and zeroes negative ones. It costs one compare. Its weakness: for negative inputs the slope is exactly 0, so a neuron stuck in the negative region gets no learning signal. These are called "dead" neurons.</li>
@@ -998,7 +998,7 @@
 <p>To train, we need one number that says how wrong a prediction was. The training text tells us what the next token actually was (say <span class="tok">&#9251;mat</span>). The <dfn>cross-entropy loss</dfn> for that position is</p>
 <div class="formula">
   <var>L</var> = −log <var>p</var><sub>correct</sub> = LSE(<var>z</var>) − <var>z</var><sub>correct</sub>
-  <span class="where"><var>p</var><sub>correct</sub> = the probability the model gave the token that really came next. The second form computes the same value straight from the logits, using the stable log-sum-exp. log is the natural log, so the unit is <em>nats</em>; divide by ln 2 for bits. With <var>p</var>(<span class="tok">&#9251;mat</span>) = 0.540: <var>L</var> = 0.616 nats = 0.889 bits.</span>
+  <span class="where"><var>p</var><sub>correct</sub> = the probability the model gave the token that really came next. The second form computes the same value straight from the logits, using the stable log-sum-exp. log is the natural log, so the unit is <em>nats</em> (<a href="p4-probability-and-information.html#p4-cross-entropy">Primer&#160;4</a> derives cross-entropy and its units); divide by ln 2 for bits. With <var>p</var>(<span class="tok">&#9251;mat</span>) = 0.540: <var>L</var> = 0.616 nats = 0.889 bits.</span>
 </div>
 <p>Read it as <strong>surprise</strong>. If the model gave the right answer probability 1, the loss is 0. As that probability heads toward 0, the loss climbs without limit. A model that knows nothing spreads probability evenly over all 128,256 tokens, so its loss is ln&#160;128,256 ≈ <strong>11.76</strong>. That is roughly where an untrained Llama&#160;3 starts. The training loss is this number averaged over every position of every training sequence. <a href="08-pretraining.html">Chapter 8</a> turns it into perplexity.</p>
 
@@ -1042,7 +1042,7 @@
 </figure>
 
 <h3>What "learning" means, in one paragraph</h3>
-<p>The loss is a function of every weight in the model: 8.03 billion inputs, one output. The <dfn>gradient</dfn> is a vector with one entry per weight. Each entry says how fast the loss would change if you nudged that weight up a tiny bit. Training repeats one move: compute the loss on a batch of text, compute the gradient, and step every weight a small amount in the direction that lowers the loss, <var>w</var> ← <var>w</var> − η·<var>g</var>, where η is the <dfn>learning rate</dfn>. The algorithm that computes all 8 billion entries in one backward sweep is <dfn>backpropagation</dfn>; that sweep costs about twice the forward pass. For softmax plus cross-entropy the gradient with respect to the logits is very simple: <var>p</var> − onehot(correct). The correct token's logit is pushed up by 1 − <var>p</var><sub>correct</sub> (0.46 for <span class="tok">&#9251;mat</span>), and every other logit is pushed down by its own probability. Everything else about training (backprop, optimizers, schedules, scale) is <a href="08-pretraining.html">Chapter 8</a>.</p>
+<p>The loss is a function of every weight in the model: 8.03 billion inputs, one output. The <dfn>gradient</dfn> is a vector with one entry per weight. Each entry says how fast the loss would change if you nudged that weight up a tiny bit. Training repeats one move: compute the loss on a batch of text, compute the gradient, and step every weight a small amount in the direction that lowers the loss, <var>w</var> ← <var>w</var> − η·<var>g</var>, where η is the <dfn>learning rate</dfn>. The algorithm that computes all 8 billion entries in one backward sweep is <dfn>backpropagation</dfn>; that sweep costs about twice the forward pass. For softmax plus cross-entropy the gradient with respect to the logits is very simple: <var>p</var> − onehot(correct). The correct token's logit is pushed up by 1 − <var>p</var><sub>correct</sub> (0.46 for <span class="tok">&#9251;mat</span>), and every other logit is pushed down by its own probability. Everything else about training (backprop, optimizers, schedules, scale) is <a href="08-pretraining.html">Chapter 8</a>. <a href="p1-machine-learning.html#p1-gradient-descent">Primer&#160;1</a> (gradient descent, learning rate) and <a href="p3-derivatives-and-backprop.html#p3-gradient">Primer&#160;3</a> (how the gradient is computed) take this slowly.</p>
 </section>
 
 <section>
@@ -1105,7 +1105,7 @@
   out = <var>x</var> + <var>f</var>(<var>x</var>)
   <span class="where"><var>x</var> = the layer's input, <var>f</var> = the layer's computation (for example norm → MLP). The layer learns a <em>correction</em> to add, not a replacement. Example: <var>x</var> = [1.0, −0.5, 2.0] and <var>f</var>(<var>x</var>) = [0.1, 0.3, −0.2] give [1.1, −0.2, 1.8].</span>
 </div>
-<p>Two things follow. First, if <var>f</var> outputs about zero, the layer is just the identity, so adding a layer can hardly hurt. Second, the derivative of the output with respect to the input is <var>I</var> + ∂<var>f</var>/∂<var>x</var>. The identity term <var>I</var> is a direct path that carries the signal forward, and the gradient backward, through any number of layers without decay.</p>
+<p>Two things follow. First, if <var>f</var> outputs about zero, the layer is just the identity, so adding a layer can hardly hurt. Second, the derivative of the output with respect to the input is <var>I</var> + ∂<var>f</var>/∂<var>x</var>. The identity term <var>I</var> is a direct path that carries the signal forward, and the gradient backward, through any number of layers without decay (<a href="p3-derivatives-and-backprop.html#p3-misbehave">Primer&#160;3</a> shows how gradients vanish or explode otherwise).</p>
 
 <figure>
 <svg viewBox="0 0 760 380" role="img" aria-label="Left: a residual block where x flows straight up and f(x) is added back. Right: signal size after k layers: shrinking by 0.9 per layer vanishes, growing by 1.1 explodes, the identity path stays at 1.">
@@ -1313,7 +1313,7 @@
 </ul>
 
 <h3>Setup</h3>
-<p>The running model is <code>meta-llama/Llama-3.1-8B</code>. It is gated, so accept the license on its Hugging Face page first. In BF16 it is 16 GB and fits a 24 GB card for a few hundred tokens. If you can't get access or have less memory, use <code>HuggingFaceTB/SmolLM2-1.7B</code>. It loads as the same <code>LlamaForCausalLM</code> class (SwiGLU, RMSNorm with ε = 10<sup>−5</sup>, no biases) with <var>d</var> = 2,048, <var>d</var><sub>ff</sub> = 8,192 and a 49,152-token vocabulary, so your code runs unchanged and only the reference numbers scale. Training data for milestones 6 and 7 is <code>roneneldan/TinyStories</code> from the Hub (it has train and validation splits), tokenized with tiktoken's <code>gpt2</code> encoding (<var>V</var> = 50,257). About 50 M training tokens stored as a <code>uint16</code> array is plenty.</p>
+<p>The running model is <code>meta-llama/Llama-3.1-8B</code>. It is gated, so accept the license on its Hugging Face page first. In BF16 it is 16 GB and fits a 24 GB card for a few hundred tokens. If you can't get access or have less memory, use <code>HuggingFaceTB/SmolLM2-1.7B</code>. It loads as the same <code>LlamaForCausalLM</code> class (SwiGLU, RMSNorm with ε = 10<sup>−5</sup>, no biases) with <var>d</var> = 2,048, <var>d</var><sub>ff</sub> = 8,192 and a 49,152-token vocabulary, so your code runs unchanged and only the reference numbers scale. Training data for milestones 6 and 7 is <code>roneneldan/TinyStories</code> from the Hub (it has train and validation splits; why you hold data out: <a href="p1-machine-learning.html#p1-generalization">Primer&#160;1</a>), tokenized with tiktoken's <code>gpt2</code> encoding (<var>V</var> = 50,257). About 50 M training tokens stored as a <code>uint16</code> array is plenty.</p>
 <pre><code>pip install torch transformers safetensors huggingface_hub datasets tiktoken matplotlib pytest
 hf auth login                 <span class="c"># once, after accepting the Llama 3.1 license</span>
 

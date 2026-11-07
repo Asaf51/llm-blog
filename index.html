@@ -40,7 +40,7 @@
 <header class="chapter-head">
   <div class="kicker">A long-form, illustrated guide</div>
   <h1>How LLMs Really Work</h1>
-  <p class="lede">From floating-point bits and GPU memory to attention, training, reasoning, quantization and serving. One idea at a time, down to the bytes and FLOPs.</p>
+  <p class="lede">From machine-learning basics, floating-point bits and GPU memory to attention, training, reasoning, quantization and serving. One idea at a time, down to the bytes and FLOPs.</p>
 </header>
 
 <figure class="hero wide">
@@ -88,11 +88,16 @@
 
 <section>
 <h2>What this is</h2>
-<p>This is a book-length blog that explains large language models completely: what they compute, how they are trained, and exactly what happens on the hardware when you send a prompt. It assumes you know how computers work at a low level (caches, memory hierarchy, virtual memory, SIMD, floating point) but nothing about machine learning.</p>
+<p>This is a book-length blog that explains large language models completely: what they compute, how they are trained, and exactly what happens on the hardware when you send a prompt. It assumes you program in Python and know how computers work at a low level (caches, memory hierarchy, virtual memory, SIMD, floating point), but nothing about machine learning and only rusty high-school math. A six-chapter Primer teaches those basics before Chapter 1.</p>
 <p>Every chapter follows the same pattern: the problem first, then the idea in plain words, then the exact mechanics with tensor shapes, then the low-level reality in bytes, FLOPs and bandwidth, with real numbers from real models and GPUs. Diagrams are interactive: step through animations with <kbd>&#8592;</kbd> <kbd>&#8594;</kbd> or the Play button, and turn the knobs in the widgets.</p>
 
 <div class="callout key"><div class="callout-title">How to read it</div>
-<p>Read in order the first time. Each concept is explained in exactly one chapter and linked from everywhere else, so later chapters build on earlier ones without repeating them. If you are in a hurry: Chapters 1, 5, 6, 11 and 12 are the core of "how inference works"; Chapter 16 ties everything together and ends with a cheat sheet, glossary and self-test.</p>
+<p>Read in order from your starting point. Each concept is explained in exactly one chapter and linked from everywhere else, so later chapters build on earlier ones without repeating them.</p>
+<ul>
+  <li><strong>New to machine learning, or rusty on the math:</strong> start with the <a href="p1-machine-learning.html">Primer</a> (P1&#8211;P6). Each primer chapter is self-contained and ends with a small Build it that runs on a CPU.</li>
+  <li><strong>Already know ML basics, gradient descent, probability and PyTorch:</strong> start at <a href="01-big-picture.html">Chapter 1</a> and dip into the Primer through the links when you need to.</li>
+  <li><strong>In a hurry:</strong> Chapters 1, 5, 6, 11 and 12 are the core of "how inference works"; Chapter 16 ties everything together and ends with a cheat sheet, glossary and self-test.</li>
+</ul>
 </div>
 
 <p class="small muted">Colors mean the same thing in every figure:</p>
@@ -120,6 +125,12 @@
 <script>
 document.addEventListener("DOMContentLoaded", function () {
   var desc = {
+    "P1": "Learning from examples: data, model, loss and optimizer. Linear and logistic regression, gradient descent and the learning rate, batches and epochs, overfitting, regularization, and train/validation/test splits.",
+    "P2": "Vectors, dot products and matrix multiplication, matrices as functions on space, shape rules, angles and rotation matrices, orthogonal matrices, rank and low-rank factorization, and einsum.",
+    "P3": "Derivatives as sensitivity, partial derivatives and gradients, the chain rule, backpropagation through a computational graph, a tiny autograd engine, and a small MLP trained from scratch.",
+    "P4": "Distributions, conditional probability and the chain rule, expectation and variance, the normal distribution, logs and log-probabilities, entropy, cross-entropy and KL divergence.",
+    "P5": "NumPy arrays and broadcasting, PyTorch tensors, devices and autograd, the canonical training loop, getting a GPU, the Hugging Face Hub, and a first model with transformers.",
+    "P6": "N-gram models and perplexity, the sparsity wall, word vectors, RNNs and LSTMs, seq2seq and the birth of attention, and the road from 2017 to ChatGPT.",
     "01": "An LLM is one function: tokens in, a probability distribution over the next token out. The generation loop, what parameters are, and the map of everything that follows.",
     "02": "Tensors and matmul cost. FP32, BF16, FP16, FP8 and FP4 at the bit level. GPU anatomy, the memory hierarchy, HBM vs DDR, PCIe vs NVLink, and the roofline model.",
     "03": "Byte-level BPE, vocabularies, special tokens and chat templates, the embedding lookup, what input and output tokens really are, and why models can't count letters.",

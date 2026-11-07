@@ -62,7 +62,7 @@
     <li>Every hop of one streamed, reasoning, tool-calling request, and the data at each hop: JSON, token IDs, a cache hit, KV blocks, logits, a token, bytes on the wire, a bill.</li>
     <li>Where 10.3 seconds go: 50 ms of network, plumbing and queueing before the GPU starts, 25 ms of prefill thanks to the prefix cache, and 7 seconds of thinking the user never sees.</li>
     <li>How input, cached input, reasoning and visible output tokens appear in real API usage fields, and how they become dollars.</li>
-    <li>Every formula of the blog on one page, each with a worked example; a reference table of request parameters (temperature, top_p, max_tokens, stop, effort and more); rules of thumb, a glossary of over 120 terms, and 33 self-test questions.</li>
+    <li>Every formula of the blog on one page, each with a worked example; a reference table of request parameters (temperature, top_p, max_tokens, stop, effort and more); rules of thumb, a glossary of over 150 terms, and 33 self-test questions.</li>
     <li><strong>Build it:</strong> reqtrace, a capstone that replays this chapter's umbrella exchange on your own GPU (vLLM serving Qwen3-8B), predicts every hop's milliseconds, bytes and cents with the cheat sheet, then measures them and explains the gaps.</li>
   </ul>
 </div>
@@ -963,7 +963,7 @@ data: {"type":"message_stop"}</code></pre>
 <section>
 <h2>Glossary</h2>
 
-<p>One line per term, alphabetical. The link goes to the chapter that owns the concept.</p>
+<p>One line per term, alphabetical. The link goes to the chapter that owns the concept (P1–P6 are the Primer chapters).</p>
 
 <dl class="ch16-gloss">
   <dt>Activation function</dt><dd>Nonlinear function (ReLU, GELU, SiLU) between linear layers, so a stack of layers is more than one big linear map. <a href="04-neural-net-toolkit.html">Ch 4</a></dd>
@@ -972,6 +972,7 @@ data: {"type":"message_stop"}</code></pre>
   <dt>All-reduce, all-to-all</dt><dd>Collective operations: sum a tensor across GPUs and give everyone the result; or send a different piece to every other GPU. <a href="02-numbers-and-hardware.html">Ch 2</a></dd>
   <dt>Arithmetic intensity</dt><dd>FLOPs per byte moved. It decides whether a kernel is compute-bound or memory-bound. <a href="02-numbers-and-hardware.html">Ch 2</a></dd>
   <dt>Attention</dt><dd>Each position builds a weighted mix of earlier positions' value vectors, weighted by query–key similarity. <a href="05-attention.html">Ch 5</a></dd>
+  <dt>Autograd</dt><dd>PyTorch's automatic differentiation: records the forward pass as a graph and replays it backwards to fill every parameter's <code>.grad</code>. <a href="p5-tools.html#p5-autograd">P5</a></dd>
   <dt>Autoregressive generation</dt><dd>Predict a token, append it, predict again, until a stop. <a href="01-big-picture.html">Ch 1</a></dd>
   <dt>AWQ</dt><dd>4-bit weight quantization that protects the weight channels fed by large activations. <a href="13-quantization.html">Ch 13</a></dd>
   <dt>Backpropagation</dt><dd>The chain rule run backwards through the computation to get every weight's gradient; costs about 2× the forward pass. <a href="08-pretraining.html">Ch 8</a></dd>
@@ -980,12 +981,16 @@ data: {"type":"message_stop"}</code></pre>
   <dt>BF16</dt><dd>16-bit float with FP32's 8-bit exponent and a 7-bit mantissa: FP32's range, less precision. <a href="02-numbers-and-hardware.html">Ch 2</a></dd>
   <dt>Block table</dt><dd>Per-sequence map from logical KV blocks to physical blocks in GPU memory, like a page table. <a href="12-kv-cache.html">Ch 12</a></dd>
   <dt>BPE</dt><dd>Byte Pair Encoding: a tokenizer that learns merges of frequent adjacent symbols, starting from bytes. <a href="03-tokens.html">Ch 3</a></dd>
+  <dt>Broadcasting</dt><dd>The rule that lets arrays of different shapes combine elementwise (one bias vector added to every row) without copying the small one. <a href="p5-tools.html#p5-broadcasting">P5</a></dd>
   <dt>Causal mask</dt><dd>Blocks attention to later positions, so each token sees only its past. <a href="05-attention.html">Ch 5</a></dd>
   <dt>Chain of thought</dt><dd>Intermediate reasoning text written before the answer. <a href="10-reasoning.html">Ch 10</a></dd>
+  <dt>Chain rule</dt><dd>Rates multiply: the derivative of a pipeline of functions is the product of its stages' local derivatives. <a href="p3-derivatives-and-backprop.html#p3-chain-rule">P3</a></dd>
+  <dt>Chain rule of probability</dt><dd>A sequence's probability is the product of each token's probability given all the tokens before it. <a href="p4-probability-and-information.html#p4-chain-rule">P4</a></dd>
   <dt>Chat template</dt><dd>Rules that flatten system prompt, tools and messages into one token sequence with special role markers. <a href="03-tokens.html">Ch 3</a></dd>
   <dt>Chinchilla scaling</dt><dd>For a fixed training budget, use about 20 training tokens per parameter. <a href="08-pretraining.html">Ch 8</a></dd>
   <dt>Chunked prefill</dt><dd>Splitting a long prompt into chunks that are scheduled alongside other sequences' decode steps. <a href="15-serving.html">Ch 15</a></dd>
   <dt>Compute-bound, memory-bound</dt><dd>Limited by arithmetic throughput, or by bytes moved from memory. <a href="02-numbers-and-hardware.html">Ch 2</a></dd>
+  <dt>Conditional probability</dt><dd>P(A | B): the probability of A once B is known; the next-token distribution is conditioned on the whole context. <a href="p4-probability-and-information.html#p4-conditional">P4</a></dd>
   <dt>Constrained decoding</dt><dd>Masking, at every step, the tokens that would break a grammar or JSON schema; gives structured output. <a href="14-sampling.html">Ch 14</a></dd>
   <dt>Context window</dt><dd>The maximum number of tokens (input plus output) a model can handle in one sequence. <a href="05-attention.html">Ch 5</a></dd>
   <dt>Continuous batching</dt><dd>Re-forming the batch at every iteration: finished sequences leave, new ones join. <a href="15-serving.html">Ch 15</a></dd>
@@ -993,11 +998,17 @@ data: {"type":"message_stop"}</code></pre>
   <dt>CUDA kernel</dt><dd>A function launched on the GPU over a grid of thread blocks. <a href="02-numbers-and-hardware.html">Ch 2</a></dd>
   <dt>Data parallelism</dt><dd>Each GPU holds a full model copy and processes different data; gradients are all-reduced. <a href="08-pretraining.html">Ch 8</a></dd>
   <dt>Decode</dt><dd>The generation phase: one new token per sequence per step; memory-bound. <a href="11-inference.html">Ch 11</a></dd>
+  <dt>Derivative</dt><dd>How much a function's output changes per tiny nudge of one input: the slope. <a href="p3-derivatives-and-backprop.html#p3-question">P3</a></dd>
   <dt>Detokenization</dt><dd>Turning token IDs back into bytes and text, holding back incomplete UTF-8 characters. <a href="03-tokens.html">Ch 3</a></dd>
   <dt>Disaggregated serving</dt><dd>Prefill and decode on separate GPU pools, with the KV cache shipped between them. <a href="15-serving.html">Ch 15</a></dd>
   <dt>Distillation</dt><dd>Training a smaller model on a larger model's outputs or probabilities. <a href="09-post-training.html">Ch 9</a></dd>
+  <dt>Dot product</dt><dd>Multiply matching components and add: a weighted sum, and what one neuron computes. <a href="p2-vectors-and-matrices.html#p2-dot">P2</a></dd>
   <dt>DPO</dt><dd>Direct Preference Optimization: preference tuning from chosen/rejected pairs, with no reward model or RL loop. <a href="09-post-training.html">Ch 9</a></dd>
+  <dt>einsum</dt><dd>Notation that names every tensor axis with a letter; axes missing from the output are summed (<code>ik,kj->ij</code> is a matrix product). <a href="p2-vectors-and-matrices.html#p2-tensors">P2</a></dd>
   <dt>Embedding</dt><dd>The learned vector for each token ID, fetched by a table lookup. <a href="03-tokens.html">Ch 3</a></dd>
+  <dt>Entropy</dt><dd>The average surprise (−log p, in bits or nats) of a draw from a distribution: 0 for one certain token, largest when uniform. <a href="p4-probability-and-information.html#p4-entropy">P4</a></dd>
+  <dt>Epoch</dt><dd>One full pass over the training set, which takes <var>N</var> / <var>B</var> steps at batch size <var>B</var>. <a href="p1-machine-learning.html#p1-batches">P1</a></dd>
+  <dt>Expectation 𝔼</dt><dd>The probability-weighted average of a quantity; 𝔼<sub><var>x</var>∼<var>p</var></sub>[<var>f</var>(<var>x</var>)] averages <var>f</var> over draws from <var>p</var>. <a href="p4-probability-and-information.html#p4-expectation">P4</a></dd>
   <dt>Expert</dt><dd>One of the <var>E</var> parallel feed-forward networks in an MoE layer. <a href="07-mixture-of-experts.html">Ch 7</a></dd>
   <dt>Expert parallelism</dt><dd>Experts placed on different GPUs; tokens travel to them by all-to-all. <a href="07-mixture-of-experts.html">Ch 7</a></dd>
   <dt>FFN (MLP)</dt><dd>The per-token feed-forward block of each layer; holds most of the parameters. <a href="06-transformer.html">Ch 6</a></dd>
@@ -1006,23 +1017,32 @@ data: {"type":"message_stop"}</code></pre>
   <dt>FlashAttention</dt><dd>Exact attention computed in on-chip tiles with an online softmax, never writing the n × n score matrix to HBM. <a href="15-serving.html">Ch 15</a></dd>
   <dt>FLOPs, FLOPS</dt><dd>Floating-point operations; FLOPS is per second. <a href="02-numbers-and-hardware.html">Ch 2</a></dd>
   <dt>FP8 (E4M3, E5M2)</dt><dd>8-bit floats: E4M3 has more precision, E5M2 more range. <a href="02-numbers-and-hardware.html">Ch 2</a></dd>
+  <dt>Gated model</dt><dd>A Hugging Face repo whose files download only after you accept its license on the model page and log in with a token. <a href="p5-tools.html#p5-hub">P5</a></dd>
   <dt>GEMM, GEMV</dt><dd>Matrix–matrix and matrix–vector multiply: typically compute-bound and memory-bound. <a href="02-numbers-and-hardware.html">Ch 2</a></dd>
   <dt>GGUF</dt><dd>llama.cpp's single-file model format, with many quantization types. <a href="13-quantization.html">Ch 13</a></dd>
   <dt>GPTQ</dt><dd>Post-training quantization that corrects rounding error column by column using calibration statistics. <a href="13-quantization.html">Ch 13</a></dd>
   <dt>GQA, MQA</dt><dd>Grouped-query and multi-query attention: several or all query heads share one K/V head. <a href="05-attention.html">Ch 5</a></dd>
+  <dt>Gradient</dt><dd>The vector of all partial derivatives of the loss, one per parameter; it points uphill, so training steps against it. <a href="p3-derivatives-and-backprop.html#p3-gradient">P3</a></dd>
+  <dt>Gradient check</dt><dd>Testing a backward rule by comparing its analytic gradient with the central difference (<var>f</var>(<var>x</var>+<var>h</var>) − <var>f</var>(<var>x</var>−<var>h</var>)) / 2<var>h</var>. <a href="p3-derivatives-and-backprop.html#p3-gradcheck">P3</a></dd>
   <dt>Gradient descent</dt><dd>Move each weight a small step against its gradient to lower the loss. <a href="08-pretraining.html">Ch 8</a></dd>
   <dt>Greedy decoding</dt><dd>Always pick the most likely token. <a href="14-sampling.html">Ch 14</a></dd>
   <dt>GRPO</dt><dd>RL method that scores a group of sampled answers against each other, so no value model is needed. <a href="10-reasoning.html">Ch 10</a></dd>
   <dt>HBM</dt><dd>High Bandwidth Memory: stacked DRAM beside the GPU die, terabytes per second. <a href="02-numbers-and-hardware.html">Ch 2</a></dd>
+  <dt>Hessian</dt><dd>The matrix of second derivatives (curvature) of the loss; its sharpest direction caps the usable learning rate. <a href="p3-derivatives-and-backprop.html#p3-curvature">P3</a></dd>
+  <dt>Hyperparameter</dt><dd>A setting you choose before training (learning rate, batch size, layer count), as opposed to the parameters the optimizer learns. <a href="p1-machine-learning.html#p1-four-ingredients">P1</a></dd>
   <dt>Inference</dt><dd>Using a trained model: forward passes only, with frozen weights (prefill, then decode). <a href="11-inference.html">Ch 11</a></dd>
   <dt>Input tokens</dt><dd>Everything the model reads: system prompt, tools, history, the new message. <a href="03-tokens.html">Ch 3</a></dd>
+  <dt>KL divergence</dt><dd>The extra cost of using distribution <var>q</var> where the data follow <var>p</var>: 𝔼<sub><var>p</var></sub>[log <var>p</var> − log <var>q</var>] ≥ 0, and 0 only if they are equal. <a href="p4-probability-and-information.html#p4-kl">P4</a></dd>
   <dt>KV cache</dt><dd>Stored keys and values of past tokens, so a new token can attend without recomputing them. <a href="12-kv-cache.html">Ch 12</a></dd>
   <dt>Layer (block)</dt><dd>Attention plus FFN with norms and residual adds; stacked <var>L</var> times. <a href="06-transformer.html">Ch 6</a></dd>
+  <dt>Learning rate <var>η</var></dt><dd>The size of one gradient-descent step, <var>w</var> ← <var>w</var> − <var>η</var>·slope; too small is slow, too large diverges. <a href="p1-machine-learning.html#p1-gradient-descent">P1</a></dd>
+  <dt>Linear map</dt><dd>A function with <var>f</var>(<var>x</var>+<var>y</var>) = <var>f</var>(<var>x</var>) + <var>f</var>(<var>y</var>) and <var>f</var>(<var>cx</var>) = <var>c f</var>(<var>x</var>); every matrix is one. <a href="p2-vectors-and-matrices.html#p2-linear-maps">P2</a></dd>
   <dt>LM head</dt><dd>The final matrix that maps the last hidden vector to one logit per vocabulary entry. <a href="06-transformer.html">Ch 6</a></dd>
   <dt>Logits</dt><dd>Raw scores before softmax. <a href="04-neural-net-toolkit.html">Ch 4</a></dd>
   <dt>Logprobs</dt><dd>Log-probabilities of each generated token and its top alternatives, optionally returned by the API. <a href="14-sampling.html">Ch 14</a></dd>
   <dt>LoRA</dt><dd>Fine-tuning by training a low-rank product <var>B</var>·<var>A</var> added to frozen weights. <a href="09-post-training.html">Ch 9</a></dd>
   <dt>Loss masking</dt><dd>Computing the fine-tuning loss only on the assistant's tokens. <a href="09-post-training.html">Ch 9</a></dd>
+  <dt>LSTM / GRU</dt><dd>Recurrent networks with gates and an additively updated cell state, so information survives longer than in a plain RNN. <a href="p6-before-transformers.html#p6-backprop-through-time">P6</a></dd>
   <dt>Max tokens</dt><dd>Request cap on generated tokens, reasoning included; hitting it gives a length stop. <a href="14-sampling.html">Ch 14</a></dd>
   <dt>MFU</dt><dd>Model FLOPs utilization: useful FLOPs achieved divided by peak FLOPs. <a href="08-pretraining.html">Ch 8</a></dd>
   <dt>Mixed precision</dt><dd>Low-precision math (BF16, FP8) with FP32 master weights and accumulators. <a href="08-pretraining.html">Ch 8</a></dd>
@@ -1031,9 +1051,12 @@ data: {"type":"message_stop"}</code></pre>
   <dt>MTP</dt><dd>Multi-token prediction: an extra module that predicts a token further ahead; usable as a speculative draft. <a href="15-serving.html">Ch 15</a></dd>
   <dt>Multi-head attention</dt><dd>Several attention heads in parallel, concatenated and projected back. <a href="05-attention.html">Ch 5</a></dd>
   <dt>MXFP4, NVFP4</dt><dd>4-bit float block formats sharing one scale per 32 or 16 values. <a href="13-quantization.html">Ch 13</a></dd>
+  <dt>n-gram model</dt><dd>A language model that predicts the next word from counts of the previous <var>n</var> − 1 words. <a href="p6-before-transformers.html#p6-counting-n-gram-models">P6</a></dd>
   <dt>NVLink</dt><dd>NVIDIA's GPU-to-GPU link, 900 GB/s per H100. <a href="02-numbers-and-hardware.html">Ch 2</a></dd>
   <dt>Offloading</dt><dd>Keeping some layers, MoE experts or KV cache in CPU RAM when VRAM is too small; works, but runs at RAM or PCIe speed. <a href="11-inference.html">Ch 11</a></dd>
+  <dt>Orthogonal matrix</dt><dd>A square matrix with <var>Q</var><sup>T</sup><var>Q</var> = <var>I</var>: unit-length, mutually perpendicular columns, so it preserves lengths, angles and dot products. <a href="p2-vectors-and-matrices.html#p2-orthogonal">P2</a></dd>
   <dt>Output tokens</dt><dd>Tokens the model generates, reasoning included; priced higher than input. <a href="03-tokens.html">Ch 3</a></dd>
+  <dt>Overfitting</dt><dd>Fitting the training data, noise included, so well that unseen data does worse; training loss keeps falling while validation loss rises. <a href="p1-machine-learning.html#p1-generalization">P1</a></dd>
   <dt>PagedAttention</dt><dd>KV cache stored in fixed-size blocks addressed through block tables, like virtual memory. <a href="12-kv-cache.html">Ch 12</a></dd>
   <dt>Parameters (weights)</dt><dd>The learned numbers in the model's matrices. <a href="01-big-picture.html">Ch 1</a></dd>
   <dt>Perplexity</dt><dd>e to the power of the loss: the effective number of equally likely choices per token. <a href="08-pretraining.html">Ch 8</a></dd>
@@ -1049,6 +1072,7 @@ data: {"type":"message_stop"}</code></pre>
   <dt>Query, key, value</dt><dd>The three projections of each token used by attention: what I look for, what I offer, what I pass on. <a href="05-attention.html">Ch 5</a></dd>
   <dt>RAG</dt><dd>Retrieval-augmented generation: fetch relevant documents and put them in the prompt. <a href="09-post-training.html">Ch 9</a></dd>
   <dt>RAM (system memory)</dt><dd>The CPU's DDR memory: large and cheap, but with tens of times less bandwidth than a GPU's HBM. <a href="02-numbers-and-hardware.html">Ch 2</a></dd>
+  <dt>Rank / low-rank</dt><dd>The number of independent directions in a matrix (not a tensor's axis count); a rank-<var>r</var> matrix is a product of [<var>m</var>, <var>r</var>] and [<var>r</var>, <var>n</var>] factors. <a href="p2-vectors-and-matrices.html#p2-rank">P2</a></dd>
   <dt>Rate limits</dt><dd>Caps on requests and tokens per minute (RPM, TPM) per account. <a href="15-serving.html">Ch 15</a></dd>
   <dt>Reasoning effort</dt><dd>API setting for how long a reasoning model thinks before answering. <a href="10-reasoning.html">Ch 10</a></dd>
   <dt>Reasoning tokens</dt><dd>Thinking tokens, often hidden from the user; billed as output. <a href="10-reasoning.html">Ch 10</a></dd>
@@ -1058,6 +1082,7 @@ data: {"type":"message_stop"}</code></pre>
   <dt>RLHF</dt><dd>Reinforcement learning from human feedback: a reward model plus PPO with a KL penalty. <a href="09-post-training.html">Ch 9</a></dd>
   <dt>RLVR</dt><dd>RL with verifiable rewards: answers checked by a program, such as a math checker or unit tests. <a href="10-reasoning.html">Ch 10</a></dd>
   <dt>RMSNorm</dt><dd>Scales a vector by its root-mean-square, times a learned gain. <a href="04-neural-net-toolkit.html">Ch 4</a></dd>
+  <dt>RNN</dt><dd>Recurrent neural network: reads one token at a time and updates a hidden state with the same learned function. <a href="p6-before-transformers.html#p6-recurrent-networks">P6</a></dd>
   <dt>Roofline</dt><dd>Attainable FLOPS = min(peak, intensity × bandwidth). <a href="02-numbers-and-hardware.html">Ch 2</a></dd>
   <dt>RoPE</dt><dd>Rotary position embedding: rotates pairs of Q and K dimensions by position-dependent angles. <a href="05-attention.html">Ch 5</a></dd>
   <dt>Router (MoE)</dt><dd>A small linear layer that scores the experts for each token. <a href="07-mixture-of-experts.html">Ch 7</a></dd>
@@ -1071,6 +1096,8 @@ data: {"type":"message_stop"}</code></pre>
   <dt>Special tokens</dt><dd>Reserved IDs for structure: begin of text, end of turn, role headers. <a href="03-tokens.html">Ch 3</a></dd>
   <dt>Speculative decoding</dt><dd>Draft several tokens cheaply, verify them in one target pass; same output distribution, fewer passes. <a href="15-serving.html">Ch 15</a></dd>
   <dt>SSE</dt><dd>Server-sent events: a <code>text/event-stream</code> HTTP response carrying <code>event:</code> and <code>data:</code> lines. <a href="#ch16-stream">Ch 16</a></dd>
+  <dt>Standard error</dt><dd>The noise of an average of <var>n</var> samples, <var>σ</var> / √<var>n</var>; a 500-question benchmark at 70% is uncertain by about 2 points. <a href="p4-probability-and-information.html#p4-sqrt-n">P4</a></dd>
+  <dt><code>state_dict</code></dt><dd>PyTorch's ordered dictionary from each parameter's dotted name to its tensor; the unit of saving and loading checkpoints. <a href="p5-tools.html#p5-modules">P5</a></dd>
   <dt>Stop sequence</dt><dd>A string you supply that ends generation when it appears in the output text. <a href="14-sampling.html">Ch 14</a></dd>
   <dt>SwiGLU</dt><dd>Gated FFN: down(SiLU(gate·<var>x</var>) ⊙ up·<var>x</var>). <a href="04-neural-net-toolkit.html">Ch 4</a></dd>
   <dt>System prompt</dt><dd>Developer instructions at the start of the context, above the user's messages. <a href="09-post-training.html">Ch 9</a></dd>
@@ -1084,11 +1111,14 @@ data: {"type":"message_stop"}</code></pre>
   <dt>Top-k, top-p, min-p</dt><dd>Keep the <var>k</var> most likely tokens; the smallest set with total probability <var>p</var>; tokens above <var>p</var> × the top probability. <a href="14-sampling.html">Ch 14</a></dd>
   <dt>TPOT (ITL)</dt><dd>Time per output token after the first, also called inter-token latency. <a href="11-inference.html">Ch 11</a></dd>
   <dt>Transformer</dt><dd>Stacked blocks of attention and FFN around a residual stream. <a href="06-transformer.html">Ch 6</a></dd>
+  <dt>Transpose</dt><dd>Flip a matrix over its diagonal, shape [<var>m</var>, <var>n</var>] → [<var>n</var>, <var>m</var>]; <code>nn.Linear</code> stores its weight as [out, in] and computes <var>x</var><var>W</var><sup>T</sup>. <a href="p2-vectors-and-matrices.html#p2-transpose">P2</a></dd>
   <dt>TTFT</dt><dd>Time to first token: from sending the request to receiving the first output token. <a href="11-inference.html">Ch 11</a></dd>
   <dt>Unified memory</dt><dd>One memory pool shared by CPU and GPU (Apple M-series), so big models fit without a separate VRAM. <a href="02-numbers-and-hardware.html">Ch 2</a></dd>
+  <dt>Validation set</dt><dd>Held-out data for comparing models and choosing hyperparameters, kept apart from the training set and from the final test set. <a href="p1-machine-learning.html#p1-generalization">P1</a></dd>
   <dt>Vocabulary</dt><dd>The tokenizer's full set of tokens; 128,256 for Llama 3. <a href="03-tokens.html">Ch 3</a></dd>
   <dt>VRAM</dt><dd>GPU memory: holds the weights, the KV cache and the workspace. <a href="11-inference.html">Ch 11</a></dd>
   <dt>Warp</dt><dd>32 GPU threads that execute the same instruction together. <a href="02-numbers-and-hardware.html">Ch 2</a></dd>
+  <dt>Weight decay</dt><dd>A penalty <var>λ</var>Σ<var>w</var><sup>2</sup> that shrinks weights toward zero to curb overfitting; AdamW applies it directly. <a href="p1-machine-learning.html#p1-regularization">P1</a></dd>
   <dt>ZeRO, FSDP</dt><dd>Sharding optimizer state, gradients and weights across data-parallel GPUs. <a href="08-pretraining.html">Ch 8</a></dd>
 </dl>
 </section>
