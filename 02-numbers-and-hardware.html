@@ -68,6 +68,7 @@
     <li>Tiling a matmul through shared memory reuses each loaded byte many times. FlashAttention uses the same trick later.</li>
     <li>Memory and links: HBM vs GDDR vs DDR5, VRAM vs RAM vs disk, PCIe vs NVLink, Apple unified memory, collective operations.</li>
     <li>The <b>roofline model</b>: arithmetic intensity (FLOPs per byte) tells you if a kernel is limited by compute or by memory. A batch-1 GEMV does about 1 FLOP per byte. An H100 needs about 295 to keep its tensor cores busy.</li>
+    <li><strong>Build it:</strong> a roofline lab: a float codec that matches PyTorch bit for bit on all 2<sup>32</sup> FP32 inputs, a ladder of CUDA and Triton matmul kernels, and your own GPU's measured roofline with every kernel placed on it.</li>
   </ul>
 </div>
 
@@ -1461,6 +1462,209 @@ mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32  {d0,d1,d2,d3}, {a0,a1,a2,a3
 <p class="small muted">"Dense" means without 2:4 structured sparsity, a mode that skips zeros when two of every four weights have been pruned to zero (NVIDIA often quotes this sparse figure, which is 2× higher). RTX numbers are "with FP32 accumulate" from NVIDIA's architecture whitepapers. The RTX 4090 does 330 TFLOPS of FP16 if it accumulates in FP16. B200 figures are NVIDIA's HGX B200 8-GPU totals divided by 8. Apple's figure is a community measurement, not a spec.</p>
 
 <p>Read the table through this chapter's lens. <b>Capacity</b> decides what fits: weights take N × bytes. <b>Bandwidth</b> decides how fast you can stream the weights, which bounds token-by-token generation. <b>Compute</b> decides how fast you can process many tokens at once. <b>Links</b> decide how well several devices act as one. The next chapter turns text into the token IDs that all this machinery consumes.</p>
+</section>
+
+<section class="build">
+<h2><span class="build-tag">Build it</span>Roofline lab: bit-exact floats, hand-written matmul kernels, and your GPU's measured roofline</h2>
+
+<div class="build-meta">
+  <span><b>Time</b>14–22 hours</span>
+  <span><b>Level</b>Intermediate–advanced</span>
+  <span><b>Stack</b>Python, PyTorch, Triton, CUDA C++, matplotlib; Nsight Compute optional</span>
+  <span><b>Hardware</b>1 NVIDIA GPU, Ampere or newer (RTX 4090, A100, H100); FP8 parts need Ada or Hopper; one stretch goal needs 2–8 GPUs</span>
+  <span><b>Uses</b>Sections: Number formats at the bit level, The memory hierarchy, Kernels: how work is launched on a GPU, Tiled matmul through shared memory, Arithmetic intensity and the roofline model</span>
+</div>
+
+<p>This chapter quotes an H100's numbers: 3.35 TB/s, 989 BF16 TFLOPS, a ridge at 295 FLOPs per byte, a batch-1 GEMV at 0.34% of peak. In this project you measure those numbers on the GPU in front of you, and you write the kernels that land at both ends of the roofline. You build <code>rooflab</code>, a small Python package with four parts: a bit-level float codec, a benchmark harness, a ladder of matmul kernels in CUDA C++ and Triton, and a script that draws your GPU's roofline with every kernel on it.</p>
+
+<p>Every claim in the chapter becomes a test you can fail. Your BF16 encoder must agree with PyTorch on all 4,294,967,296 FP32 bit patterns, or your rounding is wrong somewhere. Your tiled kernel must pull about 2·<var>m</var>·<var>n</var>·<var>k</var>/<var>T</var> elements from L2, or it is not tiling the way you think. Your batch-1 GEMV must take about bytes ÷ bandwidth, or your benchmark is reading from the L2 cache. When a measurement disagrees with a formula, finding out why teaches more than rereading the section.</p>
+
+<p>You do not need to download a model. Every shape comes from Llama 3.1 8B (<var>W</var><sub>q</sub> is [4096, 4096], the MLP is 14,336 wide). Random tensors of those shapes move the same bytes and do the same FLOPs as the real weights.</p>
+
+<h3>The deliverable</h3>
+<ul>
+  <li><code>formats.py</code>: <code>encode</code> and <code>decode</code> for FP16, BF16, FP8 E4M3, FP8 E5M2 and FP4 E2M1, written with integer operations only, plus tests that prove it bit-exact.</li>
+  <li><code>roofs.py</code>: prints your GPU's measured cheat-sheet row (copy bandwidth, BF16 and FP8 matmul TFLOPS, ridge point, launch overhead) and plots bandwidth against buffer size.</li>
+  <li>Four FP32 matmul kernels in CUDA C++ (uncoalesced, naive, shared-memory tiled, register-tiled) and one BF16 tensor-core kernel in Triton, all tested and benchmarked against cuBLAS.</li>
+  <li><code>roofline.png</code>: spec and measured roofs, with elementwise add, the GEMV-to-GEMM batch sweep and your own kernels as points.</li>
+  <li><code>RESULTS.md</code>: the table below with your measured value next to every chapter number, and one sentence for each gap larger than 25%.</li>
+</ul>
+
+<h3>Setup</h3>
+<p>You need a recent PyTorch with CUDA (on Linux it ships with Triton) and, for the C++ kernels, a CUDA toolkit whose <code>nvcc</code> matches <code>torch.version.cuda</code>. Nsight Compute (<code>ncu</code>) is optional, but it turns milestone 3 from "faster" into "faster, because it moves fewer bytes". Write down exactly which GPU you have. A cloud "H100" may be the PCIe card (about 2.0 TB/s and 756 dense BF16 TFLOPS), not the SXM part this chapter describes.</p>
+<pre><code>pip install torch numpy matplotlib pytest ml_dtypes
+nvidia-smi --query-gpu=name,memory.total,clocks.max.sm --format=csv
+
+rooflab/
+  formats.py          <span class="c"># M1  encode/decode, integer ops only</span>
+  timing.py           <span class="c"># M2  bench(): CUDA events, warmup, L2 flush, median</span>
+  roofs.py            <span class="c"># M2  bandwidth sweep, peak TFLOPS, launch overhead</span>
+  kernels.cu          <span class="c"># M3  uncoalesced, naive, smem-tiled, register-tiled</span>
+  matmul_cuda.py      <span class="c"># M3  torch.utils.cpp_extension.load_inline wrapper</span>
+  matmul_triton.py    <span class="c"># M4  BF16 tensor-core kernel</span>
+  roofline.py         <span class="c"># M5  sweep + plot</span>
+  tests/test_formats.py  tests/test_matmul.py</code></pre>
+
+<h3>The chapter's numbers you will check</h3>
+<div class="table-wrap">
+<table class="data">
+  <tr><th>Claim</th><th>Section</th><th>Chapter value</th><th>Expect on your GPU</th></tr>
+  <tr><td>HBM bandwidth</td><td>Memory technologies</td><td>3.35 TB/s (H100 SXM), 1.01 TB/s (RTX 4090)</td><td>80–90% of spec on large copies</td></tr>
+  <tr><td>Dense BF16 matmul</td><td>Hardware cheat sheet</td><td>989 / 165 TFLOPS</td><td>roughly 60–90% of spec</td></tr>
+  <tr><td>Ridge point</td><td>Arithmetic intensity and the roofline model</td><td>295 / 164 FLOP/B</td><td>same ballpark, usually a bit lower</td></tr>
+  <tr><td>FP8 vs BF16</td><td>FP8: E4M3 and E5M2</td><td>2× the FLOPs, half the bytes</td><td>matmul near 2× on H100; GEMV 1.6–2× faster</td></tr>
+  <tr><td>Launch overhead</td><td>Launch overhead</td><td>a few µs</td><td>a few µs, more with Python in front</td></tr>
+  <tr><td>Tiled traffic</td><td>Tiled matmul through shared memory</td><td>2·<var>m</var>·<var>n</var>·<var>k</var>/<var>T</var> elements</td><td>within about 15% (with <code>ncu</code>)</td></tr>
+  <tr><td>Batch-1 GEMV</td><td>GEMV vs GEMM</td><td><var>I</var> ≈ 1; <var>W</var><sub>q</sub> in 10 µs on H100</td><td>≈ bytes ÷ your measured bandwidth</td></tr>
+  <tr><td>Elementwise add</td><td>Arithmetic intensity and the roofline model</td><td><var>I</var> ≈ 0.17</td><td>at least 80% of 0.17 × your bandwidth</td></tr>
+  <tr><td>Swamping</td><td>Multiply in low precision, add in FP32</td><td>BF16 stalls at 4, FP16 at 32, FP32 reaches 100.003</td><td>exactly these values</td></tr>
+</table>
+</div>
+
+<h3>Milestones</h3>
+<ol class="milestones">
+  <li>
+    <div class="ms-title">Floats at the bit level: a codec that agrees with PyTorch on every FP32 input</div>
+    <p>Implement <code>encode</code> (FP32 bit pattern to code) and <code>decode</code> (code to value) for the five float formats in the table in "Number formats at the bit level". One rule: <code>encode</code> may only use integer operations on the bit pattern (shifts, masks, adds, compares), no float casts. That forces you through every case the section lists: the bias, the implicit leading 1, subnormals, round-to-nearest-ties-to-even, the carry into the next binade, overflow, and three different special-value rules (IEEE Inf and NaN in FP16, BF16 and E5M2; only S.1111.111 is NaN in E4M3; no specials at all in E2M1). Add a <code>saturate</code> flag. The oracle is PyTorch's own cast, run on every FP32 bit pattern in chunks on the GPU. For E2M1, compare against <code>ml_dtypes.float4_e2m1fn</code> on a large random sample plus the edge cases. Then use <code>decode</code> to regenerate the chapter's format table by enumerating every code, and an emulated rounded accumulator to regenerate Figure 2.6.</p>
+    <pre><code><span class="c"># formats.py: encode() works on the FP32 bit pattern with integer ops only</span>
+<span class="k">from</span> dataclasses <span class="k">import</span> dataclass
+<span class="k">from</span> torch <span class="k">import</span> Tensor
+
+@dataclass(frozen=<span class="k">True</span>)
+<span class="k">class</span> <span class="f">Fmt</span>:
+    name: str
+    E: int            <span class="c"># exponent bits</span>
+    M: int            <span class="c"># mantissa bits</span>
+    bias: int
+    specials: str     <span class="c"># "ieee" (Inf, NaN) | "fn" (E4M3: only S.1111.111 is NaN) | "none" (E2M1)</span>
+
+FP16 = Fmt(<span class="s">"fp16"</span>, <span class="n">5</span>, <span class="n">10</span>, <span class="n">15</span>, <span class="s">"ieee"</span>)
+BF16, E4M3, E5M2, E2M1 = ...   <span class="c"># fill in from the chapter's table</span>
+
+<span class="k">def</span> <span class="f">encode</span>(bits: Tensor, f: Fmt, saturate: bool = <span class="k">False</span>) -&gt; Tensor:
+    <span class="s">"""int64 FP32 bit patterns -&gt; int64 codes of 1+E+M bits, round-to-nearest-even."""</span>
+<span class="k">def</span> <span class="f">decode</span>(codes: Tensor, f: Fmt) -&gt; Tensor:
+    <span class="s">"""int64 codes -&gt; float64 values: +-0, subnormals, +-Inf, NaN."""</span></code></pre>
+    <p class="check">The four exhaustive tests (FP16, BF16, E4M3, E5M2 against <code>torch.float16</code>, <code>torch.bfloat16</code>, <code>torch.float8_e4m3fn</code>, <code>torch.float8_e5m2</code>) pass on all 2<sup>32</sup> inputs; that takes a minute or so on a GPU, longer with NumPy on a CPU. All 16 E2M1 codes match the table in "FP4: E2M1, every value". Your enumerated table reproduces max finite, min normal, min subnormal and step at 1.0 for every float row of the chapter's table. The float explorer's examples come out right: 0.1 in FP32 is <code>0x3DCCCCCD</code>, 256 + 1 = 256 in BF16, 300 becomes 288 in E4M3, and 70,000 is Inf in FP16 but 70,144 in BF16. Adding 0.01 ten thousand times stalls at exactly 4 in BF16 and at 32 in FP16, and the FP32 sum ends at 100.003.</p>
+  </li>
+  <li>
+    <div class="ms-title">Measure the machine: bandwidth, peak FLOPs, launch overhead</div>
+    <p>Write <code>bench(fn)</code> first, because every later number depends on it. Launches are asynchronous ("Kernels: how work is launched on a GPU"), so a Python timer around a launch measures almost nothing. Use CUDA events, warm up, take the median of many runs, and flush the L2 cache between runs so the last run's data is not still sitting in L2 ("The memory hierarchy"). Then measure three things:</p>
+    <ul>
+      <li><b>Bandwidth.</b> Copy buffers from 64 KB to 4 GB and count read plus write bytes. Plot GB/s against size on a log axis, once with L2 flushing and once without.</li>
+      <li><b>Compute.</b> <code>torch.matmul</code> on 8192×8192 BF16 matrices is 2·8192<sup>3</sup> FLOPs. On Ada or Hopper, also time FP8 through <code>torch._scaled_mm</code> (a private API whose signature has changed between releases). Also time FP32 with TF32 off; that is the roof for milestone 3.</li>
+      <li><b>Launch overhead.</b> Launch a tiny kernel 10,000 times. Measure the CPU time to issue one launch and the GPU time per kernel separately ("Launch overhead").</li>
+    </ul>
+    <p>Divide measured peak by measured bandwidth to get your ridge point, and put everything next to your GPU's row in "Hardware cheat sheet". If your GPU is not listed, take the dense (not sparse) figures from NVIDIA's datasheet.</p>
+    <pre><code><span class="c"># timing.py / roofs.py</span>
+<span class="k">def</span> <span class="f">bench</span>(fn, *, warmup=<span class="n">10</span>, iters=<span class="n">100</span>, flush_l2=<span class="k">True</span>) -&gt; float:
+    <span class="s">"""Median GPU seconds for one fn() call. CUDA events, not time.time()."""</span>
+
+<span class="k">def</span> <span class="f">copy_bandwidth</span>(nbytes: int, flush_l2: bool) -&gt; float: ...  <span class="c"># bytes/s, read + write</span>
+<span class="k">def</span> <span class="f">matmul_tflops</span>(dtype, n: int = <span class="n">8192</span>) -&gt; float: ...      <span class="c"># 2*n**3 / seconds</span>
+<span class="k">def</span> <span class="f">launch_overhead</span>() -&gt; tuple[float, float]: ...           <span class="c"># (CPU us per launch, GPU us per tiny kernel)</span></code></pre>
+    <p class="check">Copies of 1 GB and up reach 80–90% of spec bandwidth, as "What the roofline leaves out" predicts: about 2.7–3.0 TB/s on an H100 SXM, 0.8–0.9 TB/s on an RTX 4090. Without flushing, the sweep shows a plateau above HBM speed while source plus destination fit in L2, then a drop near the L2 size (50 MB on H100, 40 MB on A100, 72 MB on RTX 4090). BF16 matmul lands at roughly 60–90% of the dense spec; above about 105% means a timing bug or a sparse spec number. On an H100, FP8 approaches 2× your BF16 rate. Your ridge point is in the ballpark of the cheat sheet's, usually a bit lower. One tiny launch costs a few microseconds. If issuing a launch takes the CPU longer than running it takes the GPU, the GPU idles between kernels: the batch-1 decode problem from "Launch overhead".</p>
+  </li>
+  <li>
+    <div class="ms-title">The kernel ladder: from naive to register-tiled, in CUDA C++</div>
+    <p>Start from <code>matmul_naive</code> in "Kernels: how work is launched on a GPU" and compile it with <code>torch.utils.cpp_extension.load_inline</code>. Build four FP32 kernels, each one attacking the bottleneck of the one before:</p>
+    <ul>
+      <li><b>Uncoalesced:</b> swap which thread index walks rows and which walks columns. Same math, same FLOPs, different addresses per warp.</li>
+      <li><b>Naive:</b> the chapter's kernel, with 32×8 blocks.</li>
+      <li><b>Shared-memory tiled:</b> <var>T</var>×<var>T</var> tiles of <var>A</var> and <var>B</var> staged through <code>__shared__</code> memory, exactly as in Figure 2.12.</li>
+      <li><b>Register-tiled:</b> each thread computes a small block of outputs (say 8×8) inside a larger block tile (say 128×128), so every value read from shared memory is reused many times from registers. This is the "warp tiles in registers" bullet.</li>
+    </ul>
+    <p>Time each one at 4096³ against cuBLAS FP32 with TF32 off. If <code>ncu</code> works on your machine, collect two counters per kernel: bytes read from L2 by the SMs (<code>lts__t_sectors_srcunit_tex_op_read.sum</code> × 32 B) and bytes read from DRAM (<code>dram__bytes_read.sum</code>).</p>
+    <pre><code><span class="c">// kernels.cu, rung 3: T x T threads per block, one output each</span>
+<span class="k">template</span> &lt;<span class="k">int</span> T&gt;
+<span class="k">__global__ void</span> <span class="f">matmul_smem</span>(<span class="k">const float</span>* A, <span class="k">const float</span>* B, <span class="k">float</span>* C, <span class="k">int</span> M, <span class="k">int</span> N, <span class="k">int</span> K) {
+  <span class="k">__shared__ float</span> As[T][T], Bs[T][T];
+  <span class="k">int</span> row = blockIdx.y * T + threadIdx.y, col = blockIdx.x * T + threadIdx.x;
+  <span class="k">float</span> acc = <span class="n">0.0f</span>;                           <span class="c">// FP32 accumulator in a register</span>
+  <span class="k">for</span> (<span class="k">int</span> k0 = <span class="n">0</span>; k0 &lt; K; k0 += T) {
+    <span class="c">// 1. each thread copies ONE element of the A tile and ONE of the B tile (zero-fill past the edges)</span>
+    <span class="c">// 2. barrier</span>
+    <span class="c">// 3. T FMAs reading As and Bs</span>
+    <span class="c">// 4. barrier: what breaks without this one?</span>
+  }
+  <span class="k">if</span> (row &lt; M &amp;&amp; col &lt; N) C[row * N + col] = acc;
+}</code></pre>
+    <p class="check">All four kernels pass <code>tests/test_matmul.py</code>: relative Frobenius error below 10<sup>−5</sup> against an FP64 reference, on square shapes and on ragged ones that are not multiples of the tile. Every rung is faster than the one before. Uncoalesced is several times slower than naive, the shared-memory step is a modest gain, and register tiling is the big jump; the register-tiled kernel reaches at least 40% of cuBLAS FP32. With <code>ncu</code>, the L2 traffic of both tiled kernels lands within about 15% of the formula in "Tiled matmul through shared memory", 2·<var>m</var>·<var>n</var>·<var>k</var>/<var>T</var> elements × 4 B: 17.2 GB for <var>T</var> = 32 and about 4.3 GB for a 128-wide block tile at 4096³. The naive kernel's L2 traffic is far below the 550 GB it requests (caches recover part of the gap, as the section says) but clearly above the tiled kernels'. Write one sentence per rung naming the resource that limits it.</p>
+  </li>
+  <li>
+    <div class="ms-title">Tensor cores in Triton, and why the accumulator is FP32</div>
+    <p>Switch to BF16 and the tensor cores ("Tensor cores: matrix-multiply hardware"). Write a Triton matmul in which each program owns a BLOCK_M×BLOCK_N tile of <var>C</var>, walks <var>K</var> in BLOCK_K chunks and adds <code>tl.dot</code> results into an FP32 tile. Triton stages tiles through shared memory and issues the MMA instructions for you. Your job is the tiling, the edge masks, and the last two bullets of "Tiled matmul through shared memory": pipelining (<code>num_stages</code>) and tile scheduling (launch tiles in groups so blocks running together share strips of <var>A</var> and <var>B</var> in L2). Try to write it before you read Triton's matmul tutorial.</p>
+    <p>Then add a flag that rounds the accumulator to BF16 after every <var>K</var> chunk, and run the experiment behind "Multiply in low precision, add in FP32": relative error against an FP64 reference for <var>K</var> from 256 to 16,384 (Llama 3.1 8B's down-projection sums 14,336 products), written out in FP32 so you see accumulation error alone.</p>
+    <pre><code><span class="k">@triton.jit</span>
+<span class="k">def</span> <span class="f">matmul_kernel</span>(a_ptr, b_ptr, c_ptr, M, N, K,
+                  stride_am, stride_ak, stride_bk, stride_bn, stride_cm, stride_cn,
+                  BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+                  GROUP_M: tl.constexpr, ACC_BF16: tl.constexpr):
+    pid = tl.program_id(<span class="n">0</span>)
+    <span class="c"># 1. pid -&gt; (pid_m, pid_n); with GROUP_M &gt; 1, visit tiles in groups of GROUP_M tile-rows</span>
+    <span class="c"># 2. offsets and pointer tiles for A[BLOCK_M, BLOCK_K] and B[BLOCK_K, BLOCK_N]</span>
+    <span class="c"># 3. acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)</span>
+    <span class="c"># 4. per K chunk: masked loads, acc += tl.dot(a, b), advance the pointers;</span>
+    <span class="c">#    if ACC_BF16: round acc to bfloat16 and back (the experiment)</span>
+    <span class="c"># 5. masked store, cast to the output dtype</span></code></pre>
+    <p class="check">With BF16 output, your error against an FP64 reference is within 1.2× of cuBLAS's own. At 4096³ your kernel reaches at least 70% of cuBLAS BF16; good configs get close to 100%. At 8192³, where <var>A</var> and <var>B</var> together are far bigger than L2, grouped tile order needs fewer DRAM bytes than row-major order; report both as a multiple of the 3·<var>n</var><sup>2</sup>·2 B ≈ 403 MB minimum, along with their speeds. In the accumulator plot the FP32 curve stays orders of magnitude lower, and the BF16 curve grows roughly like √<var>K</var> for zero-mean random inputs. With all-positive inputs (<code>torch.rand</code>) the BF16 accumulator stalls outright: Figure 2.6, inside a matmul.</p>
+  </li>
+  <li>
+    <div class="ms-title">Your roofline, with every kernel on it</div>
+    <p>Put it together in <code>roofline.py</code>. For each operation, compute FLOPs and <i>minimum</i> HBM bytes with the formulas from "Matrix multiplication: where the FLOPs go", time it with <code>bench</code>, and plot attained FLOP/s against intensity on log-log axes. Draw the cheat-sheet roofs dashed and your measured roofs from milestone 2 solid. Place these points:</p>
+    <ul>
+      <li>Elementwise add of two large BF16 vectors.</li>
+      <li>The batch sweep: [<var>m</var>, 4096] × [4096, 4096] (<var>W</var><sub>q</sub>) and [<var>m</var>, 4096] × [4096, 14336] (an MLP up-projection) for <var>m</var> = 1, 2, 4, … 8,192, through cuBLAS and through your Triton kernel.</li>
+      <li>Your milestone 3 kernels, against the FP32 roof.</li>
+      <li>If your GPU has FP8: the same batch-1 GEMVs as FP8 × FP8 through <code>torch._scaled_mm</code>.</li>
+    </ul>
+    <pre><code><span class="c"># roofline.py</span>
+SHAPES = [(<span class="n">4096</span>, <span class="n">4096</span>), (<span class="n">4096</span>, <span class="n">14336</span>)]   <span class="c"># W_q and the MLP up-projection of Llama 3.1 8B</span>
+BATCH = [<span class="n">2</span>**i <span class="k">for</span> i <span class="k">in</span> range(<span class="n">14</span>)]          <span class="c"># m = 1 ... 8192 token rows</span>
+
+<span class="k">def</span> <span class="f">gemm_point</span>(m, k, n, dtype=torch.bfloat16) -&gt; tuple[float, float]:
+    flops = <span class="n">2</span> * m * n * k
+    min_bytes = (m * k + k * n + m * n) * dtype.itemsize  <span class="c"># read A and W once, write C once</span>
+    seconds = ...   <span class="c"># bench() over rotating weight copies, so W is never warm in L2</span>
+    <span class="k">return</span> flops / min_bytes, flops / seconds         <span class="c"># (intensity, attained FLOP/s)</span></code></pre>
+    <p class="check">No point sits above your measured roofs; if one does, it is being served from L2, so fix the benchmark, not the plot. The batch-1 GEMVs sit on the slanted roof at <var>I</var> ≈ 1, a fraction of a percent of peak. They take within about 20% of bytes ÷ bandwidth for the 117 MB MLP matrix, and a bit worse for the 33.6 MB <var>W</var><sub>q</sub> (about 10–12 µs on an H100 SXM), where fixed start-up costs show. Elementwise add reaches at least 80% of 0.17 × bandwidth. Attained TFLOP/s grows in proportion to <var>m</var> (slope 1 on the log-log plot) and then flattens, and the bend lands within about 2× of your measured ridge (near <var>m</var> ≈ 300 on an H100, ≈ 160 on an RTX 4090). The FP8 GEMVs run 1.6–2× faster than BF16: half the bytes under the same roof.</p>
+  </li>
+</ol>
+
+<h3>Done when</h3>
+<ul class="checklist">
+  <li><code>pytest tests/test_formats.py</code> passes: bit-exact against PyTorch for FP16, BF16, E4M3 and E5M2 on all 2<sup>32</sup> FP32 inputs, all 16 E2M1 codes correct, the chapter's format table regenerated, and the swamping values reproduced.</li>
+  <li><code>python roofs.py</code> prints your GPU's measured row: copy bandwidth at 80% of spec or better, BF16 (and FP8) TFLOPS, ridge point and launch overhead, plus a bandwidth-vs-size plot with a visible L2 edge.</li>
+  <li>All five matmul kernels pass <code>tests/test_matmul.py</code> on square and ragged shapes. The CUDA ladder gets faster at every rung, the register-tiled kernel reaches 40% of cuBLAS FP32, and the Triton kernel reaches 70% of cuBLAS BF16 at 4096³.</li>
+  <li>The accumulator plot shows FP32 accumulation flat and orders of magnitude below a BF16 accumulator whose error grows with <var>K</var>.</li>
+  <li><code>roofline.png</code> has no point above the measured roofs, batch-1 GEMVs on the bandwidth roof, and the GEMM sweep bending within 2× of your measured ridge.</li>
+  <li><code>RESULTS.md</code> fills in every row of "The chapter's numbers you will check" and explains each gap larger than 25% in one sentence.</li>
+</ul>
+
+<details class="deep-dive"><summary>Hints (open only when stuck)</summary>
+<ul>
+  <li><b>Rounding with integers.</b> Shift away the low bits you drop. Call them <var>d</var> and the halfway value <var>h</var> = 1 &lt;&lt; (shift − 1). Round up if <var>d</var> &gt; <var>h</var>, or if <var>d</var> = <var>h</var> and the lowest kept bit is 1. Add the round-up to the combined exponent-and-mantissa integer, not to the mantissa alone. The carry then moves 1.111…1 up to the next power of two, and pushes the largest finite value into overflow, for free.</li>
+  <li><b>Subnormal outputs.</b> When the exponent is below the target's minimum normal exponent, put the implicit 1 back in front of the 23 mantissa bits and shift right by the extra amount before rounding. A subnormal that rounds up into the smallest normal number is handled by the same carry.</li>
+  <li><b>Sign extension.</b> <code>&gt;&gt;</code> on negative <code>int32</code> tensors copies the sign bit. Do all bit work in <code>int64</code> and mask with <code>0xFFFFFFFF</code>.</li>
+  <li><b>NaN and overflow.</b> PyTorch returns one canonical NaN pattern, so for NaN inputs only check "is it NaN". For overflow, probe PyTorch with inputs just above the largest finite value, at the halfway point to the next value the format would have, and far above. E4M3 has no Inf, so something else has to come out. <code>ml_dtypes.float4_e2m1fn</code> saturates to ±6.</li>
+  <li><b>Timing traps.</b> The first call includes Triton compilation, autotuning and cuBLAS heuristics, so warm up. GPUs boost and then throttle as they heat up, so run for at least a second and report the median. Cross-check your <code>bench</code> against <code>triton.testing.do_bench</code>, which also flushes L2 between runs.</li>
+  <li><b>The L2 trap.</b> <var>W</var><sub>q</sub> in BF16 is 33.6 MB, which fits in an H100's 50 MB L2 and an RTX 4090's 72 MB. Run a GEMV twice on the same weights and the second run reads from L2 and "beats" HBM. Rotate through enough weight copies to exceed 2× the L2 size, or flush between runs.</li>
+  <li><b>Shared-memory kernel.</b> It needs two <code>__syncthreads()</code> per <var>K</var> step: one before the FMAs (the tile is fully loaded) and one after them (no thread still reads the tile you are about to overwrite). Without the second you get wrong answers only sometimes. Keep <code>threadIdx.x</code> walking columns so the loads into shared memory stay coalesced.</li>
+  <li><b>Register tiling.</b> The plain shared-memory kernel does 2 shared-memory loads per FMA, so shared memory becomes the new wall. With an 8×8 thread tile, each thread loads 8 values of an <var>A</var> column and 8 of a <var>B</var> row into registers and does 64 FMAs: 16 loads per 64 FMAs. If <code>ncu</code> reports shared-memory bank conflicts (32 banks of 4 bytes), store the <var>A</var> tile transposed or pad each row by one element.</li>
+  <li><b>No <code>nvcc</code>, or no counters?</b> <code>cupy.RawKernel</code> compiles the same CUDA C++ at runtime with NVRTC and runs on PyTorch tensors through <code>cupy.asarray</code> (zero-copy). If <code>ncu</code> fails with <code>ERR_NVGPUCTRPERM</code>, the machine does not let you read performance counters, which is common in cloud containers. Skip the traffic checks, not the milestone.</li>
+  <li><b>Triton.</b> Block sizes must be powers of two and at least 16 for <code>tl.dot</code>. Start at 128×128×64 with <code>num_warps</code> 4 or 8 and <code>num_stages</code> 3 or 4, then let <code>triton.autotune</code> choose among a handful of configs.</li>
+  <li><b>FP8 with <code>torch._scaled_mm</code>.</b> Both dimensions of each operand must be multiples of 16, the second operand must be column-major (store it as [<var>n</var>, <var>k</var>] and pass <code>.t()</code>), and the scales are FP32 tensors (1.0 is fine for unit-scale random data). For a "GEMV", pad <var>m</var> = 1 to 16 rows. The weight bytes dominate, so the intensity barely changes.</li>
+  <li><b>Fair FP32 baseline.</b> Call <code>torch.set_float32_matmul_precision("highest")</code> so cuBLAS does not quietly use TF32 tensor cores while your kernels use the FP32 lanes.</li>
+</ul>
+</details>
+
+<h3>Stretch goals</h3>
+<ul>
+  <li><b>Collectives on 2–8 GPUs</b> (rent a node). Time <code>torch.distributed.all_reduce</code> over NCCL from 8 KB to 4 GB and check the ring formula from "Collective operations: GPUs working together": time ≈ 2·(<var>p</var> − 1)/<var>p</var> · <var>S</var> ÷ link bandwidth for large <var>S</var>, and a latency floor of microseconds for small <var>S</var>. Compare an NVLink machine with a PCIe one, and your numbers with the "busbw" column of NVIDIA's <code>nccl-tests</code>.</li>
+  <li><b>Tensor cores by hand.</b> Add a fifth rung to the CUDA ladder that uses the WMMA API (<code>nvcuda::wmma</code>) or the <code>mma.sync.m16n8k16</code> instruction from "Tensor cores: matrix-multiply hardware", BF16 in and FP32 accumulate. See how close you get to your Triton kernel, and find where the difference goes.</li>
+  <li><b>FP8 accumulation.</b> On an H100, repeat the accumulator experiment with <code>torch._scaled_mm</code> and its <code>use_fast_accum</code> flag on and off. Relate what you see to the DeepSeek-V3 report (Further reading), which found that Hopper's FP8 tensor cores do not accumulate in full FP32.</li>
+  <li><b>An L2 roofline.</b> Measure L2 bandwidth with working sets that fit in L2 (Chips and Cheese measured about 5.5 TB/s on H100). Compute each milestone 3 kernel's L2-level intensity from its <code>ncu</code> L2 bytes and place it on this second roofline. Which roof is each kernel under at each level?</li>
+</ul>
 </section>
 
 <section>

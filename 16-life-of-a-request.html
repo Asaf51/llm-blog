@@ -63,6 +63,7 @@
     <li>Where 10.3 seconds go: 50 ms of network, plumbing and queueing before the GPU starts, 25 ms of prefill thanks to the prefix cache, and 7 seconds of thinking the user never sees.</li>
     <li>How input, cached input, reasoning and visible output tokens appear in real API usage fields, and how they become dollars.</li>
     <li>Every formula of the blog on one page, each with a worked example; a reference table of request parameters (temperature, top_p, max_tokens, stop, effort and more); rules of thumb, a glossary of over 120 terms, and 33 self-test questions.</li>
+    <li><strong>Build it:</strong> reqtrace, a capstone that replays this chapter's umbrella exchange on your own GPU (vLLM serving Qwen3-8B), predicts every hop's milliseconds, bytes and cents with the cheat sheet, then measures them and explains the gaps.</li>
   </ul>
 </div>
 
@@ -1132,6 +1133,170 @@ data: {"type":"message_stop"}</code></pre>
 <details><summary><span class="pill">Ch 16</span>In the trace, request 2 had 4,824 input tokens. Why was its TTFT only about 100 ms?</summary><p>4,224 of them hit the prefix cache, so only 600 tokens needed prefill (about 27 ms). The rest was network (50 ms round trip) and about 26 ms of plumbing and queueing.</p></details>
 <details><summary><span class="pill">Ch 16</span>Usage says: input 4,824 (cached 4,224), output 400 (reasoning 220). What is the bill at $3 / $0.30 / $15 per million?</summary><p>600 × $3 + 4,224 × $0.30 + 400 × $15, per million: $0.0018 + $0.00127 + $0.006 = $0.00907.</p></details>
 </div>
+</section>
+
+<section class="build">
+<h2><span class="build-tag">Build it</span>reqtrace: predict, then measure, the life of one request on your own GPU</h2>
+
+<div class="build-meta">
+  <span><b>Time</b>18–26 hours</span>
+  <span><b>Level</b>Intermediate–Advanced</span>
+  <span><b>Stack</b>Python, vLLM, Hugging Face transformers (tokenizer), httpx, matplotlib, pytest</span>
+  <span><b>Hardware</b>1 GPU, 24 GB+ (an 80 GB H100 or A100 for the full load sweep)</span>
+  <span><b>Uses</b>Sections: The request we will follow · The trace, hop by hop · The clock: where the milliseconds go · What the client receives: events, stop reasons, usage · The bill: token accounting for both turns · The request's footprint, and what can go wrong · Cheat sheet: every formula on one page</span>
+</div>
+
+<p>Every number in this chapter was computed, not measured: the "Illustrative, not measured" callout says so. In this project you close that gap. You stand up a real serving stack on one GPU, replay the umbrella exchange on it (system prompt, three tools, earlier turns, hidden thinking, a <code>get_weather</code> call, a second request), and trace it hop by hop. Before every measurement you write down a prediction made with the cheat sheet. Then you measure, and you explain the gap.</p>
+
+<p>This is the synthesis exam. Each step of the trace forces one chapter on you: the chat template and token counts (<a href="03-tokens.html">Ch 3</a>), cache blocks (<a href="12-kv-cache.html">Ch 12</a>), the scheduler and batching (<a href="15-serving.html">Ch 15</a>), prefill versus decode on the roofline (<a href="11-inference.html">Ch 11</a>), reasoning tokens (<a href="10-reasoning.html">Ch 10</a>), stop reasons (<a href="14-sampling.html">Ch 14</a>), and the bill. You do not build the engine: vLLM is the engine, and the projects of chapters 11–15 build its parts. You build the instruments around it: a predictor, a tracer, a metrics differ, a load generator, a usage normalizer and a report.</p>
+
+<p>At the end you have your own Figures 16.2, 16.4 and 16.5, drawn from your own traces, and a clock table in the chapter's format where every row has a predicted value, a measured value and an error.</p>
+
+<h3>The deliverable</h3>
+<ul>
+  <li><code>predict.py</code>: the cheat sheet as functions of <code>config.json</code> and a GPU spec, with each row's worked example as a unit test.</li>
+  <li><code>scenario.py</code> and <code>tokens.py</code>: the umbrella exchange as data, and an exact token and block count for every part of it.</li>
+  <li><code>client.py</code>: a hand-written SSE client that timestamps every event, runs the tool and sends request 2; one JSONL trace per run.</li>
+  <li><code>metrics.py</code> and <code>load.py</code>: server-side phase times from vLLM's <code>/metrics</code>, and a background load of exactly <var>B</var> decoding sequences.</li>
+  <li><code>usage.py</code>, <code>bill.py</code>, <code>report.py</code>: one usage record for three API shapes, the bill, and a one-page report that regenerates from <code>traces/</code> with one command.</li>
+</ul>
+
+<h3>Setup</h3>
+<p>Use <code>Qwen/Qwen3-8B</code> (ungated, Apache 2.0). It is the size class of Llama 3.1 8B (36 layers, GQA with 8 KV heads of size 128, 16.4 GB of BF16 weights), and unlike Llama 3.1 it thinks before it answers and calls tools, so steps 11 and 12 of the trace really happen. On a 24 GB card use <code>Qwen/Qwen3-4B</code>: half the weights, the same 144 KiB of KV per token. Llama 3.1 8B Instruct also works (vLLM's <code>llama3_json</code> tool parser with the Llama 3.1 tool chat template from vLLM's <code>examples/</code>), but then every reasoning row is zero. Milestone 1 needs Llama's <code>config.json</code> anyway, because the chapter's worked examples are for that model.</p>
+<pre><code>pip install vllm httpx transformers matplotlib pytest pyyaml
+vllm serve Qwen/Qwen3-8B --port 8000 --max-model-len 32768 \
+    --block-size 16 --enable-prefix-caching --enable-prompt-tokens-details \
+    --enable-auto-tool-choice --tool-call-parser hermes \
+    --reasoning-parser qwen3 2&gt;&amp;1 | tee logs/vllm.log
+
+reqtrace/
+  gpus.yaml      <span class="c"># your GPU: memory, bandwidth, peak BF16 FLOPS, $/hour</span>
+  predict.py     <span class="c"># milestone 1</span>
+  scenario.py  tokens.py              <span class="c"># milestone 2</span>
+  client.py      <span class="c"># milestone 3: writes traces/*.jsonl</span>
+  metrics.py     <span class="c"># milestone 4</span>
+  load.py        <span class="c"># milestone 5</span>
+  usage.py  bill.py  report.py        <span class="c"># milestone 7</span>
+  tests/</code></pre>
+
+<h3>Reference numbers</h3>
+<p>What your predictor should say before you measure anything. The H100 column assumes the chapter's specs: 3.35 TB/s, 989 TFLOPS BF16, 79.65 GiB.</p>
+<div class="table-wrap">
+<table class="data">
+  <tr><th>Quantity</th><th>Chapter (Llama 3.1 8B)</th><th>Your prediction (Qwen3-8B, H100)</th><th>Measured from</th></tr>
+  <tr><td>Parameters</td><td class="num">8,030,261,248</td><td class="num">8,190,735,360</td><td>the safetensors index: 16,381,470,720 bytes</td></tr>
+  <tr><td>KV bytes per token, BF16</td><td class="num">131,072 (128 KiB)</td><td class="num">147,456 (144 KiB)</td><td>startup log: pool size ÷ pool tokens</td></tr>
+  <tr><td>Decode bound, batch 1</td><td class="num">≈ 209 tok/s (≈ 223 strictly)</td><td class="num">≈ 205 tok/s (≈ 221 strictly)</td><td>client inter-token gaps</td></tr>
+  <tr><td>Prefill of 4,096 new tokens, 50% MFU</td><td class="num">≈ 0.13 s</td><td class="num">≈ 0.14 s</td><td><code>vllm:request_prefill_time_seconds</code></td></tr>
+  <tr><td>KV pool</td><td class="num">≈ 55 GiB, 453K tokens (92%)</td><td class="num">≈ 53 GiB, 390K tokens (90%, 3 GiB other)</td><td>startup log</td></tr>
+  <tr><td>Bill of the exchange</td><td class="num">$0.01767</td><td>your usage × $3 / $0.30 / $15</td><td>the final usage chunks</td></tr>
+</table>
+</div>
+
+<h3>Milestones</h3>
+<ol class="milestones">
+  <li>
+    <div class="ms-title">The cheat sheet as code</div>
+    <p>Turn "Cheat sheet: every formula on one page" into functions. Read the shapes from a <code>config.json</code> and the hardware from <code>gpus.yaml</code>. You need at least: parameters, weight bytes, KV bytes per token (GQA and MLA), the KV pool from the VRAM budget, prefill time (with the attention term), decode time per step for a batch with given context lengths, the latency formula, speculative tokens per pass, and request cost. Keep each row's worked example as its test. Then write <code>predict_exchange()</code>: token counts in, the chapter's clock table out, every moment predicted.</p>
+    <pre><code><span class="k">def</span> <span class="f">n_params</span>(m: Model) -&gt; int: ...
+<span class="k">def</span> <span class="f">kv_bytes_per_token</span>(m: Model, nbytes: int = <span class="n">2</span>) -&gt; int: ...
+<span class="k">def</span> <span class="f">kv_pool_tokens</span>(m: Model, g: GPU, util: float, other_gib: float = <span class="n">3.0</span>) -&gt; int: ...
+<span class="k">def</span> <span class="f">prefill_s</span>(m: Model, g: GPU, n_new: int, n_cached: int, mfu: float = <span class="n">0.5</span>) -&gt; float: ...
+<span class="k">def</span> <span class="f">decode_step_s</span>(m: Model, g: GPU, contexts: list[int], overhead_s: float = <span class="n">0.0</span>) -&gt; float: ...
+<span class="k">def</span> <span class="f">predict_exchange</span>(m: Model, g: GPU, requests: list[RequestShape]) -&gt; list[Moment]: ...</code></pre>
+    <p class="check"><code>pytest tests/test_predict.py</code> reproduces the chapter: 8,030,261,248 parameters and 131,072 B per token for Llama 3.1 8B, 70,272 B for DeepSeek-V3's MLA, ≈ 209 tok/s and ≈ 0.13 s on an H100, 1.85 tokens per pass at α = 0.85, $0.00907 for request 2, and the "Done" row at 10.33 s when you feed in the trace's own inputs. For Qwen3-8B the chapter's dense formula comes out exactly 9,216 short of 8,190,735,360. Find out why from the tensor names, then make your function exact.</p>
+  </li>
+  <li>
+    <div class="ms-title">Steps 4–5: the umbrella prompt, token by token</div>
+    <p>Write <code>scenario.py</code>: a system prompt of about 2,000 tokens (real instructions, not filler), three tool schemas (<code>get_weather</code> and two of your choice), one earlier exchange, and the new message <em>"I land at 7 pm. Do I need an umbrella for dinner?"</em> The fake <code>get_weather</code> sleeps 300 ms and returns fixed JSON. Your exchange is three requests: turn 0 (the earlier exchange, which warms the cache), request 1 and request 2. In <code>tokens.py</code>, render each request with the model's own chat template, rebuild the table from "The request we will follow" for your prompt (tokens per part), and predict each request's cached tokens from the blocks the previous request left behind.</p>
+    <pre><code><span class="k">def</span> <span class="f">render</span>(tok, messages: list[dict], tools: list[dict]) -&gt; list[int]: ...
+<span class="k">def</span> <span class="f">part_breakdown</span>(tok, parts: list[tuple[str, list[dict]]], tools) -&gt; list[tuple[str, int]]: ...
+<span class="k">def</span> <span class="f">predicted_cached</span>(prev_ids: list[int], ids: list[int], block: int = <span class="n">16</span>) -&gt; int: ...</code></pre>
+    <p class="check">Your count equals the server's <code>usage.prompt_tokens</code> exactly for all three requests (one plain non-streaming call each is enough here), and the parts sum to the total. Before you go on, write down your answers: how many tokens are the tools, and does request 2's prompt contain request 1's thinking?</p>
+  </li>
+  <li>
+    <div class="ms-title">Steps 1, 13 and 14: a client that timestamps every event</div>
+    <p>Write the client on <code>httpx</code>, not an SDK, so you own every timestamp. Reuse one open connection, as the app in step 1 does. Ask for usage in the last chunk (<code>"stream_options": {"include_usage": true}</code>) and pin <code>seed</code> and <code>max_tokens</code> so reruns produce the same tokens. vLLM speaks the OpenAI Chat Completions stream: <code>data:</code> lines with JSON chunks and a final <code>data: [DONE]</code>, with no <code>event:</code> lines like the Anthropic stream in "What the client receives". Classify every delta as reasoning, content, tool-call fragment, finish or usage. On finish reason <code>tool_calls</code>, join and parse the arguments, run the tool, append the assistant turn and the tool result, and send request 2.</p>
+    <pre><code><span class="k">async def</span> <span class="f">stream</span>(client: httpx.AsyncClient, body: dict) -&gt; list[dict]:
+    events, t0 = [], time.perf_counter()
+    <span class="k">async with</span> client.stream(<span class="s">"POST"</span>, <span class="s">"/v1/chat/completions"</span>, json=body) <span class="k">as</span> r:
+        <span class="k">async for</span> line <span class="k">in</span> r.aiter_lines():
+            ...  <span class="c"># parse, classify, append {"t": ..., "kind": ..., ...}</span>
+    <span class="k">return</span> events</code></pre>
+    <p class="check">Stop reasons are <code>tool_calls</code>, then <code>stop</code>. The tool arguments do not parse until the call's last fragment has arrived. Reasoning tokens (tokenize the reasoning text) plus visible tokens match <code>completion_tokens</code> to within a few marker tokens such as <code>&lt;think&gt;</code>. And the latency formula holds on your data: TTFT + (<var>n</var><sub>out</sub> − 1) × mean inter-token gap is within 3% of the measured end-to-end time.</p>
+  </li>
+  <li>
+    <div class="ms-title">Steps 5–8: the server's half of the clock</div>
+    <p>The client sees the outside of the clock; vLLM's Prometheus endpoint <code>/metrics</code> sees the inside. It has per-request histograms for queue, prefill and decode time, TTFT and end-to-end latency, plus prefix-cache counters. When your request runs alone, the change of a histogram's <code>_sum</code> across that request is the request's value. Scrape before and after each request, and join the deltas with the client trace into the chapter's clock table: arrives, prefill starts, first token sampled, first bytes at the client, first visible text, tool call, request 2 sent, done. The residual between client TTFT and server time is your plumbing. Then test "the prefix cache is a latency feature": run each request cold and warm, and sweep a cold prompt from 1K to 32K tokens. Fit the slope, convert it to an achieved MFU, and draw your predictor's curve over the points.</p>
+    <pre><code>PHASES = [<span class="s">"request_queue_time_seconds"</span>, <span class="s">"request_prefill_time_seconds"</span>,
+          <span class="s">"request_decode_time_seconds"</span>, <span class="s">"time_to_first_token_seconds"</span>,
+          <span class="s">"e2e_request_latency_seconds"</span>]
+<span class="k">def</span> <span class="f">scrape</span>(base_url: str) -&gt; dict[str, float]: ...   <span class="c"># Prometheus text format</span>
+<span class="k">def</span> <span class="f">phase_delta</span>(before: dict, after: dict, name: str) -&gt; float: ...</code></pre>
+    <p class="check">Each histogram's <code>_count</code> rose by exactly 1 per request; otherwise the delta is contaminated. The server's <code>cached_tokens</code> equals your milestone 2 prediction for all three requests. On localhost the plumbing residual is a few milliseconds, not tens. The cold sweep is linear for short prompts and bends upward at 16–32K, and your predictor follows the bend only once it includes the attention term. Report your achieved MFU next to the chapter's 50% assumption; anything from about a quarter to two thirds is plausible on an H100.</p>
+  </li>
+  <li>
+    <div class="ms-title">Steps 6 and 9 under load: the footprint and the shared weight read</div>
+    <p>Give the GPU company. <code>load.py</code> keeps exactly <var>B</var> background sequences decoding: random prompts of fixed length that share no prefix, <code>ignore_eos</code>, a long <code>max_tokens</code>, and a restart as soon as one ends. Run your traced exchange inside loads of <var>B</var> = 0, 1, 4, 16, 32, 64, or until the pool is full. Predict each point first with the step model of "The request's footprint": bytes per iteration = weights + the sum over sequences of context × KV bytes per token; time = bytes ÷ bandwidth + one overhead constant, fitted once at <var>B</var> = 0. Measure your request's TPOT and queue time on the client, aggregate throughput from the <code>vllm:generation_tokens</code> counter, and the pool from the startup log and <code>vllm:kv_cache_usage_perc</code>. Then draw your own Figure 16.5. Expect one difference from it: the chapter's MLA model spends 85% of an iteration on weights, but a GQA 8B with 32 sequences of 5K tokens reads more KV (≈ 23.6 GB) than weights (16.4 GB).</p>
+    <p class="check">The startup log's KV capacity is within 10% of <code>kv_pool_tokens()</code>, and you can say what the rest of the memory holds. Your request's peak footprint is ⌈tokens ÷ 16⌉ blocks, and its share of the pool matches the usage gauge to within a percentage point. With one fitted overhead, the step model predicts TPOT within 15% at every <var>B</var>. Aggregate throughput grows almost linearly at small <var>B</var> while per-user TPOT rises slowly, as the rules of thumb under "Speed" claim.</p>
+  </li>
+  <li>
+    <div class="ms-title">Figure 16.6 for real: break one hop at a time</div>
+    <p>Figure 16.6 is a debugging map. Make its cards happen on purpose. For each drill, write down the expected outcome first. Then record what the client saw (HTTP status, finish reason, usage) and which server counter moved.</p>
+    <ul>
+      <li><b>Client:</b> close the connection halfway through the thinking. Does the server stop decoding? What did you keep?</li>
+      <li><b>Front door:</b> send a prompt longer than <code>--max-model-len</code>. How many milliseconds until the error, and did the GPU do any work?</li>
+      <li><b>Template:</b> put today's date in the first line of the system prompt, then change it. Cached tokens fall to zero; move the date to the end and they fall only to the last whole block before it ("Rules of thumb": Money).</li>
+      <li><b>Scheduler:</b> start more background sequences than the pool holds. Watch <code>vllm:num_preemptions</code>, your queue time and your TPOT (<a href="12-kv-cache.html">Ch 12</a>, "When memory runs out").</li>
+      <li><b>Decode:</b> the reasoning trap. Set <code>max_tokens</code> below the thinking length: finish reason <code>length</code>, no visible text, every token billed.</li>
+      <li><b>Sampler and tools:</b> raise the temperature until tool-call arguments break; count parse failures over 50 runs.</li>
+    </ul>
+    <p class="check">A table with one row per drill: what you did, what you predicted, what the client saw, which counter moved, and the card of Figure 16.6 it reproduces. At least five of the six predictions were right before you ran them.</p>
+  </li>
+  <li>
+    <div class="ms-title">Step 17 and the report: your bill, your clock, your lessons</div>
+    <p><code>usage.py</code> maps the three shapes of "What the usage fields say" onto one record: OpenAI Chat (what vLLM returns), OpenAI Responses, and Anthropic Messages, whose <code>input_tokens</code> excludes cached tokens. If the server's usage has no reasoning count, fill it from your own. <code>bill.py</code> prices a record. <code>report.py</code> builds one page from <code>traces/</code>: the clock table with predicted, measured and error columns; your Figure 16.2 as a waterfall; your Figure 16.4 (tokens to scale, then share of tokens versus share of the bill at $3 / $0.30 / $15); your Figure 16.5; the two sweeps. Run the exchange twice more, once with thinking off (<code>"chat_template_kwargs": {"enable_thinking": false}</code>) and once with the cache defeated, to put a number on each of the "Three lessons from the clock". End with the provider cost per million tokens from the cheat sheet, using your GPU's $/hour and your best aggregate throughput.</p>
+    <pre><code><span class="k">def</span> <span class="f">test_chapter_request_2</span>():
+    u = from_anthropic({<span class="s">"input_tokens"</span>: <span class="n">600</span>, <span class="s">"cache_read_input_tokens"</span>: <span class="n">4224</span>,
+                        <span class="s">"cache_creation_input_tokens"</span>: <span class="n">0</span>, <span class="s">"output_tokens"</span>: <span class="n">400</span>})
+    <span class="k">assert</span> u.input_total == <span class="n">4824</span> <span class="k">and</span> round(bill(u, CHAPTER_PRICES), <span class="n">6</span>) == <span class="n">0.009067</span></code></pre>
+    <p class="check">The bill tests pass in both the OpenAI and the Anthropic shapes: $0.008604 and $0.009067 for the two requests, $0.01767 together, $0.03944 without the cache. The report regenerates with one command. Turning thinking off moves your first visible token earlier by reasoning tokens × TPOT, within 10%.</p>
+  </li>
+</ol>
+
+<h3>Done when</h3>
+<ul class="checklist">
+  <li><code>pytest</code> passes: at least ten cheat-sheet rows reproduce their worked examples, and the bill tests reproduce $0.01767 and $0.03944.</li>
+  <li>Your token counts match the server exactly for every request, and so do your block-level predictions of cached tokens.</li>
+  <li>Your clock table has every row of the chapter's, each with predicted, measured and error. The plumbing residual is a measured number.</li>
+  <li>Two sweep plots, TTFT against new tokens and TPOT and throughput against <var>B</var>, with your predictions drawn over the data. Achieved MFU and achieved fraction of bandwidth are stated.</li>
+  <li>KV capacity is within 10% of your VRAM budget. Your request's footprint is given in blocks, MB and percent of the pool.</li>
+  <li>Six failure drills, each tied to a card of Figure 16.6.</li>
+  <li>One paragraph per lesson in "Three lessons from the clock": does it hold on your machine, and by how much?</li>
+</ul>
+
+<details class="deep-dive"><summary>Hints (open only when stuck)</summary>
+<ul>
+  <li>The 9,216 missing Qwen3 parameters: each layer has a per-head RMSNorm on queries and one on keys (<code>q_norm</code>, <code>k_norm</code>), <var>d</var><sub>h</sub> = 128 weights each. 2 × 128 × 36 = 9,216.</li>
+  <li>A cold run needs a cold prefix, not a restarted server. Put a random nonce in the first line of the system prompt and every block misses. A nonce at the end measures a warm prefill of a few tokens.</li>
+  <li>A full prefix match still computes the last prompt token, because the sampler needs its logits. So the best case reports the largest multiple of 16 below the prompt length, not the whole prompt.</li>
+  <li>Chat templates rewrite history. Render requests 1 and 2 and diff their token IDs: templates often drop earlier turns' thinking, and the hit stops at the first differing token. Whether request 1's output blocks also hit in request 2 depends on whether the re-rendered turn tokenizes exactly as it was generated.</li>
+  <li>If your reasoning counter reads zero, check the field name. Newer vLLM versions put it in <code>reasoning</code>, older ones in <code>reasoning_content</code>.</li>
+  <li>Do not count tokens by SSE chunks; one chunk is not guaranteed to be one token. Use the usage chunk and the tokenizer.</li>
+  <li>A fresh TCP connection, a tokenizer loaded inside the timed path, or the first request after startup each add tens of milliseconds that look like plumbing. Warm up, then take the median of five runs.</li>
+  <li>The upward bend: summed over a prompt of <var>n</var> tokens, the attention term 4·<var>L</var>·<var>d</var>·<var>t</var> becomes ≈ 2·<var>L</var>·<var>d</var>·<var>n</var>². Long prompts are also prefilled in chunks, one per iteration, sized by the max-num-batched-tokens setting in the startup log.</li>
+  <li>Under load, histogram deltas mix every request. Time your request on the client, or use per-request OpenTelemetry spans if your vLLM build has tracing.</li>
+  <li>Background prompts must not share a prefix. Shared blocks save memory, and with prefix-aware attention kernels they can also save reads, which breaks the simple step model.</li>
+</ul>
+</details>
+
+<h3>Stretch goals</h3>
+<ul>
+  <li><b>The front half of the trace.</b> Add 25 ms each way with <code>tc qdisc add dev lo root netem delay 25ms</code> and put a small gateway in front of vLLM: API keys, a tokens-per-minute limiter that returns 429, streaming pass-through. Measure what it adds, against the chapter's 10 ms of plumbing.</li>
+  <li><b>Steps 2–3 with two replicas.</b> Run two vLLM servers, replay 50 multi-turn conversations, and compare cache hit rate and mean TTFT under random routing and under a prefix-aware router (a character-prefix match with a 50% threshold, like SGLang's). If you built the <a href="15-serving.html">Chapter 15</a> project, put it behind the router.</li>
+  <li><b>Step 10.</b> Enable vLLM's n-gram speculative decoding, read the acceptance rate α from its spec-decode metrics, and check tokens per pass against (1 − α<sup><var>k</var>+1</sup>) ÷ (1 − α). Measure the TPOT gain at <var>B</var> = 1 and <var>B</var> = 32.</li>
+  <li><b>Change one knob of the stand-in.</b> Serve with <code>--quantization fp8</code> and predict the TPOT change from bytes per weight before you run it (<a href="13-quantization.html">Ch 13</a>). Or replay the exchange on a hosted reasoning API with prompt caching, normalize its usage with <code>usage.py</code>, and compare its TTFT and bill with yours.</li>
+</ul>
 </section>
 
 <section>

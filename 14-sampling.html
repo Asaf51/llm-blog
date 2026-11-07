@@ -73,6 +73,7 @@
     <li>Greedy decoding, repetition loops, beam search, stop sequences, <code>finish_reason</code>, seeds and RNGs.</li>
     <li>Why temperature 0 is not deterministic on real servers (floating-point order, batch-dependent kernels, MoE routing), and how batch-invariant kernels fix it.</li>
     <li>Constrained decoding for structured output: schema → automaton → token mask → logits set to −∞. Logprobs, and recommended settings, including the fixed temperatures of reasoning models.</li>
+    <li><strong>Build it:</strong> write <code>samplekit</code>, a batched GPU sampler with every stage of the chain, penalties, DRY, stop sequences, seeds, logprobs and a JSON-schema-to-token-mask compiler, then use it on Llama&#160;3.1&#160;8B to reproduce this chapter's numbers and to count how many different "temperature 0" answers your own GPU gives.</li>
   </ul>
 </div>
 
@@ -1347,6 +1348,400 @@
 </div>
 
 <aside class="callout key"><div class="callout-title">Key takeaway</div><p>For hosted frontier models the trend is clear: the sampler is becoming part of the model, tuned by the vendor and locked. The knobs in this chapter still matter for open-weight models you run yourself, for non-reasoning modes, and for understanding why outputs vary. When you do set them: temperature for spread, min-p or top-p for the tail, structured outputs for format, and batch-invariant kernels if you need exact repeatability.</p></aside>
+</section>
+
+<section class="build">
+<h2><span class="build-tag">Build it</span>samplekit: a sampler chain, stop logic and JSON-mask compiler of your own, plus a temperature-0 determinism lab</h2>
+
+<div class="build-meta">
+  <span><b>Time</b>16–24 hours</span>
+  <span><b>Level</b>Intermediate</span>
+  <span><b>Stack</b>Python, PyTorch, transformers, SciPy, matplotlib; XGrammar and vLLM as referees</span>
+  <span><b>Hardware</b>1 GPU, 24 GB+ (Llama 3.1 8B in BF16); Milestones 1–2 run on any CUDA GPU</span>
+  <span><b>Uses</b>Sections: Drawing a token, How GPUs actually sample, Greedy decoding and the repetition trap, Temperature, Truncation, The sampler chain, Penalties, DRY and logit bias, Stopping, Seeds and random number generators, Why temperature 0 is still not deterministic, Structured output, Logprobs</span>
+</div>
+
+<p>The sampler is the one part of an LLM stack with no weights. It is a few hundred lines of code between the LM head
+and the next token, so you can build all of it, test it exhaustively and run it on a real model. In this project you
+write <code>samplekit</code>: a batched sampler that takes the <code>[B, V]</code> FP32 logits of Llama&#160;3.1&#160;8B
+and does everything this chapter describes. That means penalties and DRY, temperature, the four truncation filters in
+any engine's order, a sort-free draw, per-request seeds, stop sequences with a holdback buffer,
+<code>finish_reason</code>, logprobs, and a compiler that turns a JSON schema into one token mask per automaton state.
+The model comes from <code>transformers</code>. Everything after the LM head is yours.</p>
+
+<p>Every piece has two referees. The first is this chapter. You rebuild the toy row for "The cat sat on the" (12 named
+tokens plus 128,244 at −12), and every worked number becomes a unit test: 0.467, 2.54 bits, 91.5% junk at
+<var>T</var> = 2, the 115,000 junk tokens that vLLM's order lets into the nucleus, DRY's 4.29. The second referee is
+production code. Your masks must equal Hugging Face's warpers bit for bit, your grammar masks must equal XGrammar's at
+every step, and your greedy loop must equal <code>model.generate</code> token for token. Then you point the finished tool
+at questions the chapter answers in prose. How fast does greedy fall into a loop? Does the order of fields in a schema
+change accuracy? How many different "temperature 0" answers does your own GPU give?</p>
+
+<p>At the end you have a tested library, five experiment scripts and a short report in which every measured number sits
+next to the chapter's.</p>
+
+<h3>The deliverable</h3>
+<ul>
+  <li><code>samplekit/</code>: two draws (the ruler and the exponential race); batched per-row processors (temperature,
+  top-k, top-p, min-p, typical); penalties (repetition, frequency, presence, DRY, logit bias, bans); a
+  <code>SamplerChain</code> with llama.cpp, vLLM and HF orders; a batched <code>generate()</code> with stop tokens, stop
+  strings, holdback streaming, <code>finish_reason</code>, seeds and logprobs; and <code>grammar/</code>: schema → regex
+  → byte-level DFA → per-state token masks.</li>
+  <li><code>tests/</code>: the chapter's numbers as unit tests, chi-square tests for every draw, parity with Hugging Face,
+  a stop-sequence fuzzer, grammar property tests and parity with XGrammar.</li>
+  <li><code>experiments/</code> and <code>report/</code>: draw benchmarks, tail mass vs <var>T</var> on real logits, the
+  repetition trap, structured-output validity and field order, the determinism lab, and <code>numbers.md</code> with each
+  measurement next to the chapter's value.</li>
+</ul>
+
+<h3>Setup</h3>
+<p>Develop on <code>Qwen/Qwen2.5-0.5B-Instruct</code>: it is ungated, about 1 GB, and small enough to run in FP32 for
+exact tests. Run the real experiments on <code>meta-llama/Llama-3.1-8B-Instruct</code> in BF16 (16 GB), whose
+128,256-entry vocabulary is the chapter's <var>V</var>. The repetition experiment uses the base model, because
+open-ended continuation is where greedy loops show up most clearly. Prompts come from
+<code>Salesforce/wikitext</code> (<code>wikitext-2-raw-v1</code>) and <code>openai/gsm8k</code> (<code>main</code>).
+Install vLLM in its own environment, because it pins its own PyTorch.</p>
+<pre><code>pip install torch transformers accelerate datasets scipy jsonschema xgrammar matplotlib pytest
+hf auth login                                  <span class="c"># accept the license on the meta-llama model pages first</span>
+hf download meta-llama/Llama-3.1-8B-Instruct
+hf download meta-llama/Llama-3.1-8B            <span class="c"># base model, for the repetition trap (M4)</span>
+hf download Qwen/Qwen2.5-0.5B-Instruct         <span class="c"># iterate here first</span>
+python -m venv .venv-vllm &amp;&amp; .venv-vllm/bin/pip install vllm   <span class="c"># M7 only</span>
+
+samplekit/
+  samplekit/toy.py  draw.py                    <span class="c"># M1</span>
+  samplekit/processors.py                      <span class="c"># M2</span>
+  samplekit/generate.py  stop.py               <span class="c"># M3</span>
+  samplekit/chain.py  penalties.py             <span class="c"># M4</span>
+  samplekit/grammar/schema.py  dfa.py  index.py   <span class="c"># M5-M6</span>
+  experiments/  tests/  report/</code></pre>
+
+<h3>Reference numbers</h3>
+<p>All on the toy row (12 named tokens at ids 0–11, 128,244 tokens at logit −12) unless noted. The flat row is the
+natural log of Figure 14.6's 12 fruit probabilities.</p>
+<div class="table-wrap">
+<table class="data">
+  <tr><th>Quantity</th><th class="num">Target</th><th>Chapter section</th></tr>
+  <tr><td>Softmax denominator after subtracting the max (4.0)</td><td class="num">2.143</td><td>Drawing a token</td></tr>
+  <tr><td><span class="tok">&#9251;mat</span>, <span class="tok">&#9251;floor</span>, <span class="tok">&#9251;bed</span>, <span class="tok">&#9251;couch</span> at <var>T</var> = 1; tail mass</td><td class="num">0.467, 0.210, 0.104, 0.070; 0.7%</td><td>Drawing a token</td></tr>
+  <tr><td>Token picked by the ruler at <var>u</var> = 0.62</td><td class="num"><span class="tok">&#9251;floor</span></td><td>Drawing a token</td></tr>
+  <tr><td><span class="tok">&#9251;mat</span> wins the two-token race against <span class="tok">&#9251;floor</span></td><td class="num">69%</td><td>How GPUs actually sample</td></tr>
+  <tr><td>p(<span class="tok">&#9251;mat</span>) at <var>T</var> = 0.5 / 0.7</td><td class="num">0.775 / 0.63</td><td>Temperature</td></tr>
+  <tr><td>Entropy at <var>T</var> = 0.5, 1, 1.5, 2</td><td class="num">1.10, 2.54, 10.8, 16.2 bits</td><td>Temperature</td></tr>
+  <tr><td>Tail mass at <var>T</var> = 1.5 / 2</td><td class="num">49% / 91.5%</td><td>Temperature; The sampler chain</td></tr>
+  <tr><td>Kept by top-p 0.9, peaked / flat</td><td class="num">6 / 11 tokens</td><td>Truncation</td></tr>
+  <tr><td>Kept by min-p 0.1, peaked / flat</td><td class="num">4 / 12 tokens</td><td>Truncation</td></tr>
+  <tr><td>Mass kept by top-k 5 on the flat row</td><td class="num">51%</td><td>Truncation (Figure 14.6)</td></tr>
+  <tr><td>Kept by typical, τ = 0.3 / τ = 0.9</td><td class="num"><span class="tok">&#9251;floor</span>, <span class="tok">&#9251;bed</span> / top-p's 6</td><td>Truncation</td></tr>
+  <tr><td><var>T</var> 1.5 + top-p 0.95, llama.cpp order</td><td class="num">8 kept, p(<span class="tok">&#9251;mat</span>) 0.353, no junk</td><td>The sampler chain</td></tr>
+  <tr><td>Same settings, vLLM or HF order</td><td class="num">≈115,000 junk kept, ≈46% junk draws</td><td>The sampler chain</td></tr>
+  <tr><td>Repetition penalty 1.2 on <span class="tok">&#9251;mat</span></td><td class="num">logit 3.33, p 0.310</td><td>Penalties, DRY and logit bias</td></tr>
+  <tr><td>Frequency 0.5 + presence 0.6 (<span class="tok">&#9251;mat</span> ×2, <span class="tok">&#9251;floor</span> ×1)</td><td class="num">logits 2.4, 2.1; p 0.19; <span class="tok">&#9251;bed</span> 0.21</td><td>Penalties, DRY and logit bias</td></tr>
+  <tr><td>DRY penalty for a 5-token repeated suffix (0.8 / 1.75 / 2)</td><td class="num">4.29</td><td>Penalties (Figure 14.8)</td></tr>
+  <tr><td>Figure 14.11's sums in FP32: in order / split in two</td><td class="num">14.5399990 / 14.5400009</td><td>Why temperature 0 is still not deterministic</td></tr>
+</table>
+</div>
+
+<h3>Milestones</h3>
+<ol class="milestones">
+  <li>
+    <div class="ms-title">The ruler and the race on the chapter's toy row</div>
+    <p>Build the toy distribution exactly as "Drawing a token: inverse-CDF sampling" defines it: one FP32 row of
+    128,256 logits, the 12 named tokens of Figure 14.2 at ids 0–11, every other entry −12. Write two draws that take
+    <code>[B, V]</code> logits and return <code>[B]</code> token IDs. The ruler is softmax, cumulative sum and
+    <code>searchsorted</code>. The race is the exponential race from "How GPUs actually sample":
+    <var>e</var><sup><var>z</var> − max</sup> divided by Exp(1) noise, then argmax, with no normalization and no sort.
+    Keep <code>torch.multinomial</code> as a baseline. Test the draws like a statistician: 10<sup>6</sup> draws each, and a
+    chi-square goodness-of-fit test against the exact probabilities, with the tail pooled into one bin. Before you trust
+    the test, plant a subtle bug (for example, leave the tail out of the softmax denominator) and confirm the test catches
+    it. Then benchmark at <var>B</var> ∈ {1, 32, 256} with CUDA events, adding a sort-based top-p in front of the race to
+    see what a full sort costs. Check vLLM's claim about <code>torch.multinomial</code> yourself: run each draw under
+    <code>torch.cuda.set_sync_debug_mode("warn")</code> or in the PyTorch profiler and look for a synchronize or a
+    device-to-host copy.</p>
+    <pre><code><span class="c"># samplekit/toy.py: the row behind Figures 14.2 and 14.5</span>
+NAMED = {" mat": 4.0, " floor": 3.2, " bed": 2.5, " couch": 2.1, " edge": 1.6, " windowsill": 1.2,
+         " table": 0.9, " chair": 0.7, " roof": 0.5, " sofa": 0.2, " keyboard": 0.0, " moon": -2.0}
+V, TAIL_Z = 128_256, -12.0
+<span class="k">def</span> <span class="f">toy_logits</span>(device=<span class="s">"cuda"</span>) -&gt; Tensor: ...                         <span class="c"># [1, V] fp32</span>
+
+<span class="c"># samplekit/draw.py: logits [B, V] in, token ids [B] out</span>
+<span class="k">def</span> <span class="f">draw_ruler</span>(logits: Tensor, u: Tensor) -&gt; Tensor: ...          <span class="c"># u: [B] in [0, 1)</span>
+<span class="k">def</span> <span class="f">draw_race</span>(logits: Tensor, gen: torch.Generator) -&gt; Tensor: ...  <span class="c"># no sort, no .item()</span>
+<span class="k">def</span> <span class="f">chi2_pvalue</span>(ids: Tensor, probs: Tensor, pool_from: int = 12) -&gt; float: ...</code></pre>
+    <p class="check">The denominator, the four probabilities, the 0.7% tail and <span class="tok">&#9251;floor</span> at
+    <var>u</var> = 0.62 match the table. <span class="tok">&#9251;mat</span> wins 69.0% ± 0.2% of 10<sup>6</sup>
+    two-token races. All three draws pass the chi-square test at α = 0.001, and the planted bug fails it. At
+    <var>B</var> = 256 the race shows no synchronization and the full sort is the most expensive line in the sampler.
+    Report milliseconds and effective GB/s (bytes of the 131 MB FP32 logits read and written, divided by time), and
+    write down what your PyTorch version does for <code>torch.multinomial</code>.</p>
+  </li>
+  <li>
+    <div class="ms-title">Temperature and the four filters, batched and per row</div>
+    <p>In a server every request in the batch has its own settings, so each processor takes logits
+    <code>[B, V]</code> and a parameter tensor <code>[B]</code>, and returns logits with removed tokens set to −∞. No
+    Python loop over rows. Temperature divides by <var>T</var> and treats <var>T</var> &lt; 10<sup>−5</sup> as greedy,
+    vLLM's rule from "Temperature". Top-k, top-p, min-p and typical follow the formulas in "Truncation: top-k, top-p,
+    min-p, typical"; a neutral value (0 or 1) switches a filter off. Turn every truncation and temperature row of the
+    reference table into a test. Then get real logits: dump 2,000 FP32 next-token rows from Llama&#160;3.1&#160;8B
+    Instruct (one teacher-forced forward pass over a document gives hundreds of positions; 2,000 rows are about 1 GB).
+    Compare each of your filters with <code>TemperatureLogitsWarper</code>, <code>TopKLogitsWarper</code>,
+    <code>TopPLogitsWarper</code>, <code>MinPLogitsWarper</code> and <code>TypicalLogitsWarper</code> from
+    <code>transformers</code> over a grid of settings. Last, redraw Figure 14.5 with real logits: the mean probability
+    outside each row's top 100 tokens, and the mean entropy, for <var>T</var> from 0.1 to 2.</p>
+    <pre><code><span class="c"># samplekit/processors.py: z is [B, V] fp32, every parameter is a [B] tensor</span>
+<span class="k">def</span> <span class="f">temperature</span>(z, T): ...     <span class="c"># rows with T &lt; 1e-5 become greedy</span>
+<span class="k">def</span> <span class="f">top_k</span>(z, k): ...           <span class="c"># k = 0: off</span>
+<span class="k">def</span> <span class="f">top_p</span>(z, p): ...           <span class="c"># p = 1: off</span>
+<span class="k">def</span> <span class="f">min_p</span>(z, p_base): ...      <span class="c"># p_base = 0: off</span>
+<span class="k">def</span> <span class="f">typical</span>(z, tau): ...       <span class="c"># tau = 1: off</span>
+<span class="k">def</span> <span class="f">entropy_bits</span>(z): ...       <span class="c"># [B]</span>
+
+<span class="c"># one of the referees</span>
+ref = TopPLogitsWarper(top_p=<span class="n">0.9</span>)(<span class="k">None</span>, z.clone())
+<span class="k">assert</span> torch.equal(ref.isinf(), top_p(z, torch.full((B,), <span class="n">0.9</span>, device=z.device)).isinf())</code></pre>
+    <p class="check">Every temperature and truncation row of the reference table passes, including typical sampling
+    dropping <span class="tok">&#9251;mat</span> at τ = 0.3. On the 2,000 real rows your kept sets are bit-identical
+    to Hugging Face's for every setting in the grid; any row that differs has an exact tie at the cutoff, and you count
+    those rows. A batch that mixes four different settings gives the same rows as four separate calls. The real-logit
+    tail curve has Figure 14.5's shape: small and flat below <var>T</var> = 1, then rising steeply. Record the
+    temperature at which the mass outside the top 100 passes 10% and 50%.</p>
+  </li>
+  <li>
+    <div class="ms-title">A decode loop that knows when to stop</div>
+    <p>Write <code>generate()</code>: a batched loop over a <code>transformers</code> model's forward pass and its
+    <code>DynamicCache</code>. If you built the Chapter 6 forward pass or the Chapter 12 cache, plug them in; this project
+    only needs logits. Left-pad the batch and pass an attention mask and explicit position IDs. Each row carries its own
+    <code>SamplingParams</code>. Stop on the token IDs in <code>generation_config.json</code> (Llama&#160;3.1 Instruct
+    lists 128001, 128008 and 128009), on user stop strings matched on detokenized text with the holdback buffer of
+    Figure 14.10, or on <code>max_tokens</code>, and report <code>finish_reason</code> as in "Stopping: EOS, stop
+    sequences, max_tokens". A seeded row gets its own <code>torch.Generator</code> and fills its noise row from it, like
+    vLLM's per-request path in "Seeds and random number generators"; unseeded rows share one generator. Logprobs return
+    the chosen token and up to 20 alternatives, either raw (from the untouched logits, vLLM's default) or processed
+    (after the chain), the distinction in "Logprobs: reading the distribution". For now the chain is Milestone 2's
+    processors in HF order; Milestone 4 replaces it.</p>
+    <pre><code><span class="k">@dataclass</span>
+<span class="k">class</span> <span class="f">SamplingParams</span>:
+    temperature: float = 1.0; top_k: int = 0; top_p: float = 1.0; min_p: float = 0.0
+    max_tokens: int = 256; stop: list[str] = field(default_factory=list); seed: int | None = None
+    logprobs: int = 0; logprobs_mode: str = <span class="s">"raw"</span>         <span class="c"># or "processed"</span>
+
+<span class="k">@dataclass</span>
+<span class="k">class</span> <span class="f">Completion</span>:
+    token_ids: list[int]; text: str; logprobs: list[dict] | None
+    finish_reason: str; stop_reason: str | int | None   <span class="c"># "stop" | "length"; which string or ID</span>
+
+<span class="k">class</span> <span class="f">StopMatcher</span>:
+    <span class="k">def</span> <span class="f">push</span>(self, new_text: str) -&gt; tuple[str, bool]: ...   <span class="c"># (safe to stream now, stopped?)</span>
+
+<span class="k">def</span> <span class="f">generate</span>(model, tok, prompts: list[str], params: list[SamplingParams],
+             on_text=<span class="k">None</span>) -&gt; list[Completion]: ...</code></pre>
+    <p class="check">At temperature 0 your output is token-identical to <code>model.generate(do_sample=False)</code>
+    for 20 prompts × 256 tokens at batch 1; if one differs, the first differing step must be a near-tie (inspect the
+    top-2 logit gap), not a bug. The stop fuzzer passes 10,000 random cases from a scripted fake model (random text,
+    random stop strings, random token boundaries): the streamed chunks join to exactly the text before the first stop,
+    no character of a matched stop string is ever streamed, and <code>finish_reason</code> and
+    <code>stop_reason</code> are right. A seeded request gives the same tokens in five runs, and its noise row is
+    bit-identical alone or in a batch of 16; write down whether the whole completion still matches inside the batch
+    (Milestone 7 explains the answer). Raw logprobs of the chosen tokens equal <code>log_softmax</code> of one
+    teacher-forced forward pass over prompt plus completion within 10<sup>−3</sup> in FP32; in BF16, record the largest
+    difference. With top-k 5 and <code>logprobs=5</code>, the five processed probabilities sum to 1 and the raw ones do
+    not.</p>
+  </li>
+  <li>
+    <div class="ms-title">Chain order, penalties, DRY and the repetition trap</div>
+    <p>Build <code>SamplerChain</code> with the three default orders of Figure 14.7. Penalties read a per-row count
+    tensor <code>[B, V]</code> that lives on the GPU and is updated every step. Implement the repetition penalty with its
+    sign split and a scope option (prompt plus output for HF and vLLM, the last 64 tokens for llama.cpp), frequency and
+    presence penalties with OpenAI's formula over generated tokens only, logit bias, bans, allow-lists and
+    <code>min_tokens</code>. Implement DRY as "Penalties, DRY and logit bias" describes: find the longest suffix that
+    occurred earlier, stop at sequence breakers, and penalize only the token that would continue the repeat. Then a
+    reality check on logit bias: ban every Llama&#160;3 token whose text, stripped and lowercased, is "cat", ask for a
+    story about a cat, and report how many IDs you banned and how the model still writes the word. Finally run
+    <code>experiments/repetition.py</code> on the base model. (a) The feedback loop of Figure 14.4: put <var>k</var>
+    copies of a sentence in the context (<var>k</var> = 1 … 8, 20 sentences) and measure the mean per-token probability
+    of the next copy. (b) 100 wikitext prompts (the first 32 tokens of a paragraph), 512 new tokens each, under five
+    configurations: greedy; pure sampling at <var>T</var> = 1; <var>T</var> 0.8 with min-p 0.05; <var>T</var> 0.7 with
+    top-p 0.9 and presence 0.6; greedy with DRY 0.8 / 1.75 / 2. For each, report seq-rep-4 (the share of 4-grams in a
+    continuation that already occurred earlier in it), the share of completions whose last 64 tokens repeat an earlier
+    span verbatim, and the longest verbatim repeat between sequence breakers.</p>
+    <pre><code>LLAMA_CPP = [<span class="s">"penalties"</span>, <span class="s">"dry"</span>, <span class="s">"top_k"</span>, <span class="s">"typical"</span>, <span class="s">"top_p"</span>, <span class="s">"min_p"</span>, <span class="s">"temperature"</span>]
+VLLM      = [<span class="s">"bans"</span>, <span class="s">"bias"</span>, <span class="s">"penalties"</span>, <span class="s">"temperature"</span>, <span class="s">"min_p"</span>, <span class="s">"top_k"</span>, <span class="s">"top_p"</span>]
+HF        = [<span class="s">"penalties"</span>, <span class="s">"temperature"</span>, <span class="s">"top_k"</span>, <span class="s">"top_p"</span>, <span class="s">"min_p"</span>, <span class="s">"typical"</span>]
+
+<span class="k">class</span> <span class="f">SamplerChain</span>:
+    <span class="k">def</span> <span class="f">__init__</span>(self, order: list[str]): ...
+    <span class="k">def</span> <span class="f">__call__</span>(self, z: Tensor, batch: <span class="s">"BatchState"</span>) -&gt; Tensor: ...  <span class="c"># counts, history, params</span>
+
+<span class="k">def</span> <span class="f">dry_penalties</span>(history: list[int], breakers: set[int], multiplier=<span class="n">0.8</span>, base=<span class="n">1.75</span>,
+                  allowed_length=<span class="n">2</span>, last_n=-<span class="n">1</span>) -&gt; dict[int, float]: ...  <span class="c"># token id -&gt; penalty</span></code></pre>
+    <p class="check">Every penalty and chain-order row of the reference table passes, including about 46% junk in
+    10<sup>5</sup> draws under the vLLM order and none once min-p 0.05 is added. Your <code>HF</code> chain equals a
+    <code>LogitsProcessorList</code> of <code>RepetitionPenaltyLogitsProcessor</code>,
+    <code>TemperatureLogitsWarper</code>, <code>TopKLogitsWarper</code>, <code>TopPLogitsWarper</code> and
+    <code>MinPLogitsWarper</code> bit for bit on the Milestone 2 rows with a real history. DRY gives 4.29 for
+    <span class="tok">&#9251;mat</span> on a token sequence in which "The cat sat on the" occurred before. The
+    feedback curve rises with every copy and climbs toward 1, the shape behind Figure 14.4. In the five-configuration
+    table, greedy has the highest seq-rep-4 and the most completions stuck in a loop. With DRY on, the longest verbatim
+    repeat between breakers stays at a handful of tokens: an 8-token match already costs 0.8 × 1.75<sup>6</sup> ≈ 23
+    logits.</p>
+  </li>
+  <li>
+    <div class="ms-title">Compile a JSON schema into token masks</div>
+    <p>This is the Outlines design from "How grammar engines make the mask fast". Translate a schema subset (an object
+    with required properties in a fixed order, compact separators, and values of type string, integer, boolean or enum)
+    into a regex. Compile the regex into a DFA over bytes. Writing a Thompson construction plus subset construction
+    yourself is the best way to learn it; the <code>interegular</code> package, which Outlines originally used, is the
+    shortcut. Get the raw bytes of every token ID by inverting byte-level BPE's byte-to-character map (Chapter 3).
+    Special tokens get no bytes and are never legal, except the end token in an accepting state. Then build the index:
+    for every DFA state and every token, the state after walking the token's bytes, or dead. Store the allowed masks as a
+    GPU tensor <code>[S, V]</code>. At run time the mask is a lookup, applied with <code>masked_fill(−∞)</code> as the
+    first stage of the chain, and the state advances through <code>next[state, token]</code>.</p>
+    <pre><code><span class="k">def</span> <span class="f">schema_to_regex</span>(schema: dict) -&gt; str: ...
+
+<span class="k">@dataclass</span>
+<span class="k">class</span> <span class="f">DFA</span>:
+    delta: np.ndarray            <span class="c"># [S, 256] int32, -1 = dead</span>
+    start: int
+    accept: np.ndarray           <span class="c"># [S] bool</span>
+
+<span class="k">def</span> <span class="f">token_bytes</span>(tok) -&gt; list[bytes]: ...                       <span class="c"># b"" for special tokens</span>
+<span class="k">def</span> <span class="f">build_index</span>(dfa: DFA, tb: list[bytes]) -&gt; tuple[Tensor, Tensor]: ...  <span class="c"># next [S, V], allowed [S, V]</span>
+
+<span class="k">class</span> <span class="f">Matcher</span>:
+    <span class="k">def</span> <span class="f">mask</span>(self) -&gt; Tensor: ...                 <span class="c"># [V] bool, on the GPU</span>
+    <span class="k">def</span> <span class="f">advance</span>(self, token_id: int) -&gt; <span class="k">None</span>: ...
+    <span class="k">def</span> <span class="f">is_accepting</span>(self) -&gt; bool: ...</code></pre>
+    <p class="check">A property test over 1,000 random reachable (state, token) pairs agrees with a brute-force walk:
+    a token is allowed exactly when its bytes lead to a state from which an accepting state is still reachable. Compile
+    the same regex with XGrammar (<code>GrammarCompiler.compile_regex</code>) and step both matchers through 50 sampled
+    constrained generations: the allowed non-special tokens are identical at every step, and the end token is allowed
+    exactly when your DFA accepts. Report compile time, index memory, and the per-step mask cost at
+    <var>V</var> = 128,256 for the lookup and for a naive scan of every token at run time. The lookup should cost well
+    under 100 μs, the same class as llguidance's quoted 50 μs and far below a few-millisecond decode step; the naive
+    scan should not.</p>
+  </li>
+  <li>
+    <div class="ms-title">Structured output, end to end</div>
+    <p>Wire <code>Matcher</code> into <code>generate()</code>. Build 200 extraction items from templates with known
+    answers (name, age, city, a role from an enum of six, a boolean) in varied phrasings. Run Llama&#160;3.1&#160;8B
+    Instruct at temperature 0 under three conditions: (A) the prompt describes the JSON format, no constraint; (B) the
+    same prompt, constrained; (C) constrained, but the prompt only says "extract the person's details". Score schema
+    validity with <code>jsonschema</code> and accuracy per field, and count length stops separately. Use your logprobs
+    to record, at every step, the probability mass the mask removed (the summed raw probability of illegal tokens), and
+    the model's unconstrained favorite at step 0: the "Sure" of Figure 14.12. Then test the field-order rule from the
+    "Constraints change what the model says" callout on 200 GSM8K test problems: schema
+    <code>{"reasoning": string, "answer": integer}</code> against <code>{"answer": integer, "reasoning": string}</code>,
+    greedy, <code>max_tokens</code> 768.</p>
+    <p class="check">B and C are 100% schema-valid among non-length stops; any failure is a bug in Milestone 5. A is
+    reported honestly, and is worth repeating on Qwen2.5-0.5B, where it should fail more often. The masked mass is near
+    zero on most steps of B and spikes in C, where the model wanted to write prose first. Field accuracy in C is no
+    better than in B. On GSM8K, reasoning-first beats answer-first by a wide margin, because answer-first makes the model
+    commit before it thinks.</p>
+  </li>
+  <li>
+    <div class="ms-title">The determinism lab: why temperature 0 still varies</div>
+    <p>Reproduce "Why temperature 0 is still not deterministic" from the arithmetic up. (a) Redo Figure 14.11's four
+    partial sums in NumPy FP32, in order and split in two. (b) Test one matmul for batch invariance: fix a BF16
+    <code>X</code> of 2,048 × 4,096 and a <code>W</code> of 4,096 × 14,336 (the FFN up-projection shape of Llama&#160;3.1
+    8B), and compare row 0 of <code>X[:B] @ W</code> with <code>X[:1] @ W</code> bit for bit for <var>B</var> = 1 …
+    2,048. Run each <var>B</var> twice too. Repeat inside Thinking Machines' <code>batch_invariant_ops</code>
+    (<code>set_batch_invariant_mode()</code>). (c) Test the whole model: put a target prompt in row 0 of batches of 1 to
+    64 filled with other prompts of the same token length, and record the largest logit difference at the last position
+    and any argmax flips. From Milestone 2's real rows, compute how often the gap between the top two logits is smaller
+    than that difference: that is the per-step chance that greedy can flip. (d) Test a server: send vLLM 500 to 1,000
+    greedy requests for "Tell me about Richard Feynman" at 1,000 tokens, mixed with filler requests of random lengths so
+    the batch size keeps changing. Count unique outputs and plot where each one first diverges. Repeat with
+    <code>VLLM_BATCH_INVARIANT=1</code> (check vLLM's batch-invariance docs for supported GPUs) and time both runs.</p>
+    <pre><code>g = torch.Generator(<span class="s">"cuda"</span>).manual_seed(<span class="n">0</span>)
+X = torch.randn(<span class="n">2048</span>, <span class="n">4096</span>, generator=g, device=<span class="s">"cuda"</span>).bfloat16()   <span class="c"># row 0 is "your" request</span>
+W = torch.randn(<span class="n">4096</span>, <span class="n">14336</span>, generator=g, device=<span class="s">"cuda"</span>).bfloat16()
+ref = X[:<span class="n">1</span>] @ W
+<span class="k">for</span> B <span class="k">in</span> [<span class="n">2</span> ** i <span class="k">for</span> i <span class="k">in</span> range(<span class="n">12</span>)]:
+    a, b = (X[:B] @ W)[:<span class="n">1</span>], (X[:B] @ W)[:<span class="n">1</span>]
+    record(B, max_diff=(a.float() - ref.float()).abs().max().item(), rerun_equal=torch.equal(a, b))</code></pre>
+    <p class="check">(a) gives exactly 14.5399990 and 14.5400009. In (b) every rerun at a fixed <var>B</var> is
+    bit-identical (the kernels are deterministic), some <var>B</var> give a nonzero difference from batch 1 (they are
+    not batch-invariant), and batch-invariant mode makes every difference zero. In (c) at least some batch sizes change
+    row 0's logits, and your flip-rate estimate predicts how many tokens a 1,000-token greedy completion survives
+    unchanged. In (d) the default run gives more than one unique output, with a long shared prefix before the first
+    split (Thinking Machines saw 80 of 1,000, splitting at token 103, on a much larger model; your count will differ).
+    Batch-invariant mode gives exactly one. Report the slowdown next to the chapter's 26 s → 42 s.</p>
+  </li>
+</ol>
+
+<h3>Done when</h3>
+<ul class="checklist">
+  <li><code>pytest</code> passes, with one test per row of the reference table at the precision shown, chi-square tests
+  for every draw (and a planted bug that fails), and a 10,000-case stop-sequence fuzzer.</li>
+  <li>Your filters and your HF-order chain are bit-identical to Hugging Face's processors on 2,000 real Llama rows, with
+  tie rows counted and explained, and your greedy loop matches <code>model.generate</code> token for token.</li>
+  <li>Grammar masks pass the property test and match XGrammar at every step of 50 generations, the mask lookup costs
+  under 100 μs per step at <var>V</var> = 128,256, and constrained runs are 100% schema-valid among non-length stops.</li>
+  <li><code>report/</code> contains the draw benchmark, the real-logit tail-vs-<var>T</var> plot, the repetition curve
+  and five-configuration table, the structured-output table with the GSM8K field-order result, and the matmul
+  difference-vs-<var>B</var> plot.</li>
+  <li>The determinism run shows more than one unique greedy output from default vLLM and exactly one with batch
+  invariance, with the measured slowdown, and <code>numbers.md</code> lists every measurement next to the chapter's
+  value.</li>
+</ul>
+
+<details class="deep-dive"><summary>Hints (open only when stuck)</summary>
+<ul>
+  <li>The ruler wants the smallest <var>i</var> with <var>F<sub>i</sub></var> &gt; <var>u</var>, which is
+  <code>torch.searchsorted(cdf, u, right=True)</code>. Clamp the result to <var>V</var> − 1: the last FP32 cumulative
+  sum can come out slightly below 1, so a large <var>u</var> falls off the end. llama.cpp's trick of scaling
+  <var>u</var> by the total instead of normalizing avoids the problem.</li>
+  <li>In the race, masked logits at −∞ become probability 0 and can never win, which is what you want. For the
+  Gumbel form, <code>torch.rand</code> can return exactly 0 and −ln(−ln 0) is infinite; use
+  <code>exponential_()</code> or clamp. Do all sampler math in FP32, never BF16.</li>
+  <li>BF16 logits upcast to FP32 contain many exact ties. At the top-p or top-k cutoff, which tied token survives depends
+  on sort order. Hugging Face's top-p sorts ascending and removes tokens whose cumulative mass is ≤ 1 − <var>p</var>,
+  then keeps <code>min_tokens_to_keep</code> = 1. Copy that exactly, or detect ties at the cutoff and count them.</li>
+  <li>The logits row can be longer than the tokenizer: Qwen2.5 has 151,936 logits but about 151,665 real tokens.
+  Llama&#160;3's 128,256 include about 250 reserved special tokens. Mask what can never be legal.</li>
+  <li>With left padding, a raw forward pass does not compute positions for you:
+  <code>position_ids = attention_mask.cumsum(-1) - 1</code>, clamped at 0. <code>generate</code> does this internally,
+  which is why the two diverge if you forget.</li>
+  <li>Detokenizing one token at a time breaks multi-byte characters. Decode all generated IDs (or a sliding window),
+  emit the new suffix, and hold back a trailing U+FFFD. The stop holdback is the longest suffix of the pending text that
+  is a prefix of any stop string. A stop string can sit inside one token or span three.</li>
+  <li>Keep penalty counts on the GPU and update them with <code>scatter_add_</code>. Penalties act before temperature.
+  The repetition penalty only asks "seen or not"; frequency asks "how many times".</li>
+  <li>For DRY, keep the longest match length per candidate token, not just the overall longest. The naive quadratic
+  scan is fine for a few thousand tokens; the Z-algorithm on the reversed sequence makes it linear.</li>
+  <li>Build the grammar index on the GPU, all tokens at once: pad the token byte strings into a
+  <code>[V, L]</code> array and step <code>state = delta[state, bytes[:, j]]</code> for <var>j</var> = 0 … <var>L</var>
+  − 1. Prune DFA states that cannot reach an accepting state first. Otherwise a token can lead into a dead end, the next
+  mask is all false, and softmax returns NaN.</li>
+  <li>For XGrammar parity, use <code>xgr.TokenizerInfo.from_huggingface(tok, vocab_size=model.config.vocab_size)</code>
+  and <code>compile_regex</code> with your own regex, not <code>compile_json_schema</code>, whose whitespace rules differ
+  from yours. Tokens that are not valid UTF-8 on their own may be treated differently; restrict string values to
+  printable ASCII for the parity test.</li>
+  <li><code>batch_invariant_ops</code> replaces <code>mm</code>, <code>addmm</code>, <code>log_softmax</code> and
+  <code>mean</code>, not attention, so use it for (b) and rely on vLLM's mode for the whole model. Same-length filler
+  prompts in (c) keep padding out of the comparison. If (d) gives one unique output even without batch invariance, add
+  more filler load or longer outputs; (c) tells you how many to expect.</li>
+</ul>
+</details>
+
+<h3>Stretch goals</h3>
+<ul>
+  <li>Add beam search with a length penalty and match <code>model.generate(num_beams=4, do_sample=False)</code> token for
+  token (read how Hugging Face normalizes by length). Then test "Beam search, and why chat does not use it": beams
+  should reach a higher sequence log-probability than greedy, but a higher seq-rep-4 and lower distinct-2 than sampling
+  on the Milestone 4 prompts.</li>
+  <li>Write a sorting-free top-k/top-p sampler in Triton using FlashInfer-style pivot rejection, all in one kernel.
+  Validate it with the chi-square test, and benchmark it at <var>B</var> = 256 against your sort-based path and
+  FlashInfer's <code>flashinfer.sampling</code> kernels. While you are there, count how often your parallel prefix sum
+  comes out non-monotone (the floating-point trap in "How GPUs actually sample").</li>
+  <li>Cross-check the llama.cpp order against the real thing: convert the model to a BF16 GGUF, call
+  <code>llama-server</code>'s <code>/completion</code> with <code>samplers</code>, <code>n_probs</code> and
+  <code>post_sampling_probs: true</code>, and compare its post-chain probabilities with your <code>LLAMA_CPP</code>
+  chain at the same positions. Expect small differences, because different kernels give different logits.</li>
+  <li>Replace the DFA with a pushdown automaton for nested JSON (arrays, nested objects, recursion), and split the
+  vocabulary into context-independent and context-dependent tokens as XGrammar does. Measure what share of the
+  vocabulary needs the stack at run time.</li>
+</ul>
 </section>
 
 <section>

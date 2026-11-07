@@ -46,6 +46,7 @@
     <li>Real formats byte by byte: llama.cpp Q4_0, Q4_K and Q4_K_M, OCP MXFP4, NVIDIA NVFP4, DeepSeek-V3's FP8 blocks.</li>
     <li>What a 4-bit GEMV kernel does with each byte, and why 4-bit decode is about 2.5&ndash;3&times; faster rather than 4&times;.</li>
     <li>How GPTQ, AWQ, HQQ and quantization-aware training choose better integers than plain rounding, how quality is measured (perplexity, KL divergence), and what fits in 8 to 128 GB.</li>
+    <li><strong>Build it:</strong> <code>quantlab</code>, your own quantization toolkit for Llama 3.1 8B: every format in this chapter, Q4_0 blocks byte-identical to llama.cpp's, a KL-divergence scoreboard, outlier fixes, GPTQ and AWQ from scratch, and a Triton 4-bit GEMV that shows why decode gets 2.5&ndash;3&times; faster, not 4&times;.</li>
   </ul>
 </div>
 
@@ -789,6 +790,194 @@
 <p>Two reminders. For mixture-of-experts models, memory is set by <em>total</em> parameters but decode speed by <em>active</em> ones (<a href="07-mixture-of-experts.html">Chapter 7</a>), which is why a 4-bit MoE on a big unified-memory machine can be both large and fast. And for decode speed on any device, divide bandwidth by the bytes actually read per token (<a href="11-inference.html">Chapter 11</a>), as in Figure 13.1.</p>
 
 <aside class="callout key"><div class="callout-title">Key takeaway</div><p>Pick the largest model whose ~4.5&ndash;5 bpw weights plus KV cache fit, prefer formats with small groups and calibrated scales, move to 5&ndash;8 bits if you have room, and treat anything under 3 bpw as an experiment to be measured, not a default.</p></aside>
+</section>
+
+<section class="build">
+<h2><span class="build-tag">Build it</span>quantlab: quantize Llama 3.1 8B yourself, from byte-exact GGUF blocks to GPTQ and a 4-bit Triton GEMV</h2>
+
+<div class="build-meta">
+  <span><b>Time</b>18&ndash;25 hours</span>
+  <span><b>Level</b>Intermediate&ndash;advanced</span>
+  <span><b>Stack</b>Python, PyTorch, NumPy, transformers, datasets, gguf-py, Triton, matplotlib; llama.cpp as an oracle</span>
+  <span><b>Hardware</b>1 NVIDIA GPU, 24 GB+ (RTX 4090, A100, H100); 32 GB+ system RAM; ~60 GB disk</span>
+  <span><b>Uses</b>Sections: The core idea: snap numbers to a ruler, Granularity: who shares a scale, Outliers: why activations are harder than weights, GGUF and llama.cpp quant types, byte by byte, Block floating-point formats, Inside the kernel: dequantize on the fly, Smarter rounding: calibrated post-training quantization, Measuring the damage</span>
+</div>
+
+<p>This chapter attaches a number to almost every claim. Q4_0 is 18 bytes per 32 weights. Groups of 128 cut the KL divergence 4&times; compared with per-channel scales. One BOS value of 443.6 wrecks a shared INT8 scale. GPTQ halves the output error of the toy row. 4-bit decode is 2.5&ndash;3&times; faster, not 4&times;. In this project you build <code>quantlab</code>, a small quantization toolkit for Llama 3.1 8B, and you check every one of those numbers yourself.</p>
+
+<p>You write every quantizer from the affine formula up. You prove that your GGUF blocks are byte-identical to llama.cpp's. You build a KL-divergence harness against a cached BF16 reference, find the outlier channels, break W8A8 with them and fix it with per-token scales, SmoothQuant and a Hadamard rotation. Then you implement imatrix, AWQ and GPTQ, and finish with a Triton kernel that multiplies straight from packed 4-bit bytes. Every step is tested against a number in this chapter or against a reference implementation. When something is off, you know at once, and finding out why is where the learning happens.</p>
+
+<p>At the end you have a scoreboard: two dozen ways to store the same 8.03 B weights, each with its real bits per weight, perplexity, KL divergence and top-1 agreement, plotted like Figure 13.14. You also have a kernel benchmark that measures the speed side of the trade.</p>
+
+<h3>The deliverable</h3>
+<ul>
+  <li><code>formats.py</code>: one <code>fake_quant(w, spec)</code> for INT (symmetric, asymmetric, Q4_0 rule, clip search), NF4, MXFP4 and NVFP4 at any granularity, plus <code>bpw(spec)</code>.</li>
+  <li><code>gguf_blocks.py</code>: Q4_0 and Q8_0 encoders and decoders that match llama.cpp bit for bit, a Q4_K decoder, and a recipe calculator that reproduces Q4_K_M's 4.894 bpw.</li>
+  <li><code>evalkit.py</code> and <code>fakequant.py</code>: perplexity, mean and 99th-percentile KLD and top-1 agreement against a cached BF16 reference, plus weight specs, activation hooks, SmoothQuant and rotations that can be applied to a Hugging Face model and undone.</li>
+  <li><code>calib.py</code>: activation statistics, imatrix-weighted scale search, AWQ and GPTQ.</li>
+  <li><code>kernels/w4a16.py</code>: a Triton GEMV that reads Q4_0 codes and scales directly, with <code>speedup_vs_batch.png</code>.</li>
+  <li><code>scoreboard.csv</code>, <code>kld_vs_bpw.png</code> and <code>REPORT.md</code>: every configuration you ran, and the chapter's value next to yours for every claim in the table below.</li>
+</ul>
+
+<h3>Setup</h3>
+<p>Develop every milestone on <code>HuggingFaceTB/SmolLM2-1.7B</code>. It is ungated, it uses the same <code>LlamaForCausalLM</code> code as Llama 3.1 8B, its widths are powers of two (2,048 and 8,192, which keeps Hadamard rotations simple), and one full evaluation takes seconds. Run the final numbers on <code>meta-llama/Llama-3.1-8B</code> (the base model; you must accept the license on Hugging Face), because that is the model the chapter measured. If you cannot get Llama, <code>Qwen/Qwen2.5-7B</code> is an ungated model of the same class. Its numbers will not match the chapter's, but the orderings should. Build llama.cpp from source; you need it only as an oracle for bytes.</p>
+<pre><code>pip install torch transformers datasets accelerate numpy scipy matplotlib pytest
+hf download meta-llama/Llama-3.1-8B --local-dir models/llama31-8b
+git clone https://github.com/ggml-org/llama.cpp &amp;&amp; cd llama.cpp
+pip install -e gguf-py      <span class="c"># gguf.quants.quantize/dequantize and GGUFReader</span>
+cmake -B build -DGGML_CUDA=ON &amp;&amp; cmake --build build --config Release -j
+python convert_hf_to_gguf.py ../models/llama31-8b --outtype bf16 --outfile l31-bf16.gguf
+build/bin/llama-quantize --pure l31-bf16.gguf l31-q4_0-pure.gguf Q4_0
+build/bin/llama-quantize l31-bf16.gguf l31-q4_k_m.gguf Q4_K_M</code></pre>
+<pre><code>quantlab/
+  formats.py        <span class="c"># M1  QSpec, fake_quant, int / nf4 / mxfp4 / nvfp4, bpw</span>
+  gguf_blocks.py    <span class="c"># M2  Q4_0 + Q8_0 encode/decode, Q4_K decode, recipes</span>
+  evalkit.py        <span class="c"># M3  windows, reference cache, ppl / kld / top-1</span>
+  fakequant.py      <span class="c"># M3-4  apply/restore weight specs, activation hooks, rotations</span>
+  calib.py          <span class="c"># M4-5  activation stats, imatrix, AWQ, GPTQ</span>
+  kernels/w4a16.py  <span class="c"># M6  Triton GEMV and benchmarks</span>
+  scoreboard.py     <span class="c"># M7  scoreboard.csv, kld_vs_bpw.png</span>
+  tests/            <span class="c"># one test per chapter number</span></code></pre>
+
+<h3>The chapter's numbers you will check</h3>
+<div class="table-wrap">
+<table class="data">
+  <tr><th>Claim</th><th>Section</th><th>Chapter value</th><th>Your target</th></tr>
+  <tr><td>Eight numbers to 4 bits</td><td>The core idea (Figure 13.2)</td><td>codes 0, 2, 4, 5, 7, 9, 12, 15; MSE 0.0032; symmetric 4.6&times; worse; outlier: 0.0037 &rarr; 0.0394</td><td>exact</td></tr>
+  <tr><td>Best clip, and absmax of a group</td><td>Two kinds of error, one knob</td><td>2.5&sigma; (4-bit), 3.9&sigma; (8-bit); max of 32 &asymp; 2.35&sigma;, of 4,096 &asymp; 3.8&sigma;</td><td>&plusmn;0.05&sigma;</td></tr>
+  <tr><td>Relative RMS error, Gaussian / Student-t (5 dof)</td><td>Block floating-point formats</td><td>Q4_0 rule g32 8.6 / 10.8%; NVFP4 9.5 / 9.2; NF4 9.2 / 10.5; g128 10.3 / 15.1; MXFP4 11.5 / 12.6; per-channel 13.8 / 31.0</td><td>&plusmn;0.3 points (&plusmn;1 for the heavy-tailed per-channel case)</td></tr>
+  <tr><td>One block with max 2.6</td><td>Worked example: one block, two formats</td><td>MXFP4 stores 3.0; NVFP4 scale 0.4375, stores 2.625</td><td>exact</td></tr>
+  <tr><td>Q4_0 / Q8_0 bytes</td><td>GGUF and llama.cpp quant types</td><td>the C reference quantizer</td><td>byte-identical</td></tr>
+  <tr><td>Q4_K_M size</td><td>Mixes: what Q4_K_M actually means</td><td>39.30 Gbit, 4.894 bpw</td><td>&plusmn;0.001 bpw</td></tr>
+  <tr><td>RTN INT4 granularity (mean KLD)</td><td>Measured on Llama 3.1 8B</td><td>per-tensor broken; per-channel 0.336; g128 0.084; g32 0.057; INT8 0.0011</td><td>same order; ratios within ~2&times;</td></tr>
+  <tr><td>Outlier channels</td><td>Outliers (Figure 13.5)</td><td>layer 15: channels 2485, 1189, 912, 1815 at 7.7&ndash;8.6; BOS: 443.6 at layer 1's down_proj input</td><td>same channel IDs; values within ~5%</td></tr>
+  <tr><td>W8A8 (mean KLD)</td><td>Outliers</td><td>per-tensor 1.58; SmoothQuant 0.53; per-token 0.021</td><td>same order; per-token &ge; 30&times; better than per-tensor</td></tr>
+  <tr><td>Hadamard rotation, W4A4</td><td>Rotations: QuaRot and SpinQuant</td><td>KLD 3.70 &rarr; 0.433 (8.5&times;)</td><td>&ge; 4&times; lower</td></tr>
+  <tr><td>GPTQ toy row</td><td>GPTQ (Figure 13.11)</td><td>[0, 1, 1, &minus;1]; error 0.37 vs 0.77 for RTN</td><td>exact</td></tr>
+  <tr><td>4-bit decode speed-up</td><td>Why 4-bit decode is about 2.5&ndash;3&times; faster</td><td>2.5&ndash;3&times;; the byte ratio is 16/4.5 = 3.56&times;</td><td>between 2.5&times; and 3.56&times;</td></tr>
+</table>
+</div>
+<p>The chapter's KLD tables were measured on one 512-token passage. On WikiText-2 the absolute values will differ, but the orderings and rough ratios should hold. If one does not, find out why before you move on.</p>
+
+<h3>Milestones</h3>
+<ol class="milestones">
+  <li>
+    <div class="ms-title">Rulers and scales: one quantizer for every format</div>
+    <p>Implement the affine formula from "The core idea" with groups along the last dimension (one row = one output channel, as in "Granularity"). Then add the scale rules: absmax, Q4_0's signed-max/&minus;8, and an MSE clip search. Add the non-uniform rulers from "The ruler does not have to be uniform": NF4 (bitsandbytes' 16-value table, absmax per 64), and E2M1 elements with MXFP4's power-of-two E8M0 scale per 32 and NVFP4's E4M3 scale per 16 with an FP32 per-tensor scale. Write <code>bpw(spec)</code> from the formula in "Granularity". Then turn the table above into tests: Figure 13.2, the 6 dB-per-bit law, the best clip on 2 million normal samples, the worked MXFP4/NVFP4 example, and the random-matrix RMS errors on a 1,024 &times; 4,096 matrix.</p>
+    <pre><code><span class="k">@dataclass</span>
+<span class="k">class</span> <span class="f">QSpec</span>:
+    fmt: str = <span class="s">"int"</span>       <span class="c"># "int" | "nf4" | "mxfp4" | "nvfp4"</span>
+    bits: int = <span class="n">4</span>
+    group: int = <span class="n">32</span>       <span class="c"># -1 = per-channel (whole row), 0 = per-tensor</span>
+    sym: bool = <span class="k">True</span>
+    rule: str = <span class="s">"absmax"</span>  <span class="c"># "absmax" | "q4_0" | "mse"</span>
+    clip: float = <span class="n">1.0</span>
+
+<span class="k">def</span> <span class="f">quantize_int</span>(x, spec) -&gt; tuple[Tensor, Tensor, Tensor]: ...  <span class="c"># codes, scale, zero</span>
+<span class="k">def</span> <span class="f">fake_quant</span>(w: Tensor, spec: QSpec) -&gt; Tensor: ...        <span class="c"># dequantized, same shape</span>
+<span class="k">def</span> <span class="f">bpw</span>(spec: QSpec, scale_bits=<span class="n">16</span>, zero_bits=<span class="n">0</span>) -&gt; float: ...
+
+<span class="k">def</span> <span class="f">test_figure_13_2</span>():
+    x = torch.tensor([-<span class="n">1.20</span>, -<span class="n">0.71</span>, -<span class="n">0.05</span>, <span class="n">0.40</span>, <span class="n">0.88</span>, <span class="n">1.50</span>, <span class="n">2.37</span>, <span class="n">3.30</span>])
+    q, s, z = quantize_int(x, QSpec(bits=<span class="n">4</span>, group=<span class="n">8</span>, sym=<span class="k">False</span>))
+    <span class="k">assert</span> q.tolist() == [<span class="n">0</span>, <span class="n">2</span>, <span class="n">4</span>, <span class="n">5</span>, <span class="n">7</span>, <span class="n">9</span>, <span class="n">12</span>, <span class="n">15</span>] <span class="k">and</span> int(z) == <span class="n">4</span></code></pre>
+    <p class="check">All table rows marked "exact" pass. On uniform data, measured MSE / (<var>s</var><sup>2</sup>/12) is within 1% of 1.0 at every width from 2 to 8 bits, and SQNR climbs about 6 dB per bit. The RMS-error rows land within the tolerances above. Your <code>bpw()</code> reproduces every row of the bpw table in "Granularity", from 4.004 to 8.5, including NF4 with double quantization at 4.127.</p>
+  </li>
+  <li>
+    <div class="ms-title">GGUF byte by byte: encoders that match llama.cpp bit for bit</div>
+    <p>Implement <code>block_q4_0</code> and <code>block_q8_0</code> exactly as "GGUF and llama.cpp quant types, byte by byte" describes them: an FP16 scale followed by the codes, with low nibbles holding weights 0&ndash;15 and high nibbles weights 16&ndash;31. Use NumPy, and work on <code>uint8</code> arrays shaped [rows, blocks &times; bytes per block]. You have two oracles: <code>gguf.quants.quantize(W, GGMLQuantizationType.Q4_0)</code>, and the actual blocks in your <code>--pure</code> Q4_0 file, read with <code>gguf.GGUFReader</code>. Then write a decoder for the 144-byte <code>block_q4_K</code> super-block, including the 12 bytes of bit-packed 6-bit scales and minimums. Finally, write a recipe calculator: given a model config and a recipe name, return the type of every tensor (with the "use_more_bits" rule for <code>attn_v</code> and <code>ffn_down</code>) and the total bits.</p>
+    <pre><code><span class="k">def</span> <span class="f">encode_q4_0</span>(w: np.ndarray) -&gt; np.ndarray: ...   <span class="c"># float32 [N, K] -&gt; uint8 [N, K//32*18]</span>
+<span class="k">def</span> <span class="f">decode_q4_0</span>(b: np.ndarray, K: int) -&gt; np.ndarray: ...
+<span class="k">def</span> <span class="f">decode_q4_k</span>(b: np.ndarray, K: int) -&gt; np.ndarray: ...
+<span class="k">def</span> <span class="f">recipe</span>(config, name=<span class="s">"Q4_K_M"</span>) -&gt; dict[str, str]: ...   <span class="c"># GGUF tensor name -&gt; type</span>
+
+W = hf_weight(<span class="s">"model.layers.0.self_attn.v_proj.weight"</span>).float().numpy()
+<span class="k">assert</span> encode_q4_0(W).tobytes() == quantize(W, GGMLQuantizationType.Q4_0).tobytes()</code></pre>
+    <p class="check">Your Q4_0 and Q8_0 bytes equal gguf-py's on all 224 linear weights (32 layers &times; 7). Every block in your Q4_0 file matches too: <code>attn_v</code>, <code>attn_output</code> and <code>ffn_*</code> directly, and <code>attn_q</code>/<code>attn_k</code> up to a row permutation. The first block of row 0 of layer 0's q_proj reproduces Figure 13.7: a negative scale of about &minus;0.0038, and weight 23 (+0.0304) stored as nibble 0. <code>decode_q4_k</code> matches <code>gguf.quants.dequantize</code> bit for bit on every Q4_K tensor of your Q4_K_M file. Your recipe gives 39.30 Gbit and 4.894 bpw, and the set of Q6_K tensors it predicts is exactly the set that <code>GGUFReader</code> reports in the real file.</p>
+  </li>
+  <li>
+    <div class="ms-title">The damage meter: perplexity, KLD and top-1 against a cached BF16 reference</div>
+    <p>Implement "Measuring the damage". Cut the WikiText-2 test split (<code>Salesforce/wikitext</code>, <code>wikitext-2-raw-v1</code>) into 32 windows of 512 tokens, each starting with BOS (prepend it yourself if the tokenizer does not). Run the BF16 model once and store its next-token log-probabilities as an FP16 memmap: 16,384 positions &times; 128,256 vocabulary &times; 2 bytes = 4.2 GB. For any modified model, report perplexity, mean and 99th-percentile KLD, and top-1 agreement over the same positions. Then write <code>fakequant.apply(model, spec)</code>, which replaces every decoder <code>nn.Linear</code> weight with <code>fake_quant(W, spec)</code> (embeddings and LM head stay BF16, as in the chapter's runs), and <code>restore(model)</code>. Run the RTN sweep from "Measured on Llama 3.1 8B" and the format table in "Measuring the damage": INT8 per-channel; INT4 per-tensor, per-channel, g128 and g32; NVFP4; NF4; MXFP4; INT3 and INT2 g32.</p>
+    <pre><code><span class="k">def</span> <span class="f">make_windows</span>(tok, n=<span class="n">32</span>, length=<span class="n">512</span>) -&gt; Tensor: ...      <span class="c"># [n, length], BOS first</span>
+<span class="k">@torch.no_grad</span>()
+<span class="k">def</span> <span class="f">build_reference</span>(model, windows, path) -&gt; np.memmap: ...
+<span class="k">@torch.no_grad</span>()
+<span class="k">def</span> <span class="f">evaluate</span>(model, windows, ref) -&gt; dict: ...  <span class="c"># ppl, kld, kld_p99, top1</span></code></pre>
+    <p class="check">The BF16 model scored against its own cache gives KLD below 10<sup>&minus;4</sup> and top-1 above 99.9%, which is your noise floor. INT4 per-tensor drives perplexity above 1,000. Per-channel KLD is 3&ndash;6&times; that of g128 (chapter: 4.0&times;), and g32 is below g128. INT8 per-channel KLD is around 10<sup>&minus;3</sup>. The three 4.5-bpw formats (Q4_0-rule INT4, NVFP4, NF4) land within about 20% of each other, and MXFP4 is clearly worse. INT3 g32 is about as damaged as INT4 per-channel, and INT2 is broken.</p>
+  </li>
+  <li>
+    <div class="ms-title">Outliers: find them, break W8A8 with them, fix them</div>
+    <p>Add forward pre-hooks that record per-channel max |<var>x</var>| at every linear input. Collect them on calibration text (the WikiText-2 <em>train</em> split, never your test windows) and on "The cat sat on the". Reproduce Figure 13.5. Then add activation fake-quantization in the hooks: INT8 with a dynamic scale per tensor or per token. Add SmoothQuant with &alpha; = 0.5 from your calibrated maxima, using <var>s<sub>j</sub></var> from "SmoothQuant: move the outliers into the weights". Add a randomized Hadamard rotation in front of every linear layer: random signs, then a normalized Walsh&ndash;Hadamard transform of size 4,096, or block-diagonal 2,048 blocks for the 14,336-wide down_proj input, applied to both <var>x</var> and <var>W</var>. Fill the W8A8 table in "Outliers" and the rotation table in "Rotations".</p>
+    <pre><code><span class="k">def</span> <span class="f">quantize_activations</span>(model, spec: QSpec, per=<span class="s">"token"</span>): ...   <span class="c"># or "tensor"</span>
+<span class="k">def</span> <span class="f">smooth</span>(model, act_max: dict[str, Tensor], alpha=<span class="n">0.5</span>): ...
+<span class="k">def</span> <span class="f">rotate</span>(model, seed=<span class="n">0</span>): ...   <span class="c"># x -&gt; x Q, W -&gt; W Q, Q = diag(signs) H / sqrt(n)</span></code></pre>
+    <p class="check">In layer 15's q/k/v input you find the same four channels as the chapter (2485, 1189, 912, 1815), about 40&times; the median. On BOS, layer 1's down_proj input peaks near 443.6, and residual channels 788, 1384 and 4062 sit at 270&ndash;300 from layer 1 on. With no quantization, <code>rotate</code> leaves KLD at the noise floor. The W8A8 rows come out in the chapter's order: per-token at least 30&times; better than per-tensor, and SmoothQuant helping per-tensor but staying an order of magnitude behind per-token. The rotation cuts W4A4 KLD at least 4&times; and also improves weight-only W4.</p>
+  </li>
+  <li>
+    <div class="ms-title">Calibrated PTQ: imatrix, AWQ and GPTQ from scratch</div>
+    <p>Use 128 segments of 2,048 tokens from C4 (<code>allenai/c4</code>, one <code>en</code> shard) or the WikiText-2 train split; use 32 &times; 512 while developing. Implement three methods from "Smarter rounding" and "The importance matrix", all on top of your own <code>QSpec</code> grids. <b>imatrix</b>: accumulate &Sigma;<var>x<sub>k</sub></var><sup>2</sup> per input column and pick each group's scale by searching ~30 candidates for the lowest importance-weighted error. <b>AWQ</b>: set <var>s</var> = <var>s<sub>X</sub></var><sup>&alpha;</sup> per input channel, grid-search &alpha; per layer on the output error, and fold 1/<var>s</var> into the preceding RMSNorm (for q/k/v and gate/up) or into up_proj's rows (for down_proj). <b>GPTQ</b>: compute <var>H</var> = 2<var>X</var><var>X</var><sup>T</sup> layer by layer, feeding each layer the outputs of the already-quantized layers before it. Add 1% dampening, take a Cholesky factor of <var>H</var><sup>&minus;1</sup>, process blocks of 128 columns with lazy updates, and compute each group's scale when you reach it. Run all three at INT4 g128 and INT3 g128.</p>
+    <pre><code><span class="k">def</span> <span class="f">gptq</span>(W, H, spec, block=<span class="n">128</span>, damp=<span class="n">0.01</span>, round_fn=<span class="k">None</span>) -&gt; Tensor: ...  <span class="c"># returns W_hat</span>
+
+<span class="k">def</span> <span class="f">test_figure_13_11</span>():
+    H = torch.tensor([[<span class="n">1</span>, <span class="n">.8</span>, <span class="n">.3</span>, <span class="n">0</span>], [<span class="n">.8</span>, <span class="n">1</span>, <span class="n">.4</span>, <span class="n">.1</span>], [<span class="n">.3</span>, <span class="n">.4</span>, <span class="n">1</span>, <span class="n">.6</span>], [<span class="n">0</span>, <span class="n">.1</span>, <span class="n">.6</span>, <span class="n">1.</span>]])
+    w = torch.tensor([[<span class="n">.40</span>, <span class="n">.35</span>, <span class="n">.70</span>, -<span class="n">.45</span>]])
+    w_hat = gptq(w, H, spec=<span class="k">None</span>, damp=<span class="n">0.0</span>, round_fn=torch.round)   <span class="c"># grid = integers</span>
+    <span class="k">assert</span> w_hat.tolist() == [[<span class="n">0</span>, <span class="n">1</span>, <span class="n">1</span>, -<span class="n">1</span>]]
+    e = w - w_hat; <span class="k">assert</span> abs((e @ H @ e.T).item() - <span class="n">0.3735</span>) &lt; <span class="n">1e-3</span></code></pre>
+    <p class="check">The toy test passes, and the intermediate w1 is 0.667 after column 0, as in the stepper. For every linear layer, GPTQ's proxy error (<var>W</var> &minus; <var>W&#770;</var>)<var>H</var>(<var>W</var> &minus; <var>W&#770;</var>)<sup>T</sup> on calibration activations is below RTN's. End to end, all three methods beat RTN at the same bpw, and the gain is clearly larger at 3 bits than at 4. As a cross-check, run a maintained GPTQ library (GPTQModel or llm-compressor) with the same bits, group size, symmetry, act-order setting and dampening; your KLD should be within about 20% of its result.</p>
+  </li>
+  <li>
+    <div class="ms-title">Inside the kernel: a Triton W4A16 GEMV that reads Q4_0 bytes</div>
+    <p>Follow "Inside the kernel: dequantize on the fly". Repack your Q4_0 blocks offline into two arrays: <code>qs</code>, <code>uint8</code> [<var>N</var>, <var>K</var>/2], in the file's nibble order, and <code>d</code>, <code>fp16</code> [<var>N</var>, <var>K</var>/32]. An 18-byte block is not 16-byte aligned, which is why real kernels such as Marlin also repack. Write a Triton kernel that loads packed bytes for a tile of output rows, unpacks the low and high nibbles, subtracts 8, applies the scale once per 32-weight partial sum, and accumulates in FP32. Benchmark it on Llama 3.1 8B's seven linear shapes against BF16 <code>F.linear</code> (cuBLAS), and against the naive path that dequantizes the whole matrix to BF16 and then calls <code>F.linear</code>. Then extend the kernel to small batches and sweep <var>M</var> = 1, 2, 4, &hellip;, 512.</p>
+    <pre><code>LLAMA_SHAPES = {<span class="s">"q"</span>: (<span class="n">4096</span>, <span class="n">4096</span>), <span class="s">"k"</span>: (<span class="n">1024</span>, <span class="n">4096</span>), <span class="s">"v"</span>: (<span class="n">1024</span>, <span class="n">4096</span>), <span class="s">"o"</span>: (<span class="n">4096</span>, <span class="n">4096</span>),
+                <span class="s">"gate"</span>: (<span class="n">14336</span>, <span class="n">4096</span>), <span class="s">"up"</span>: (<span class="n">14336</span>, <span class="n">4096</span>), <span class="s">"down"</span>: (<span class="n">4096</span>, <span class="n">14336</span>)}  <span class="c"># (N, K)</span>
+
+<span class="k">@triton.jit</span>
+<span class="k">def</span> <span class="f">q4_0_gemv_kernel</span>(x_ptr, qs_ptr, d_ptr, y_ptr, N, K,
+                     BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr): ...  <span class="c"># BLOCK_K % 32 == 0</span>
+
+<span class="k">def</span> <span class="f">q4_0_linear</span>(x: Tensor, qs: Tensor, d: Tensor) -&gt; Tensor: ...   <span class="c"># [M, K] fp16 -&gt; [M, N]</span></code></pre>
+    <p class="check">Outputs match <code>x @ decode_q4_0(W).T</code> computed in FP32, with relative error below 10<sup>&minus;3</sup>. Summed over one decode step's linear layers (32 layers &times; 7 shapes, all distinct matrices), your kernel is between 2.5&times; and 3.56&times; faster than BF16 at <var>M</var> = 1. More than 3.56&times; means you are measuring L2 cache, not DRAM. The dequantize-then-matmul path is slower than plain BF16 at every <var>M</var>. The speed-up shrinks as <var>M</var> grows and is about 1&times; or below by <var>M</var> = 512, which is the prompt-processing column of the M4 Max table.</p>
+  </li>
+  <li>
+    <div class="ms-title">The scoreboard: KL divergence against bits per weight</div>
+    <p>Collect every run into <code>scoreboard.csv</code>: config, real bpw from your <code>bpw()</code> (metadata included), perplexity, mean and p99 KLD, and top-1. Plot log KLD against bpw in the style of Figure 13.14, draw your Pareto frontier, and add the llama.cpp Llama 3 8B scoreboard values from "Measuring the damage" as a labeled reference series (different model, text and protocol, so compare shapes, not values). In <code>REPORT.md</code>, go through "Rules of thumb, with the evidence behind them" and, for each rule, state whether your data supports it, quoting your number.</p>
+    <p class="check">The frontier shows the chapter's shape: about 10<sup>&minus;3</sup> at 8 bpw, a small loss between 4 and 5, and a cliff below about 3.5 (RTN INT3 at least 3&times; the KLD of the best 4.5-bpw point). Calibrated points sit below RTN at equal bpw. Every row of the table above has your value next to the chapter's.</p>
+  </li>
+</ol>
+
+<h3>Done when</h3>
+<ul class="checklist">
+  <li><code>pytest</code> passes: Figure 13.2, the clip and absmax numbers, the MXFP4/NVFP4 worked example, the random-matrix RMS table, the bpw table and the GPTQ toy row.</li>
+  <li>Your Q4_0 and Q8_0 encoders are byte-identical to gguf-py on all 224 linear weights and to the blocks in your <code>llama-quantize --pure</code> file; <code>decode_q4_k</code> is bit-exact; the Q4_K_M recipe gives 4.894 bpw and the right set of Q6_K tensors.</li>
+  <li><code>scoreboard.csv</code> holds at least 20 configurations on Llama 3.1 8B: the RTN granularity and format sweeps, the W8A8 variants, rotations, and imatrix/AWQ/GPTQ at 3 and 4 bits. Every ordering in the table above holds.</li>
+  <li>The outlier census names the chapter's channels, and the BOS value is within 5% of 443.6.</li>
+  <li>The Triton kernel passes its correctness test, runs a decode step's linear layers 2.5&ndash;3.56&times; faster than BF16, and <code>speedup_vs_batch.png</code> shows the advantage fading as the batch grows.</li>
+  <li><code>REPORT.md</code> puts your value next to the chapter's for every claim, with one sentence for each miss explaining why.</li>
+</ul>
+
+<details class="deep-dive"><summary>Hints (open only when stuck)</summary>
+<ul>
+  <li><b>Q4_0 is not bit-exact?</b> Convert BF16 to FP32 first. Keep the sign of the largest-magnitude weight (on ties, the first one wins). Compute <var>d</var> = max/&minus;8 and <code>id = 1/d</code> in FP32, and round with the FP32 <var>d</var>, not the FP16 value you store. Codes are min(15, trunc(<var>x</var>&middot;id + 8.5)). Dividing by <var>d</var> instead of multiplying by id flips a few codes per million.</li>
+  <li><b>Q8_0 is off by one on some codes?</b> The C code uses <code>roundf</code>, which rounds halves away from zero. <code>torch.round</code> and <code>np.round</code> round halves to even. gguf-py ships <code>np_roundf</code> for exactly this reason.</li>
+  <li><b>The file disagrees but gguf-py agrees?</b> Convert with <code>--outtype bf16</code>, not <code>f16</code>: FP16 can flush tiny BF16 values to zero. GGUF lists shapes as [<var>d</var><sub>in</sub>, <var>d</var><sub>out</sub>], the reverse of PyTorch. The converter permutes the rows of <code>attn_q</code> and <code>attn_k</code> to suit llama.cpp's RoPE layout, so compare those as sets of rows (for example, sorted row hashes).</li>
+  <li><b>Q4_K scales.</b> Sub-blocks 0&ndash;3 keep their 6-bit scale and min in the low 6 bits of bytes 0&ndash;3 and 4&ndash;7. Sub-blocks 4&ndash;7 take their low 4 bits from bytes 8&ndash;11 (scale in the low nibble, min in the high nibble) and their top 2 bits from the spare top bits of bytes 0&ndash;7. Read <code>get_scale_min_k4</code> in <code>ggml-quants.c</code>. In <code>qs</code>, each 32 bytes hold two sub-blocks: low nibbles for the first, high nibbles for the second.</li>
+  <li><b>NVFP4 and MXFP4.</b> The per-tensor scale is amax/(6&middot;448), so that the largest block scale lands on 448. Casting to <code>torch.float8_e4m3fn</code> does not saturate (values that are too large become NaN), so clamp before you cast. For MXFP4 the shared exponent is floor(log<sub>2</sub> amax) &minus; 2, and elements clip at &plusmn;6. gguf-py's <code>MXFP4.quantize_blocks</code> is a reference you can diff against.</li>
+  <li><b>RMS table off by about 1 point?</b> The chapter's INT4 rows use the Q4_0 rule (signed max/&minus;8, 16 levels), not max/7. Express errors as &Vert;<var>W</var> &minus; <var>W&#770;</var>&Vert; / &Vert;<var>W</var>&Vert;.</li>
+  <li><b>Harness noise.</b> Quantize-dequantize in FP32 and cast to BF16 once. Keep the original linear weights on the CPU so <code>restore</code> is exact. Compute <code>log_softmax</code> in FP32, never in BF16. Score the same positions in every configuration.</li>
+  <li><b>W8A8 per-tensor looks fine?</b> Then your scale did not see the BOS row. The massive activation is the point of the experiment, so keep BOS in every window and include it when you compute the scale.</li>
+  <li><b>GPTQ blows up.</b> Accumulate <var>H</var> in FP32 as a running mean. Set dead inputs (<var>H<sub>kk</sub></var> = 0) to 1 and zero their weights. Use the upper Cholesky factor of <var>H</var><sup>&minus;1</sup>, not of <var>H</var>. Compute each group's scale from the <em>updated</em> weights when you reach its first column. For AWQ, normalize <var>s</var> (for example, divide by &radic;(max &middot; min)). Under GQA, skip folding v &rarr; o, as AutoAWQ does (Llama 3.1's v_proj has 1,024 outputs, but o_proj has 4,096 inputs).</li>
+  <li><b>Too-good kernel numbers.</b> L2 is 50 MB on an H100, 40 MB on an A100 and 72 MB on an RTX 4090. A 4,096 &times; 4,096 Q4_0 matrix is 9.4 MB and fits. Time a full 32-layer set of distinct matrices (about 3.9 GB of Q4_0) with <code>triton.testing.do_bench</code>.</li>
+</ul>
+</details>
+
+<h3>Stretch goals</h3>
+<ul>
+  <li><b>QAT.</b> Fine-tune <code>HuggingFaceTB/SmolLM2-360M</code> (small enough for full fine-tuning plus a BF16 teacher on one GPU) with INT3 or INT2 g32 fake quantization in the forward pass and the straight-through estimator in the backward pass (see "Training for low precision"). Use a KL-to-BF16-teacher loss for a few thousand steps. How much of the gap that GPTQ leaves at the same bpw does it close?</li>
+  <li><b>Your PTQ inside llama.cpp.</b> With the Q4_0 rule (codes &minus;8&hellip;7, an FP16 scale per 32), GPTQ's output is a valid Q4_0 tensor. Write it into a GGUF with gguf-py's <code>GGUFWriter</code> (it accepts pre-quantized bytes through <code>raw_dtype</code>), copying the metadata from your BF16 file. Then compare <code>llama-perplexity --kl-divergence</code> on it against your own harness, and against the plain <code>--pure</code> Q4_0 file.</li>
+  <li><b>Bigger and quantized, or smaller and exact?</b> Within one tokenizer family (for example Qwen2.5 1.5B, 3B and 7B), compare perplexity on the same tokens at equal weight bytes. Does the bigger model at about 4 bpw win, as "Bigger and quantized, or smaller and exact?" says?</li>
+  <li><b>Faster unpacking.</b> Replace the integer-to-float conversion in your kernel with the 0x6400 magic-number trick from "Inside the kernel" and measure whether it matters at <var>M</var> = 1 and <var>M</var> = 16. Then plug the kernel into the model's linear layers and compare decode tokens/s with the bandwidth ceiling and with <code>llama-bench</code> on your Q4_0 file.</li>
+</ul>
 </section>
 
 <section>

@@ -252,6 +252,23 @@ table.data tr:last-child td { border-bottom: 0; }
 .reveal { opacity: 0; transform: translateY(14px); transition: opacity .7s ease, transform .7s ease; }
 .reveal.in-view { opacity: 1; transform: none; }
 
+/* ---------- "Build it" chapter projects ---------- */
+section.build > h2 .build-tag { display: inline-block; vertical-align: middle; font-size: 12px; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; color: #fff; background: var(--v); border-radius: 999px; padding: 3px 10px; margin-right: 10px; position: relative; top: -3px; }
+.build-meta { display: flex; flex-wrap: wrap; gap: 8px; font-family: var(--sans); font-size: 13.5px; line-height: 1.4; margin-bottom: 26px; }
+.build-meta > span { background: #fff; border: 1px solid var(--line); border-radius: 14px; padding: 4px 12px; color: var(--ink-2); }
+.build-meta > span > b { font-size: 11px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; color: var(--v); margin-right: 6px; }
+ol.milestones { list-style: none; padding-left: 0; counter-reset: ms; }
+ol.milestones > li { counter-increment: ms; position: relative; background: #fff; border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 20px 4px 62px; margin: 14px 0; font-size: 17.5px; }
+ol.milestones > li::before { content: counter(ms); position: absolute; left: 18px; top: 16px; width: 28px; height: 28px; line-height: 28px; text-align: center; border-radius: 50%; background: var(--v); color: #fff; font-family: var(--sans); font-weight: 800; font-size: 14px; }
+ol.milestones .ms-title { font-family: var(--sans); font-weight: 750; font-size: 17px; margin-bottom: 6px; }
+ol.milestones .check { font-family: var(--sans); font-size: 14.5px; line-height: 1.5; color: var(--ink-2); background: var(--panel); border-radius: 6px; padding: 8px 12px; }
+ol.milestones .check::before { content: "Check: "; font-weight: 800; color: var(--v); }
+ol.milestones pre { font-size: 13.5px; }
+ul.checklist { list-style: none; padding-left: 0; }
+ul.checklist > li { position: relative; padding-left: 1.9em; }
+ul.checklist > li::before { content: "\2610"; position: absolute; left: .15em; top: 0; color: var(--v); font-family: var(--sans); }
+@media (max-width: 640px) { ol.milestones > li { padding-left: 20px; padding-top: 52px; } ol.milestones > li::before { top: 14px; } }
+
 /* ---------- chapter footer nav ---------- */
 #chapter-nav { display: flex; gap: 16px; justify-content: space-between; margin-top: 80px; padding-top: 24px; border-top: 1px solid var(--line); font-family: var(--sans); }
 #chapter-nav a { flex: 1; display: block; padding: 14px 18px; border: 1px solid var(--line); border-radius: var(--radius); text-decoration: none; background: #fff; color: var(--ink); }
