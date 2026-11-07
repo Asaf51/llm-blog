@@ -65,6 +65,7 @@
     <li>Softmax turns logits into probabilities. You must subtract the maximum first: in FP32, exp(89) is already infinity.</li>
     <li>Cross-entropy is −log p(correct token). An untrained Llama&#160;3 model starts near ln&#160;128,256 ≈ 11.76.</li>
     <li>RMSNorm rescales each vector to a standard size (root-mean-square 1). Residual connections add a layer's output to its input. Matmuls are compute-heavy; almost everything else is memory-bound, which is why inference engines fuse kernels.</li>
+    <li><strong>Build it:</strong> write every op in this chapter by hand, forward and backward, make it reproduce a real Llama&#160;3.1&#160;8B layer and its loss, time it on your GPU, then build a 32-layer MLP language model from it and knock out the nonlinearity, the gate, the residuals and the norms one at a time.</li>
   </ul>
 </div>
 
@@ -1284,6 +1285,189 @@
 <aside class="callout key"><div class="callout-title">Key takeaway</div>
 <p>An LLM is dot products organized into matrix multiplies, with cheap elementwise and reduction glue: nonlinearities, gates, softmax, norms and residual adds. The matmuls hold the parameters and nearly all the FLOPs. The glue holds almost no FLOPs but can eat real time unless it is fused. With these parts you can read every formula in the rest of the blog. Next, <a href="05-attention.html">Chapter 5</a> uses dot products and softmax to let tokens talk to each other.</p>
 </aside>
+</section>
+
+<section class="build">
+<h2><span class="build-tag">Build it</span>A hand-written op library, checked against Llama&#160;3.1&#160;8B and a deep MLP language model</h2>
+
+<div class="build-meta">
+  <span><b>Time</b>16–22 hours</span>
+  <span><b>Level</b>Intermediate</span>
+  <span><b>Stack</b>Python, PyTorch, Hugging Face transformers, tiktoken</span>
+  <span><b>Hardware</b>1 GPU, 24 GB+ (12 GB with SmolLM2-1.7B)</span>
+  <span><b>Uses</b>Sections: all ten, from Vectors as meaning to The compute profile: where the time goes</span>
+</div>
+
+<p>You will write every operation in this chapter yourself, forward <em>and</em> backward, from tensor primitives: matmul, exp, log, max, sum. Then you hold that small library to three judges. The first is the chapter's own worked examples. The second is a real Llama&#160;3.1&#160;8B layer, which your code must reproduce number for number. The third is your GPU's stopwatch, which tests the claims in "The compute profile". Last, you assemble the ops into a 32-layer MLP language model and break it on purpose: take out the nonlinearity, the gate, the residual and the norm, and measure what each one was doing.</p>
+<p>Reading that the cross-entropy gradient is <var>p</var> − onehot, or that 0.9<sup>32</sup> ≈ 0.034, takes a second. Deriving the RMSNorm backward until <code>gradcheck</code> passes, matching Hugging Face's RMSNorm bit for bit, and watching a 32-layer stack's signal shrink by exactly the predicted factor is what makes it stick. Every milestone runs the same loop: predict a number from the chapter, then measure it.</p>
+<p>At the end you have <code>toolkit/</code>, a few hundred lines of ops with a test suite, and a short report that puts every number you measured next to the number in this chapter.</p>
+
+<h3>The deliverable</h3>
+<ul>
+  <li><code>toolkit/ops.py</code> and <code>toolkit/autograd.py</code>: linear, ReLU, GELU, SiLU, SwiGLU, softmax, log-softmax, cross-entropy, LayerNorm and RMSNorm, each with a hand-written backward.</li>
+  <li><code>tests/</code>: the chapter's worked examples, overflow tests, parity with <code>torch.nn.functional</code>, and <code>gradcheck</code> for every op.</li>
+  <li><code>check_llama.py</code>: your RMSNorm, SwiGLU MLP and loss reproducing a real Llama layer and Hugging Face's <code>loss</code>.</li>
+  <li><code>bench.py</code>: a compute-profile table and a TFLOP/s-versus-<var>n</var> plot for your GPU.</li>
+  <li><code>train.py</code>, <code>diagnostics.py</code>, <code>ablate.py</code>: an MLP language model built only from your ops, depth-compounding plots, and an ablation table over 3 seeds.</li>
+  <li><code>REPORT.md</code>: predicted versus measured, one line per number.</li>
+</ul>
+
+<h3>Setup</h3>
+<p>The running model is <code>meta-llama/Llama-3.1-8B</code>. It is gated, so accept the license on its Hugging Face page first. In BF16 it is 16 GB and fits a 24 GB card for a few hundred tokens. If you can't get access or have less memory, use <code>HuggingFaceTB/SmolLM2-1.7B</code>. It loads as the same <code>LlamaForCausalLM</code> class (SwiGLU, RMSNorm with ε = 10<sup>−5</sup>, no biases) with <var>d</var> = 2,048, <var>d</var><sub>ff</sub> = 8,192 and a 49,152-token vocabulary, so your code runs unchanged and only the reference numbers scale. Training data for milestones 6 and 7 is <code>roneneldan/TinyStories</code> from the Hub (it has train and validation splits), tokenized with tiktoken's <code>gpt2</code> encoding (<var>V</var> = 50,257). About 50 M training tokens stored as a <code>uint16</code> array is plenty.</p>
+<pre><code>pip install torch transformers safetensors huggingface_hub datasets tiktoken matplotlib pytest
+hf auth login                 <span class="c"># once, after accepting the Llama 3.1 license</span>
+
+toolkit/ops.py                <span class="c"># M1-M2: forward ops</span>
+toolkit/autograd.py           <span class="c"># M3: one torch.autograd.Function per op</span>
+toolkit/nn.py                 <span class="c"># M6: modules, 8 FFN variants, MLPLM</span>
+tests/                        <span class="c"># pytest</span>
+geometry.py  check_llama.py  bench.py  train.py  diagnostics.py  ablate.py
+REPORT.md</code></pre>
+<p>One rule makes the project work. Inside <code>toolkit/</code>, use only tensor primitives: <code>@</code>, <code>+ - * /</code>, <code>exp</code>, <code>log</code>, <code>sqrt</code>, <code>erf</code>, <code>amax</code>, <code>sum</code>, <code>mean</code>, <code>where</code>, <code>gather</code>. No <code>torch.nn.functional</code>, no <code>nn.Linear</code> forward, and no autograd inside your backward functions. <code>torch.nn.functional</code> is welcome in <code>tests/</code>, as the reference you check against.</p>
+
+<h3>The numbers you will reproduce</h3>
+<div class="table-wrap">
+<table class="data">
+  <tr><th>Claim in this chapter</th><th>Chapter value</th><th class="num">Milestone</th></tr>
+  <tr><td>Spread of random cosines at <var>d</var> = 4,096</td><td>std ≈ 1/√<var>d</var> = 0.016</td><td class="num">1</td></tr>
+  <tr><td>Softmax worked example (<span class="tok">&#9251;mat</span> … <span class="tok">&#9251;roof</span>)</td><td>0.540, 0.243, 0.120, 0.081, 0.016</td><td class="num">2</td></tr>
+  <tr><td>Cross-entropy for <span class="tok">&#9251;mat</span></td><td>0.616 nats = 0.889 bits</td><td class="num">2</td></tr>
+  <tr><td>Logit gradient for the correct token</td><td><var>p</var> − 1 = −0.46</td><td class="num">3</td></tr>
+  <tr><td><code>gate_proj</code> / LM head / all 65 RMSNorms</td><td>58,720,256 / 525,336,576 / 266,240 parameters</td><td class="num">4</td></tr>
+  <tr><td><code>gate_proj</code> GEMM at <var>n</var> = 2,048</td><td>240.5 GFLOP, 0.24 ms at H100 peak</td><td class="num">5</td></tr>
+  <tr><td>SiLU-and-multiply traffic at prefill</td><td>293.6 MB unfused → 176.2 MB fused (−40%)</td><td class="num">5</td></tr>
+  <tr><td>Loss of an untrained model</td><td>≈ ln <var>V</var>: 11.76 for Llama&#160;3, 10.825 for <var>V</var> = 50,257</td><td class="num">6</td></tr>
+  <tr><td>Signal after 32 layers with gain 0.9 or 1.1 each</td><td>0.034 or 21×</td><td class="num">7</td></tr>
+  <tr><td>SwiGLU versus ReLU MLP at equal parameters (Shazeer)</td><td>1.997 → 1.944 log-perplexity</td><td class="num">7</td></tr>
+</table>
+</div>
+
+<h3>Milestones</h3>
+<ol class="milestones">
+  <li>
+    <div class="ms-title">Geometry lab: cosines in 4,096 dimensions</div>
+    <p>Write <code>dot</code>, <code>norm</code> and <code>cosine</code> in <code>toolkit/ops.py</code> and run three experiments in <code>geometry.py</code>. <strong>Fact 1</strong> ("High-dimensional space has room for many features"): for <var>d</var> ∈ {2, 8, 32, 128, 512, 1,024, 4,096}, draw 10,000 pairs of Gaussian vectors and plot std(cos θ) against 1/√<var>d</var> on log-log axes. <strong>Fact 2</strong>: draw <var>N</var> = 10,000 random unit vectors in 4,096-D, 2.4× more vectors than dimensions, and find the largest |cos| over all 5 × 10<sup>7</sup> pairs (build the Gram matrix in chunks on the GPU). Predict it first: the maximum of <var>M</var> near-Gaussian values with std 1/√<var>d</var> is about √(2 ln 2<var>M</var>) / √<var>d</var>.</p>
+    <p><strong>Real embeddings</strong> ("Vectors as meaning"): load only <code>model.embed_tokens.weight</code> (128,256 × 4,096) from the safetensors shard that holds it, using the shard index and <code>safe_open</code>. Print the 10 nearest neighbours of <span class="tok">&#9251;cat</span>, <span class="tok">&#9251;Paris</span> and <span class="tok">&#9251;running</span>, and the cosine distribution of 100,000 random token pairs. Then run analogies twice, with and without the rule that excludes the three input words, keeping only analogies whose four words are each a single token. Use the Google analogy set (<code>questions-words.txt</code> from the word2vec release; gensim ships a copy) or 50 analogies you write yourself.</p>
+    <p class="check">Random-pair std is within 5% of 1/√<var>d</var> at every <var>d</var> (0.0156 at 4,096). The largest |cos| among 10,000 random directions lands near 0.095, within 10% of your prediction: 10,000 directions and not one pair above 0.1. For real embeddings, report how far their cosine distribution sits from the random-direction spike (trained vectors are not random). Without the exclusion rule the "answer" should very often be an input word, the effect Nissim et al. measured.</p>
+  </li>
+  <li>
+    <div class="ms-title">Forward ops that never return NaN</div>
+    <p>Implement the forward pass of every op in the chapter: <code>linear</code> (<var>Y</var> = <var>X</var><var>W</var><sup>T</sup> on <code>[..., d]</code> inputs, weight stored <code>[out, in]</code> as in "How W sits in memory"), <code>relu</code>, <code>gelu</code> (exact via erf, plus the tanh approximation), <code>silu</code>, <code>swiglu</code>, <code>softmax</code>, <code>logsumexp</code>, <code>log_softmax</code>, <code>cross_entropy</code>, <code>layernorm</code> and <code>rmsnorm</code>. Also write a deliberately naive <code>softmax_naive</code>, so a test can show the failure that "Numerical stability: subtract the max" warns about. Turn every worked example in the chapter into a unit test.</p>
+    <pre><code><span class="k">def</span> <span class="f">logsumexp</span>(z: Tensor, dim: int = -<span class="n">1</span>) -&gt; Tensor: ...
+<span class="k">def</span> <span class="f">cross_entropy</span>(logits: Tensor, targets: Tensor) -&gt; Tensor: ...  <span class="c"># mean LSE(z) - z[target], nats</span>
+<span class="k">def</span> <span class="f">rmsnorm</span>(x: Tensor, gamma: Tensor, eps: float = <span class="n">1e-5</span>) -&gt; Tensor: ...
+<span class="k">def</span> <span class="f">swiglu</span>(x: Tensor, w_gate: Tensor, w_up: Tensor, w_down: Tensor) -&gt; Tensor: ...
+
+<span class="k">def</span> <span class="f">test_softmax_worked_example</span>():
+    z = torch.tensor([<span class="n">4.0</span>, <span class="n">3.2</span>, <span class="n">2.5</span>, <span class="n">2.1</span>, <span class="n">0.5</span>])        <span class="c"># mat floor bed couch roof</span>
+    want = torch.tensor([<span class="n">.540</span>, <span class="n">.243</span>, <span class="n">.120</span>, <span class="n">.081</span>, <span class="n">.016</span>])
+    torch.testing.assert_close(softmax(z), want, atol=<span class="n">1e-3</span>, rtol=<span class="n">0</span>)
+
+<span class="k">def</span> <span class="f">test_softmax_never_nans</span>():
+    <span class="k">for</span> z <span class="k">in</span> [torch.tensor([<span class="n">100.</span>, <span class="n">99.</span>]), torch.tensor([<span class="n">12.</span>, <span class="n">11.</span>]).half(), torch.full((<span class="n">5</span>,), -<span class="n">1000.</span>)]:
+        <span class="k">assert</span> softmax_naive(z).isnan().any() <span class="k">and</span> softmax(z).isfinite().all()</code></pre>
+    <p class="check">All worked examples pass: the softmax above and LSE = 4.616; 0.616 nats = 0.889 bits; LayerNorm and RMSNorm of [3, 5, 4, 7, 2, 6, 4, 9] give the two vectors in "Normalization: LayerNorm and RMSNorm"; SiLU(1) = 0.731, SiLU(−1) = −0.269, GELU(1) = 0.841, GELU(−1) = −0.159; a numerical search finds SiLU's minimum −0.278 at −1.278 and GELU's −0.170 at −0.752; folding the chapter's <var>W</var><sub>2</sub><var>W</var><sub>1</sub> gives [[2, 4], [1, 3]] and the folded layer matches the two-layer stack. The naive softmax returns NaN on [100, 99] in FP32, on [12, 11] in FP16 and on all −1,000; yours stays finite and sums to 1. <code>softmax(z + 100)</code> matches <code>softmax(z)</code>, <code>rmsnorm(10 * x)</code> matches <code>rmsnorm(x)</code> with ε = 0, and random FP32 and BF16 inputs match <code>torch.nn.functional</code> under <code>torch.testing.assert_close</code>.</p>
+  </li>
+  <li>
+    <div class="ms-title">Backward by hand, judged by gradcheck</div>
+    <p>Wrap each op in a <code>torch.autograd.Function</code> whose <code>backward</code> you derive on paper first: <code>Linear</code> (gradients for <var>X</var> and <var>W</var>), the three activations, the SwiGLU gate product, <code>RMSNorm</code> (for <var>x</var> and γ), <code>LayerNorm</code> (for <var>x</var>, γ and β), and a fused <code>CrossEntropy</code> whose backward is the one-liner from "What 'learning' means": <var>p</var> − onehot(correct), divided by the number of positions. Save only what backward needs; for the norms that is the reciprocal RMS, not a copy of every intermediate. <code>torch.autograd.gradcheck</code> compares your analytic gradient against finite differences.</p>
+    <pre><code><span class="k">class</span> <span class="f">RMSNormFn</span>(torch.autograd.Function):
+    <span class="k">@staticmethod</span>
+    <span class="k">def</span> <span class="f">forward</span>(ctx, x, gamma, eps): ...    <span class="c"># ctx.save_for_backward(...) only what you need</span>
+    <span class="k">@staticmethod</span>
+    <span class="k">def</span> <span class="f">backward</span>(ctx, dy): ...              <span class="c"># return dx, dgamma, None</span>
+
+<span class="k">def</span> <span class="f">test_rmsnorm_grad</span>():
+    x = torch.randn(<span class="n">4</span>, <span class="n">16</span>, dtype=torch.float64, requires_grad=<span class="k">True</span>)
+    g = torch.randn(<span class="n">16</span>, dtype=torch.float64, requires_grad=<span class="k">True</span>)
+    <span class="k">assert</span> torch.autograd.gradcheck(<span class="k">lambda</span> x, g: RMSNormFn.apply(x, g, <span class="n">1e-5</span>), (x, g))</code></pre>
+    <p class="check"><code>gradcheck</code> passes for every Function. On the chapter's five-candidate example with <span class="tok">&#9251;mat</span> correct, your logit gradient is [−0.460, 0.243, 0.120, 0.081, 0.016]: the correct logit is pushed up by 1 − <var>p</var>, and every other logit is pushed down by its own probability. Your <code>Linear</code> backward is two matmuls, each the size of the forward one, which is where "about twice the forward pass" comes from; milestone 5 times it.</p>
+  </li>
+  <li>
+    <div class="ms-title">Reproduce a real Llama layer, and its loss</div>
+    <p>Load Llama&#160;3.1&#160;8B in BF16 and hook three modules: the RMSNorm in front of one layer's MLP, that MLP, and the final norm. Run a few hundred tokens of real text with <code>labels=ids</code>, so Hugging Face computes a reference loss. Recompute each captured output with <em>your</em> ops and the model's own weights (<code>blk.mlp.gate_proj.weight</code> and friends). Then project the final-norm output through <code>model.lm_head.weight</code> with your <code>linear</code> and score it with your <code>cross_entropy</code> ("Logits and cross-entropy"). While the model is loaded, count parameters from the tensor shapes.</p>
+    <pre><code>model = AutoModelForCausalLM.from_pretrained(<span class="s">"meta-llama/Llama-3.1-8B"</span>,
+            torch_dtype=torch.bfloat16, device_map=<span class="s">"cuda"</span>)
+cap, blk = {}, model.model.layers[<span class="n">16</span>]
+<span class="k">def</span> <span class="f">grab</span>(name):
+    <span class="k">return</span> <span class="k">lambda</span> mod, inp, out: cap.update({name + <span class="s">"_in"</span>: inp[<span class="n">0</span>], name + <span class="s">"_out"</span>: out})
+blk.post_attention_layernorm.register_forward_hook(grab(<span class="s">"norm"</span>))
+blk.mlp.register_forward_hook(grab(<span class="s">"mlp"</span>))
+model.model.norm.register_forward_hook(grab(<span class="s">"final"</span>))
+<span class="k">with</span> torch.no_grad():
+    out = model(ids, labels=ids)        <span class="c"># out.loss: the number your cross_entropy must hit</span></code></pre>
+    <p class="check">Your RMSNorm on <code>cap["norm_in"]</code> is bit-exact (<code>torch.equal</code>) with <code>cap["norm_out"]</code> once you follow the cast order in "Low-level: RMSNorm in Llama". Your SwiGLU, run in FP32 on FP32 copies of the input and weights, matches an FP32 copy of the module to <code>rtol=1e-5</code>. Your loss matches <code>out.loss</code> to three decimal places. Parameter counts match the chapter exactly: 58,720,256 per MLP matrix, 525,336,576 in the LM head, and 65 RMSNorms holding 266,240. As a bonus, print your softmax's top 5 next tokens and their probabilities after "The cat sat on the".</p>
+  </li>
+  <li>
+    <div class="ms-title">Measure the compute profile on your GPU</div>
+    <p>Time your ops at Llama shapes and fill one table: op, <var>n</var>, FLOPs, minimum bytes moved, ms, achieved TFLOP/s, achieved GB/s, and which limit applies. Before each measurement, write down a prediction from your GPU's spec-sheet peak FLOP/s and memory bandwidth, the way the chapter does for the H100. Measure (a) the <code>gate_proj</code> GEMM (14,336 × 4,096, BF16) for <var>n</var> = 1, 2, 4, …, 8,192; (b) its backward at <var>n</var> = 2,048; (c) SiLU-and-multiply on two 2,048 × 14,336 tensors, eager (two kernels) and under <code>torch.compile</code> (one fused kernel), next to the gate and up GEMMs; (d) RMSNorm on 8,192 × 4,096, eager and compiled. Use <code>torch.profiler</code> to count kernels and to split one MLP block's time into matmul and glue at <var>n</var> = 1 and <var>n</var> = 2,048 ("The compute profile: where the time goes").</p>
+    <pre><code><span class="k">def</span> <span class="f">bench</span>(fn, *args, iters=<span class="n">50</span>) -&gt; float: ...    <span class="c"># warm up, CUDA events, return the median in ms</span>
+
+W = torch.randn(<span class="n">14336</span>, <span class="n">4096</span>, device=<span class="s">"cuda"</span>, dtype=torch.bfloat16)
+<span class="k">for</span> n <span class="k">in</span> [<span class="n">2</span> ** i <span class="k">for</span> i <span class="k">in</span> range(<span class="n">14</span>)]:
+    x = torch.randn(n, <span class="n">4096</span>, device=<span class="s">"cuda"</span>, dtype=torch.bfloat16)
+    flops = <span class="n">2</span> * n * <span class="n">4096</span> * <span class="n">14336</span>
+    bytes_min = <span class="n">2</span> * (<span class="n">14336</span> * <span class="n">4096</span> + n * <span class="n">4096</span> + n * <span class="n">14336</span>)
+    ms = bench(linear, x, W)</code></pre>
+    <p class="check">At <var>n</var> = 1 the GEMV reaches 60–90% of your memory bandwidth and well under 1% of peak FLOP/s. At <var>n</var> = 2,048 the GEMM reaches at least half of dense BF16 peak (on an H100, compare with the chapter's 0.24 ms floor). Achieved TFLOP/s grows roughly in proportion to <var>n</var>, then flattens within about 2× of your GPU's ridge point (≈ 295 on an H100), because a weight-streaming GEMM does about <var>n</var> FLOPs per byte. Backward ÷ forward ≈ 2 (1.7–2.4). Fused ÷ unfused SiLU-and-multiply ≈ 0.6, the 40% traffic cut of Figure 4.14. Unfused glue ÷ gate-and-up GEMM time lands within 1.5× of your prediction (the chapter's is ≈ 18% on an H100). Compiled RMSNorm is several times faster than eager and close to peak bandwidth. In the profile, the glue holds under 0.1% of the FLOPs but a far larger share of the time.</p>
+  </li>
+  <li>
+    <div class="ms-title">A deep MLP language model built only from your ops</div>
+    <p>Assemble <code>MLPLM</code> in <code>toolkit/nn.py</code>. The previous <var>k</var> token IDs are embedded (a gather) and concatenated into one <var>k</var>·<var>d</var><sub>emb</sub> vector, projected to <var>d</var> by your <code>Linear</code>, sent through <var>n</var> blocks of <var>h</var> ← <var>h</var> + FFN(Norm(<var>h</var>)), normed once more, projected to 50,257 logits and scored with your fused <code>CrossEntropy</code>. Every op is one of your Functions. <code>nn.Parameter</code> holds the weights and <code>torch.optim.AdamW</code> at one fixed learning rate does the updates; optimizers are <a href="08-pretraining.html">Chapter 8</a>'s subject, so don't tune them. There is no attention. Tokens interact only through the concatenated window, and that is the point: the whole model is made of this chapter's parts. Start with <var>k</var> = 16, <var>d</var><sub>emb</sub> = 64, <var>d</var> = 512, 8 layers, SwiGLU with <var>d</var><sub>ff</sub> ≈ (2/3)·4<var>d</var> ≈ 1,365 ("Why 14,336?"), batches of 64 × 256 positions, and 3,000 steps.</p>
+    <pre><code><span class="k">class</span> <span class="f">MLPLM</span>(torch.nn.Module):
+    <span class="k">def</span> <span class="f">__init__</span>(self, V=<span class="n">50257</span>, k=<span class="n">16</span>, d_emb=<span class="n">64</span>, d=<span class="n">512</span>, n_layers=<span class="n">8</span>, d_ff=<span class="n">1365</span>,
+                 ffn=<span class="s">"swiglu"</span>, residual=<span class="k">True</span>, norm=<span class="s">"rms"</span>, head_std=<span class="n">0.02</span>): ...
+    <span class="k">def</span> <span class="f">forward</span>(self, ids):
+        <span class="c"># gather -&gt; concat k embeddings -&gt; Linear -&gt; n x (h + FFN(Norm(h))) -&gt; Norm -&gt; head</span>
+        ...
+
+<span class="c"># train.py: predict step 0 before you take it</span>
+logits = model(ids)
+predicted = ...          <span class="c"># from ln V and the spread of these logits; derive it</span></code></pre>
+    <p class="check">Your step-0 loss is within 0.05 of ln <var>V</var> + σ<sub><var>z</var></sub><sup>2</sup>/2, where σ<sub><var>z</var></sub><sup>2</sup> is the mean squared logit, and exactly ln 50,257 = 10.825 with a zero-initialized head. The same formula predicts the loss of a random 128,256 × 4,096 head (std 0.02) on the hidden states you captured in milestone 4, which refines the chapter's "near ln 128,256 ≈ 11.76". A differential test passes: the same model assembled from <code>torch.nn</code> and <code>torch.nn.functional</code> with copied weights gives the same loss and every parameter gradient to ~1e-5 in FP32. Training is smooth with no NaN, and on held-out text <var>k</var> = 16 beats <var>k</var> = 1 (a bigram model from the same code) by a wide margin.</p>
+  </li>
+  <li>
+    <div class="ms-title">Break it on purpose: the chapter's claims as experiments</div>
+    <p><strong>Part A, no training</strong> (<code>diagnostics.py</code>; "Residual connections" and "Normalization"). Build three 32-layer, width-512, bias-free stacks from your ops, with weights drawn at std <var>c</var>·√(2/fan_in) (<var>c</var> = 1 is He initialization) and a batch of 512 Gaussian inputs: (a) plain, <var>h</var> ← ReLU(<var>W</var><var>h</var>); (b) residual, <var>h</var> ← <var>h</var> + <var>W</var>·ReLU(<var>h</var>); (c) pre-norm residual, <var>h</var> ← <var>h</var> + <var>W</var>·ReLU(RMSNorm(<var>h</var>)). Derive how the activation RMS should change per layer in each. Then measure activation RMS and gradient norm at every layer (probe loss: the sum of <var>h</var><sub>32</sub> ⊙ <var>g</var> for a fixed random <var>g</var>) and plot both on a log axis.</p>
+    <p><strong>Part B, training</strong> (<code>ablate.py</code>, 3 seeds each, equal token budgets). FFN variants at depth 8 and equal parameter count ("The MLP and gated units"): classic MLPs with φ ∈ {identity, ReLU, GELU, SiLU} at <var>d</var><sub>ff</sub> = 4<var>d</var>, and gated Bilinear (no activation at all), ReGLU, GEGLU and SwiGLU at (2/3)·4<var>d</var>. Structure variants at depth 32: plain (no residual, no norm), residual without norm, pre-norm with RMSNorm, pre-norm with LayerNorm, plus a plain depth-2 baseline.</p>
+    <p class="check">Part A lands within ~10% of your derivations. (a) The end-to-end RMS ratio is <var>c</var><sup>32</sup>: 0.034 at <var>c</var> = 0.9 and 21 at <var>c</var> = 1.1, the chapter's numbers, with gradients compounding the same way. (b) RMS grows by √(1 + <var>c</var><sup>2</sup>) per layer: residuals alone stop the vanishing but not the blow-up. (c) RMS<sup>2</sup> rises in a straight line, 1 + <var>l</var>·<var>c</var><sup>2</sup>, and the bottom-to-top gradient ratio is only √(1 + 32<var>c</var><sup>2</sup>) ≈ 5.7 at <var>c</var> = 1. Part B: the FFN parameter counts agree within 1%; the identity MLP is clearly worst; gated variants tie or beat their ungated twins (Bilinear included, because the product <em>is</em> the nonlinearity); your SwiGLU-minus-ReLU gap is reported with its seed spread next to Shazeer's 0.053 (run-to-run std ≈ 0.005). The 32-layer plain stack ends clearly worse than the 32-layer pre-norm one, and likely worse than the 2-layer plain one, which is the degradation He et al. saw. RMSNorm and LayerNorm land within two seed standard deviations of each other.</p>
+  </li>
+</ol>
+
+<h3>Done when</h3>
+<ul class="checklist">
+  <li><code>pytest</code> passes: every worked example in the chapter, the overflow and underflow tests, parity with <code>torch.nn.functional</code>, and <code>gradcheck</code> for every Function.</li>
+  <li><code>check_llama.py</code> prints a bit-exact RMSNorm, an FP32 MLP match, a loss equal to Hugging Face's to three decimals, and the chapter's parameter counts exactly.</li>
+  <li><code>bench.py</code> produces the compute-profile table and a TFLOP/s-versus-<var>n</var> plot whose knee sits near your GPU's ridge point, plus backward ÷ forward ≈ 2 and fused ÷ unfused ≈ 0.6.</li>
+  <li>The MLP language model's step-0 loss matches ln <var>V</var> + σ<sub><var>z</var></sub><sup>2</sup>/2 within 0.05, and the differential test against a <code>torch.nn</code> twin passes.</li>
+  <li>The diagnostics plot reproduces 0.9<sup>32</sup> ≈ 0.034, 1.1<sup>32</sup> ≈ 21 and the straight-line RMS<sup>2</sup> of the pre-norm residual stack.</li>
+  <li>An ablation table (mean ± std over 3 seeds) covers the 8 FFN variants and 5 structure variants, and <code>REPORT.md</code> puts each measured number next to the chapter's, with one sentence on every disagreement.</li>
+</ul>
+
+<details class="deep-dive"><summary>Hints (open only when stuck)</summary>
+<ul>
+  <li><strong>Stable reductions.</strong> Use <code>z.amax(dim, keepdim=True)</code> and keep the reduced dimension so broadcasting lines up. Cross-entropy is <code>logsumexp(z)</code> minus the target logit picked with <code>gather</code>; never take the log of a softmax.</li>
+  <li><strong>Linear on 3-D input.</strong> Flatten <code>[B, T, d]</code> to <code>[B·T, d]</code> before forming the weight gradient <var>dY</var><sup>T</sup><var>X</var>; the input gradient is <var>dY</var><var>W</var>.</li>
+  <li><strong>Activation derivatives.</strong> SiLU′(<var>x</var>) = σ(<var>x</var>)(1 + <var>x</var>(1 − σ(<var>x</var>))). GELU′(<var>x</var>) = Φ(<var>x</var>) + <var>x</var>·φ(<var>x</var>), with φ the standard normal density.</li>
+  <li><strong>Norm backward.</strong> With <var>r</var> = 1/√(mean(<var>x</var><sup>2</sup>) + ε), <var>x̂</var> = <var>x</var>·<var>r</var> and <var>g</var> = <var>dy</var> ⊙ γ: d<var>x</var> = <var>r</var>·(<var>g</var> − <var>x̂</var>·mean(<var>g</var> ⊙ <var>x̂</var>)), and dγ is the sum over tokens of <var>dy</var> ⊙ <var>x̂</var>. LayerNorm adds a −mean(<var>g</var>) term, with <var>x̂</var> built from the centred <var>x</var>.</li>
+  <li><strong>gradcheck fails?</strong> Use float64 and shapes around 4 × 16, and pass ε as a Python float whose gradient is <code>None</code>. In FP32 it fails even on correct code.</li>
+  <li><strong>Loss off by a lot?</strong> Logits at position <var>t</var> predict token <var>t</var> + 1, so compare <code>logits[:, :-1]</code> with <code>ids[:, 1:]</code>. Hugging Face computes the logits in BF16 and upcasts them to FP32 before the loss; do the same.</li>
+  <li><strong>FP32 MLP mismatch?</strong> <code>.float()</code> converts a module in place, so deep-copy the MLP first. Leave TF32 off for matmuls (the PyTorch default), or your "FP32" matmuls round their inputs to a 10-bit mantissa.</li>
+  <li><strong>Bandwidth too good to be true?</strong> An H100 has 50 MB of L2 cache. Repeated runs on smaller tensors are served from cache, not HBM, so rotate several input buffers. Exclude the first <code>torch.compile</code> call, which is the compile itself.</li>
+  <li><strong>Custom Functions and mixed precision.</strong> Decorate <code>forward</code> and <code>backward</code> with <code>torch.amp.custom_fwd(device_type="cuda")</code> and <code>torch.amp.custom_bwd(device_type="cuda")</code>, or just train in FP32 with TF32 matmuls switched on; the model is small.</li>
+  <li><strong>Windows for the MLP LM.</strong> <code>ids.unfold(1, k, 1)</code> turns <code>[B, T]</code> into <code>[B, T − k + 1, k]</code>. Embed, reshape to <code>[B, T − k + 1, k·d_emb]</code>, and make the target of each window the token right after it.</li>
+  <li><strong>Step-0 loss derivation.</strong> At initialization each logit is a zero-mean Gaussian independent of the target, so the target logit averages 0, and LSE ≈ ln(<var>V</var>·E[<var>e</var><sup><var>z</var></sup>]), where E[<var>e</var><sup><var>z</var></sup>] = <var>e</var><sup>σ²/2</sup> for a Gaussian.</li>
+  <li><strong>The no-norm residual stack diverges?</strong> That is a result, not a bug: Part A predicted it. Record it, then rerun at a quarter of the learning rate for a fair comparison.</li>
+</ul>
+</details>
+
+<h3>Stretch goals</h3>
+<ul>
+  <li><strong>Toy superposition.</strong> Reproduce Figure 4.3 with your ops: train <var>x</var>′ = ReLU(<var>W</var><sup>T</sup><var>W</var><var>x</var> + <var>b</var>) with 5 sparse features squeezed through 2 dimensions, as in Elhage et al. (2022). Sweep the sparsity and plot the five columns of <var>W</var>; at high sparsity they should spread into a pentagon. Then measure the interference the chapter describes.</li>
+  <li><strong>Chunked cross-entropy.</strong> Score 8,192 positions against Llama's 128,256-token head without ever materializing the 4.2 GB of FP32 logits ("What softmax costs"): loop over chunks of positions in both the forward and your hand-written backward. Show <code>torch.cuda.max_memory_allocated</code> drop while loss and gradients still match the naive version.</li>
+  <li><strong>Fused kernels by hand.</strong> Write SiLU-and-multiply and a residual add plus RMSNorm (the idea behind vLLM's <code>fused_add_rms_norm</code>) in Triton, and match or beat <code>torch.compile</code> in your milestone 5 table. If you did the <a href="02-numbers-and-hardware.html">Chapter 2</a> project, reuse its harness.</li>
+  <li><strong>Find a feature direction.</strong> In Llama's input embeddings, average the difference vectors of 50 singular/plural pairs (<span class="tok">&#9251;cat</span> → <span class="tok">&#9251;cats</span>, …) into one "plural" direction. Project 50 held-out words onto it and see how well a single dot product separates singular from plural: the linear-representation idea from "Vectors as meaning".</li>
+</ul>
 </section>
 
 <section>

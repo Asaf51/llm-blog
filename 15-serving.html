@@ -49,6 +49,7 @@
     <li><b>Speculative decoding</b>: why a small draft plus one big verify pass gives the exact same output distribution, the expected-tokens formula, and when it stops helping. Includes a speedup calculator.</li>
     <li>How the serving fleet is laid out: tensor, expert and data-parallel attention, the engine landscape in 2026, routing, autoscaling and cold starts.</li>
     <li><b>Economics</b>: deriving $/M tokens from GPU $/hour and throughput, why output tokens cost about 5× input, and what cached-input, batch and priority prices really buy you. Includes a cost and latency calculator.</li>
+    <li><strong>Build it:</strong> nanoserve, a small serving engine for a real Llama with a vLLM-style scheduler, a flat-batch model runner, chunked prefill, preemption and speculative decoding, load-tested until its latency, throughput and $/M-token numbers can be checked against this chapter's.</li>
   </ul>
 </div>
 
@@ -1885,6 +1886,174 @@ $ per million tokens = <span class="frac"><span>GPU $/hour × number of GPUs</sp
 <p>Plug the node rates into the formula: a node costs 8 × $2 = $16/hour, so input costs $16 ÷ (73,700 × 3,600) × 10<sup>6</sup> ≈ <b>$0.060 per million</b> and output $16 ÷ (14,800 × 3,600) × 10<sup>6</sup> ≈ <b>$0.30 per million</b>. That is a 5× ratio from real hardware, right in line with list prices. DeepSeek computed that if every token were billed at R1 prices the day would bring $562,027 of revenue, a 545% "cost profit margin", while noting actual revenue is much lower (web and app use is free, V3 is cheaper, night discounts apply). Note also the slow 20–22 tokens/s per user: it is exactly the low-cost end of the Pareto frontier.</p>
 
 <aside class="callout key"><div class="callout-title">Key takeaway</div><p>$ per token = $ per GPU-second ÷ tokens per GPU-second. Input tokens are cheap because prefill is compute-bound and massively parallel; output tokens cost ~5× more because decode is memory-bound and serial. Caching skips prefill compute, batch tiers fill idle capacity, and fast tiers buy smaller batches. Per-user speed and price sit on one Pareto curve.</p></aside>
+</section>
+
+<section class="build">
+<h2><span class="build-tag">Build it</span>nanoserve: a continuous-batching engine with chunked prefill and speculative decoding</h2>
+
+<div class="build-meta">
+  <span><b>Time</b>16–24 hours</span>
+  <span><b>Level</b>Intermediate to advanced</span>
+  <span><b>Stack</b>Python, PyTorch, Hugging Face transformers, matplotlib; vLLM as the reference</span>
+  <span><b>Hardware</b>1 GPU, 24 GB+ (80 GB to run the chapter's 2,048-token H100 setups as written; one stretch goal uses 2 GPUs)</span>
+  <span><b>Uses</b>Sections: The serving problem · Continuous batching: scheduling per iteration · The scheduler loop · Chunked prefill · Kernel fusion, CUDA Graphs and torch.compile · Speculative decoding · The economics of a token</span>
+</div>
+
+<p>You will build <code>nanoserve</code>, a small serving engine for a real Llama. It has the parts this chapter takes apart: a scheduler that re-forms the batch before every step, a model runner that pushes every scheduled token of every request through one flat forward pass, chunked prefill with preemption, and speculative decoding with the exact accept rule. Then you hit it with Poisson traffic, measure TTFT, TPOT and goodput, and turn its throughput into dollars per million tokens.</p>
+
+<p>Every claim in this chapter is about what happens between steps and inside one step. Refilling a slot beats waiting for the slowest request. Sixty-four sequences cost barely more than one. A 512-token chunk caps the stutter a long prompt causes. (1 − α<sup><var>k</var>+1</sup>)/(1 − α) predicts tokens per verify pass. Halving per-user speed makes tokens 30× cheaper. An engine's API hides all of that. Your own engine, a profiler and a stopwatch show each one.</p>
+
+<p>The scheduler is pure Python, so you write it first against a fake clock and replay Figures 15.2 and 15.3 exactly. The model math comes from Hugging Face modules you call yourself, so the only model code you write is the part serving changes: positions, KV writes and per-sequence attention over a flat batch. The last check is a production engine: you run vLLM on the same workload, with and without CUDA Graphs, and explain the gap.</p>
+
+<h3>The deliverable</h3>
+<ul>
+  <li><code>nanoserve/</code>: <code>scheduler.py</code> (waiting and running queues, token budget, block allocator, preemption; no <code>torch</code> import), <code>kv_pool.py</code> (paged K/V tensors and block tables), <code>runner.py</code> (one flat forward pass per schedule), <code>engine.py</code> (the loop, streaming, per-token timestamps) and <code>spec.py</code> (two drafters, verify, accept, rollback).</li>
+  <li><code>bench/</code>: a seeded workload generator (Poisson arrivals, prompt and output length distributions), a runner that writes one JSON file per experiment, and the plotting script.</li>
+  <li>A <code>pytest</code> suite: replays of Figures 15.2 and 15.3, scheduler invariants on random traces, token-for-token equivalence with Hugging Face <code>generate</code>, and statistical tests of the accept rule.</li>
+  <li>Five plots: <code>batching.png</code> (static vs continuous), <code>step_time.png</code> (step time vs tokens per step and vs batch), <code>chunked.png</code> (inter-token gaps under four budgets), <code>spec.png</code> (tokens per pass and speedup vs <var>k</var> and batch) and <code>pareto.png</code> ($ per million tokens vs per-user tokens/s).</li>
+  <li><code>REPORT.md</code>: every row of the reference table below next to your value, with one sentence per gap.</li>
+</ul>
+
+<h3>Setup</h3>
+<p>The running model is <code>meta-llama/Llama-3.1-8B-Instruct</code> (gated: accept the license on its Hugging Face page). Its draft in milestone 5 is <code>meta-llama/Llama-3.2-1B-Instruct</code>, which uses the same 128,256-token tokenizer. For fast iteration and the FP32 equivalence tests use <code>Qwen/Qwen2.5-0.5B-Instruct</code>: ungated, 24 layers, 2 KV heads, loads in seconds. <code>Qwen/Qwen2.5-7B-Instruct</code> with the 0.5B as its draft is an ungated target/draft pair.</p>
+<p>Memory plan: the 8B's weights take 16.06 GB. On an 80 GB card the chapter's setups (2,048-token contexts, batch 64) fit as written. On a 24 GB card about 5–6 GB is left, roughly 40,000 KV slots at 128 KiB per token, so run the batch sweeps at 512-token contexts (64 × 512 × 128 KiB = 4 GiB) and rescale the chapter's H100 numbers by your GPU's bandwidth and FLOPS, as in <a href="11-inference.html">Chapter 11</a>.</p>
+<pre><code>pip install torch transformers matplotlib numpy pytest
+hf auth login                 <span class="c"># for the gated Llama checkpoints</span>
+<span class="c"># reference engine, in its own venv (it pins its own torch):  pip install vllm</span>
+
+nanoserve/  scheduler.py  kv_pool.py  runner.py  engine.py  spec.py  sample.py
+bench/      workload.py  run.py  plots.py
+tests/      test_scheduler.py  test_equivalence.py  test_spec.py
+REPORT.md</code></pre>
+
+<h3>Reference numbers</h3>
+<p>The chapter's values, all for Llama 3.1 8B in BF16 on one H100. Your <code>REPORT.md</code> compares against these.</p>
+<div class="table-wrap">
+<table class="data">
+  <tr><th>Quantity</th><th>Section</th><th>Chapter value</th></tr>
+  <tr><td>Figure 15.2 replay: steps, slot use, mean wait</td><td>Continuous batching</td><td>static 28, 56%, 4.1; continuous 20, 79%, 0.4</td></tr>
+  <tr><td>Decode step floor at batch 1 (weights ÷ bandwidth)</td><td>The serving problem</td><td>16.06 GB ÷ 3.35 TB/s ≈ 4.8 ms</td></tr>
+  <tr><td>Decode step, batch 1 → 64, 2,048-token contexts</td><td>Continuous batching</td><td>≈ 6 ms → ≈ 12 ms</td></tr>
+  <tr><td>KV slots in a 55 GiB pool</td><td>The scheduler loop</td><td>≈ 453,000 tokens, ≈ 221 sequences of 2,048</td></tr>
+  <tr><td>One 8,192-token prompt in one step</td><td>Chunked prefill</td><td>≈ 250 ms</td></tr>
+  <tr><td>Decode-only vs 512-token mixed step; long prompt's TTFT unchunked vs chunked</td><td>Chunked prefill (Figure 15.4)</td><td>≈ 8 vs ≈ 15 ms; ≈ 274 vs ≈ 294 ms</td></tr>
+  <tr><td>Tokens per step where a step turns compute-bound</td><td>Choosing the budget</td><td>a few hundred (ridge ≈ 295)</td></tr>
+  <tr><td>Tokens per pass and speedup at α = 0.8, <var>k</var> = 4, <var>c</var> = 0.05</td><td>How many tokens per target pass?</td><td>3.36; 2.80×</td></tr>
+  <tr><td>Per-user tokens/s and $/M at batch 1, 64, 200 ($3.00 per GPU-hour)</td><td>The throughput–latency Pareto frontier</td><td>164, 81, 38 tokens/s; $5.08, $0.16, $0.11</td></tr>
+</table>
+</div>
+
+<h3>Milestones</h3>
+<ol class="milestones">
+  <li>
+    <div class="ms-title">The scheduler, on a fake clock</div>
+    <p>Write the loop from "The scheduler loop" as a class with no GPU in sight. It keeps a first-come-first-served waiting queue, a running list and a block allocator over <code>num_blocks</code> blocks of 16 tokens. <code>schedule()</code> returns the V1-style dictionary <code>{request_id: num_new_tokens}</code>: running requests first (1 token for a decode, the next chunk for a part-prefilled prompt), then admissions while the token budget, <code>max_num_seqs</code> and free blocks last. Allocate only what the next step needs. The scheduler must never reserve memory for <code>max_tokens</code>, because a real one cannot know the output length. When a running request cannot get a block, preempt the newest running request: free its blocks, put it at the front of the waiting queue, and make it recompute its prompt plus everything it has generated. Add <code>policy="static"</code>, which admits a new batch only when the running list is empty, so both halves of Figure 15.2 come from one code path.</p>
+    <pre><code><span class="k">class</span> <span class="f">Scheduler</span>:
+    <span class="k">def</span> <span class="f">__init__</span>(self, num_blocks: int, block_size: int = <span class="n">16</span>, max_num_seqs: int = <span class="n">256</span>,
+                 max_num_batched_tokens: int = <span class="n">8192</span>, policy: str = <span class="s">"continuous"</span>): ...
+    <span class="k">def</span> <span class="f">add</span>(self, req: Request) -&gt; <span class="k">None</span>: ...                <span class="c"># joins the waiting queue</span>
+    <span class="k">def</span> <span class="f">schedule</span>(self) -&gt; dict[str, int]: ...         <span class="c"># {request_id: num_new_tokens}</span>
+    <span class="k">def</span> <span class="f">update</span>(self, sampled: dict[str, list[int]]) -&gt; list[Request]: ...  <span class="c"># returns finished</span>
+
+<span class="c"># Request: id, prompt, arrival, max_tokens, output, num_computed (tokens with K/V cached), blocks</span>
+<span class="c"># tests/test_scheduler.py replays Figure 15.2 with a FakeRunner (one token per scheduled request)</span>
+ARRIVE = dict(A=<span class="n">0</span>, B=<span class="n">0</span>, C=<span class="n">0</span>, D=<span class="n">0</span>, E=<span class="n">2</span>, F=<span class="n">4</span>, G=<span class="n">6</span>, H=<span class="n">9</span>, I=<span class="n">13</span>, J=<span class="n">15</span>)
+OUTLEN = dict(A=<span class="n">5</span>, B=<span class="n">12</span>, C=<span class="n">3</span>, D=<span class="n">8</span>, E=<span class="n">6</span>, F=<span class="n">4</span>, G=<span class="n">9</span>, H=<span class="n">5</span>, I=<span class="n">7</span>, J=<span class="n">4</span>)</code></pre>
+    <p class="check">Replay Figure 15.2 with 1-token prompts, <code>max_num_seqs=4</code>, plenty of blocks, and a request that arrives at step <var>t</var> schedulable in step <var>t</var>. Static gives 28 steps, 56% slot use (63 of 112 slot-steps) and a mean wait of 4.1 steps; continuous gives 20, 79% and 0.4. Then rebuild Figure 15.3: 24 blocks, R1, R2 and R3 decoding with 70, 64 and 90 tokens already cached, R4 (40-token prompt) and R5 (300) waiting. One <code>schedule()</code> returns <code>{R1: 1, R2: 1, R3: 1, R4: 40}</code> (43 rows), R2 now owns 5 blocks, 5 blocks are free and R5 still waits. A property test on 1,000 random traces holds at every step: free plus owned blocks equals <code>num_blocks</code>, no plan exceeds the budget or <code>max_num_seqs</code>, and every request finishes.</p>
+  </li>
+  <li>
+    <div class="ms-title">A flat-batch model runner</div>
+    <p>This is "The mechanics: one flat batch of tokens" in code. Load the model with Hugging Face, but never call its <code>forward</code>. Concatenate the new tokens of every scheduled request into one batch of <var>T</var> rows, look up the embeddings, and walk the layers yourself: <code>input_layernorm</code>, the <code>q_proj</code>/<code>k_proj</code>/<code>v_proj</code> GEMMs on all <var>T</var> rows at once, RoPE at each row's absolute position, a write of K and V into the paged pool at each row's slot, attention per sequence over that sequence's cached keys, <code>o_proj</code> and the residual, then <code>post_attention_layernorm</code> and <code>mlp</code> on all rows again. Compute logits only at each sequence's last row. Start with a reference attention that loops over sequences and calls <code>scaled_dot_product_attention</code> once for each. Before milestone 3, add a batched path for the decode rows: gather their blocks into one padded [<var>B</var>, <var>h</var><sub>kv</sub>, <var>L</var><sub>max</sub>, <var>d</var><sub>h</sub>] tensor and make a single call with a length mask. Otherwise the Python loop (64 sequences × 32 layers = 2,048 calls per step) swamps everything you measure. If you built Chapter 6's forward pass or Chapter 12's paged cache, use them here.</p>
+    <pre><code><span class="k">@dataclass</span>
+<span class="k">class</span> <span class="f">StepInput</span>:              <span class="c"># built from one schedule() result</span>
+    input_ids: Tensor         <span class="c"># [T]  new tokens of all scheduled requests, concatenated</span>
+    positions: Tensor         <span class="c"># [T]  absolute position of each row in its own sequence</span>
+    slot_mapping: Tensor      <span class="c"># [T]  where each row's K/V go: block_id * 16 + offset</span>
+    seq_starts: list[int]     <span class="c"># first row of each request</span>
+    seq_lens: list[int]       <span class="c"># new rows per request (1 for a decode)</span>
+    ctx_lens: list[int]       <span class="c"># cached + new tokens per request after this step</span>
+    block_tables: Tensor      <span class="c"># [num_seqs, max_blocks]</span>
+
+<span class="k">class</span> <span class="f">Runner</span>:
+    <span class="k">def</span> <span class="f">__init__</span>(self, model_id: str, num_blocks: int, block_size: int = <span class="n">16</span>,
+                 dtype=torch.bfloat16): ...
+    <span class="k">def</span> <span class="f">forward</span>(self, step: StepInput, logit_rows: Tensor) -&gt; Tensor: ...  <span class="c"># [len(logit_rows), V]</span></code></pre>
+    <p class="check">On Qwen2.5-0.5B in FP32 (TF32 off), run 32 prompts of 5–900 tokens with staggered arrivals, <code>max_num_seqs=8</code> and <code>max_num_batched_tokens=256</code>, so steps mix decodes with prompt chunks. The first 64 greedy tokens of every request equal <code>model.generate(do_sample=False)</code> run on that prompt alone. Feeding a 512-token prompt in chunks of 100 gives last-row logits within 1e-4 of one unchunked pass. In BF16 on the 8B most requests still match; at each first divergence, log the reference's top-2 logit gap. It should be tiny: that is "Why temperature 0 is still not deterministic" from <a href="14-sampling.html">Chapter 14</a>, not a bug.</p>
+  </li>
+  <li>
+    <div class="ms-title">The engine loop: static vs continuous, the batch curve, preemption</div>
+    <p>Wire up the loop from "One iteration": schedule, run, sample (greedy and temperature; Chapter 14's sampler plugs in here), update, stream. Stamp each token when it reaches the CPU. Generate a seeded trace with Poisson arrivals, log-normal prompt lengths, and output lengths spread from 16 to 1,024 and forced (EOS ignored) so every run does the same work. Run the same trace with <code>policy="static"</code> and <code>"continuous"</code> at the same <code>max_num_seqs</code>, at four to six arrival rates. Report output tokens/s, TTFT and TPOT at p50 and p99, and goodput. Then time decode-only steps at batch 1, 2, 4, … 64 at a fixed context (2,048 tokens, or 512 on 24 GB), as wall time and as GPU-busy time from <code>torch.profiler</code>. Finally shrink <code>num_blocks</code> until the trace triggers at least 20 preemptions, and count the recomputed tokens ("Preemption, and why output length makes scheduling hard").</p>
+    <pre><code><span class="c"># per request, from the wall-clock stamps of its streamed tokens</span>
+ttft = t_tok[<span class="n">0</span>] - arrival
+tpot = (t_tok[-<span class="n">1</span>] - t_tok[<span class="n">0</span>]) / (len(t_tok) - <span class="n">1</span>)    <span class="c"># mean gap</span>
+itl  = np.diff(t_tok)                                  <span class="c"># every gap: p99 and max</span>
+good = ttft &lt; <span class="n">1.0</span> <span class="k">and</span> tpot &lt; <span class="n">0.050</span>                   <span class="c"># the SLO from "The serving problem"</span></code></pre>
+    <p class="check">At a rate that saturates the static engine, continuous batching delivers at least 2× its output tokens/s with a far lower TTFT p99, and its goodput holds up to a higher arrival rate. The batch-64 decode step costs at most about 2.5× the batch-1 step while producing 64× the tokens (the chapter: ≈ 6 → 12 ms). Batch-1 GPU-busy time lands within about 1.5× of the weight-read floor (≈ 4.8 ms on an H100; the chapter's ≈ 6 ms); the rest of the wall time is "The launch problem in decode", made visible. Under preemption every output still matches milestone 2's references.</p>
+  </li>
+  <li>
+    <div class="ms-title">Chunked prefill and the token budget</div>
+    <p>Recreate "The problem: one big prompt freezes everyone". Start 32 decoding streams, let them settle, then submit one 8,192-token prompt. Run it four ways: unchunked (the whole prompt in one step alongside the decodes), and with <code>max_num_batched_tokens</code> of 8,192, 2,048 and 512, decodes always scheduled first. Plot every stream's inter-token gaps over time, like Figure 15.4, and tabulate the worst gap and the long request's TTFT. Then sweep a single step's token count <var>T</var> from 1 to 8,192 (one decode row plus a <var>T</var> − 1 token chunk) and plot step time against <var>T</var> on log axes.</p>
+    <p class="check">Unchunked, the streams freeze for one step close to the full prefill time: the chapter's ≈ 250 ms on an H100, scaled by your GPU's peak BF16 FLOPS, within about ±40%. At 512 the worst gap shrinks to one mixed step (≈ 15 ms vs ≈ 8 ms decode-only in Figure 15.4) while the long prompt's TTFT rises only slightly (≈ 294 vs ≈ 274 ms). The step-time curve is flat, then linear; a two-segment fit puts the knee within a factor of 2 of your GPU's ridge point (≈ 295 for an H100, "Choosing the budget"). Greedy outputs are identical in all four runs.</p>
+  </li>
+  <li>
+    <div class="ms-title">Speculative decoding: draft, verify in one pass, roll back</div>
+    <p>First write the accept rule from "Why the output distribution is exactly the target's" as a pure function and test it statistically. Then put it in the engine. A decoding request now asks the scheduler for <var>k</var> + 1 tokens (the V1 dictionary needs no change), and the runner returns logits at all <var>k</var> + 1 rows. After acceptance, roll the target's cache back to the accepted length and free any block past it; do the same for the draft. Build two drafters behind one interface ("Where the drafts come from"): the 1B draft model, run by a second instance of your own runner with its own KV pool, and prompt lookup, an n-gram match against the request's own context with <var>c</var> ≈ 0. Measure acceptance by draft position, tokens per target pass, the draft cost <var>c</var> (draft-step time ÷ target-step time) and wall-clock speedup for <var>k</var> = 1–8 at batch 1, then at batch 4, 16 and 64. Compare your measured <var>c</var> with the byte ratio, about 2.5 GB ÷ 16 GB ≈ 0.15: in an eager engine a 1B model is launch-bound, not bandwidth-bound, and that one number decides whether the draft model pays.</p>
+    <pre><code><span class="k">def</span> <span class="f">accept</span>(p: Tensor, q: Tensor | <span class="k">None</span>, draft: list[int],
+           gen: torch.Generator) -&gt; tuple[int, int]:
+    <span class="s">"""p: [k+1, V] target probs at the k+1 verify rows; q: [k, V] draft probs,
+    or None for a deterministic drafter (prompt lookup: q is one-hot).
+    Returns (n_accepted, next_token): keep draft[:n_accepted], then append
+    next_token (a residual sample after a rejection, the bonus if all k pass)."""</span>
+
+<span class="k">class</span> <span class="f">Drafter</span>(Protocol):
+    <span class="k">def</span> <span class="f">propose</span>(self, reqs: list[Request], k: int) -&gt; tuple[list[list[int]], Tensor | <span class="k">None</span>]: ...
+    <span class="k">def</span> <span class="f">rollback</span>(self, req: Request, num_keep: int) -&gt; <span class="k">None</span>: ...</code></pre>
+    <p class="check">With the chapter's three-token example (<var>p</var> = (0.6, 0.3, 0.1), <var>q</var> = (0.3, 0.5, 0.2)), 10<sup>6</sup> rounds give an output distribution within ±0.002 of <var>p</var> and an acceptance rate of 0.700 ± 0.002. On a toy target/draft pair of Markov chains over 5 tokens with <var>k</var> = 4, the joint distribution of the first three emitted tokens matches direct sampling from the target (chi-square, <var>p</var> &gt; 0.01). On the real models, greedy speculative output is identical to plain greedy output. Measured tokens per pass land within about 15% of (1 − α<sup><var>k</var>+1</sup>)/(1 − α) with your measured α (explain the sign of the gap from your per-position curve), measured speedup lands within about 15% of the Leviathan formula with your measured <var>c</var>, and the speedup shrinks toward 1×, or below, as the batch grows ("When it helps and when it hurts").</p>
+  </li>
+  <li>
+    <div class="ms-title">From tokens per second to dollars per million, against a real engine</div>
+    <p>Hold the engine at saturation with <code>max_num_seqs</code> = 1, 2, 4, … up to what the pool allows, at a fixed context length, and record aggregate and per-user output tokens/s. Measure prefill throughput separately (long prompts, a large budget, no decodes). Convert both with the formula in "From GPU-hours to dollars per million tokens" at $3.00 per GPU-hour (or what you actually pay) and utilization 1, and plot the Pareto frontier: per-user tokens/s against $ per million output tokens. Put the same settings into the chapter's calculator and add its points. Then run vLLM on the same token IDs, lengths and batch caps, once with CUDA Graphs (the default) and once with <code>enforce_eager=True</code>.</p>
+    <pre><code><span class="k">from</span> vllm <span class="k">import</span> LLM, SamplingParams
+llm = LLM(model=<span class="s">"meta-llama/Llama-3.1-8B-Instruct"</span>, max_num_seqs=B, enforce_eager=<span class="k">False</span>)
+params = SamplingParams(temperature=<span class="n">0</span>, max_tokens=OUT_LEN, ignore_eos=<span class="k">True</span>)
+outs = llm.generate([{<span class="s">"prompt_token_ids"</span>: ids} <span class="k">for</span> ids <span class="k">in</span> prompts], params)</code></pre>
+    <p class="check">Your frontier has the chapter's shape: from batch 1 to 64, per-user speed falls by at most about 2.5× while $ per million output tokens falls by 20× or more (the chapter: 164 → 81 tokens/s, $5.08 → $0.16). Output tokens cost several times input tokens at 2,048-token contexts; say where you land relative to the chapter's ≈ 5×. Your batch-64 throughput is within 2× of vLLM's, and vLLM's eager-vs-graphs gap is largest at batch 1, which your milestone 3 profile already explains.</p>
+  </li>
+</ol>
+
+<h3>Done when</h3>
+<ul class="checklist">
+  <li><code>pytest</code> is green: the Figure 15.2 replay (28 vs 20 steps, mean wait 4.1 vs 0.4), the Figure 15.3 replay (43 rows, 5 free blocks, R5 waiting), scheduler invariants on random traces, and the accept-rule and Markov-chain tests.</li>
+  <li>32 staggered requests with chunking, mixed steps and at least 20 preemptions reproduce Hugging Face greedy outputs token for token (FP32, Qwen2.5-0.5B).</li>
+  <li><code>batching.png</code> and <code>step_time.png</code> show continuous batching at 2× or more of static throughput at saturation, and a batch-64 decode step at most about 2.5× the batch-1 step.</li>
+  <li><code>chunked.png</code> and its table give the worst inter-token gap and the long prompt's TTFT for all four budgets, plus the step-time knee next to your GPU's ridge point.</li>
+  <li><code>spec.png</code> shows measured tokens per pass and speedup against <var>k</var> on top of the formula curves for both drafters, and speedup against batch size.</li>
+  <li><code>pareto.png</code> puts your frontier, the chapter calculator's points and vLLM's points (graphs and eager) on one chart.</li>
+  <li><code>REPORT.md</code> fills every row of the reference table with your measured or rescaled value and one sentence per gap.</li>
+</ul>
+
+<details class="deep-dive"><summary>Hints (open only when stuck)</summary>
+<ul>
+  <li><code>scaled_dot_product_attention(..., is_causal=True)</code> aligns the mask to the top-left corner when there are fewer queries than keys. That is wrong for a chunk attending to its cached prefix. Pass an explicit boolean mask instead: query row <var>i</var> of a chunk may see keys 0 … <code>ctx_len − q_len + i</code>. The symptom is unchunked prompts matching Hugging Face and chunked ones not.</li>
+  <li>Positions are absolute. A decode row sits at position <code>ctx_len − 1</code>, not at its row index in the flat batch. A preempted request restarts from position 0 over its prompt plus generated tokens.</li>
+  <li>Write the new K and V into the pool before attention runs: a prompt chunk must see itself. A row's slot is <code>block_table[pos // 16] * 16 + pos % 16</code>. View the pool as <code>[num_blocks * 16, h_kv, d_h]</code> and index-assign all <var>T</var> rows at once.</li>
+  <li>Hugging Face modules work on any leading shape, so treat the flat batch as <code>[1, T, d]</code>. Recent <code>transformers</code> versions expose <code>model.model.rotary_emb(x, position_ids)</code>, which returns the cos and sin for <code>apply_rotary_pos_emb</code> in <code>transformers.models.llama.modeling_llama</code>. Qwen2 has the same layout plus Q/K/V biases, which its modules already carry.</li>
+  <li>Run the LM head only on the rows you sample from. At <var>T</var> = 8,192, full logits over a 128,256-token vocabulary are 2.1 GB in BF16 and 4.2 GB in FP32.</li>
+  <li>The first steps include cuBLAS and allocator warm-up, so run a warm-up trace and report medians. <code>.tolist()</code> on the sampled tokens synchronizes every step. That is realistic: an engine needs the token on the CPU to stream it.</li>
+  <li>Use the identical trace and seed for static and continuous runs. Otherwise arrivals, not scheduling, explain the difference.</li>
+  <li>Rollback bookkeeping: a verify pass feeds the last emitted token plus <var>k</var> drafts (<var>k</var> + 1 rows) and writes <var>k</var> + 1 K/V entries. If <var>n</var> drafts survive, keep 1 + <var>n</var> of those entries and append the <var>n</var> drafts plus the correction or bonus token to the output. When all <var>k</var> pass, the draft model never ran on its own last guess, so next round it must take two tokens.</li>
+  <li>Qwen2.5-0.5B and Qwen2.5-7B share a tokenizer but pad their vocabularies differently (<code>vocab_size</code> 151,936 vs 152,064). Slice both logit tensors to the same width before comparing <var>p</var> and <var>q</var>. Do the accept math in FP32.</li>
+  <li>If the batched gather is your bottleneck at batch 64, swap in a paged decode kernel: flash-attn's <code>flash_attn_with_kvcache</code> takes <code>cache_seqlens</code> and a <code>block_table</code> (its page size must be a multiple of 256, so keep <code>block_size</code> a parameter), and FlashInfer's <code>BatchDecodeWithPagedKVCacheWrapper</code> accepts 16-token pages.</li>
+</ul>
+</details>
+
+<h3>Stretch goals</h3>
+<ul>
+  <li><strong>CUDA Graphs for decode.</strong> Keep static input buffers, capture one graph per batch-size bucket (vLLM's 1, 2, 4, then multiples of 8) with <code>torch.cuda.graph</code>, and pad each decode batch up to the next bucket. Ragged attention is the hard part: run it eagerly between captured pieces, as vLLM's piecewise mode does, or use a kernel that reads lengths from a device tensor. Re-measure the batch-1 step against the 4.8 ms floor and redo milestone 5's <var>c</var>.</li>
+  <li><strong>Flash-Decoding in Triton.</strong> Write a split-KV decode kernel over your paged pool that emits each chunk's (<var>m</var><sub><var>i</var></sub>, <var>ℓ</var><sub><var>i</var></sub>, <var>o</var><sub><var>i</var></sub>), plus a merge kernel using the formula in "Flash-Decoding". Match SDPA to BF16 rounding, then at batch 1 with 32K–128K contexts on a small model, plot achieved GB/s against the split count.</li>
+  <li><strong>Disaggregate across two GPUs.</strong> Put a prefill worker on <code>cuda:0</code> and a decode worker on <code>cuda:1</code>, and send each layer's K/V blocks on a side CUDA stream as soon as that layer finishes. Measure the bytes and the transfer time for an 8,192-token prompt against "How many bytes move?" (1.0 GiB for the 8B) at your link's bandwidth, and show that the decode worker's inter-token gaps stay flat while long prompts arrive.</li>
+  <li><strong>Prefix-aware routing.</strong> Run four small-model replicas with a prefix cache (Chapter 12's, or a hash of full 16-token blocks), replay a multi-turn chat trace, and compare round-robin, consistent hashing on the session ID, and overlap-plus-load scoring from "Prefix-aware routing": hit rate, TTFT p99 and the hot-spot problem.</li>
+</ul>
 </section>
 
 <section>

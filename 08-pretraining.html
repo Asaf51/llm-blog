@@ -75,6 +75,7 @@
     <li>Mixed precision (BF16, FP32 master weights, FP8) and why training needs <strong>~16 bytes per parameter</strong> plus activations.</li>
     <li>Data, ZeRO/FSDP, tensor, pipeline, context and expert parallelism, and how Llama 3 405B was laid out on 16,384 GPUs.</li>
     <li><strong>C ≈ 6ND</strong>, MFU, GPU-hours and dollars (with a calculator), failures at scale, scaling laws, and why today's small models are deliberately "over-trained".</li>
+    <li><strong>Build it:</strong> pretrain a 114M-parameter mini-Llama from scratch on FineWeb-Edu with your own data loader, AdamW and precision modes, and check the chapter's numbers (ln <var>V</var>, 6<var>N</var>, 16 bytes/param, MFU, ~20 tokens/param) against your own measurements.</li>
   </ul>
 </div>
 
@@ -1568,6 +1569,193 @@
 <aside class="callout key"><div class="callout-title">Chapter summary</div>
 <p>Pretraining = (curated trillions of tokens) × (next-token cross-entropy at every position) × (backprop: 6<var>N</var> FLOPs per token) × (AdamW with warmup and decay) × (BF16/FP8 mixed precision at 16 B/param) × (DP + ZeRO + TP + PP + CP + EP across thousands of GPUs) × (months, failures, checkpoints). Its cost is <var>C</var> ≈ 6<var>ND</var>, its size is chosen with scaling laws, and its product is a base model that completes documents.</p>
 </aside>
+</section>
+
+<section class="build">
+<h2><span class="build-tag">Build it</span>Pretrain a mini-Llama from scratch and audit this chapter's numbers</h2>
+
+<div class="build-meta">
+  <span><b>Time</b>16–22 hours, plus 3–15 GPU-hours unattended</span>
+  <span><b>Level</b>Intermediate–advanced</span>
+  <span><b>Stack</b>Python, PyTorch, transformers, datasets, tiktoken, matplotlib</span>
+  <span><b>Hardware</b>1 GPU, 24 GB+ (2–8 GPUs only for one stretch goal)</span>
+  <span><b>Uses</b>Sections: The data; The objective; Backpropagation; Optimizers; Learning rate, batch size and stability; Mixed precision; Training memory; Compute, MFU, time and money; Scaling laws; What comes out: a base model</span>
+</div>
+
+<p>You will write the whole pretraining stack for a small model: a pipeline that turns FineWeb-Edu into packed token shards, the next-token loss, your own AdamW with warmup and decay, three mixed-precision modes, a memory and FLOP profiler, a scaling-law sweep, and finally a crash-safe run that produces a base model. The model is Llama 3.1 8B shrunk about 70×: the same RMSNorm, RoPE, SwiGLU and GQA, 12 layers of width 768, 114M parameters. The architecture comes from a library. Everything around it is yours.</p>
+
+<p>Why this project: nearly every number in this chapter is a claim you can test on one GPU. Loss ln <var>V</var> at step 0. Backward costs twice the forward. Sixteen bytes per parameter. +33% for activation checkpointing. MFU. About 20 tokens per parameter. A 114M model obeys the same arithmetic as an 8B one; it just finishes in hours instead of months. Every milestone ends with a measurement that should land near the chapter's formula. When it does not, explaining the gap is where most of the learning happens.</p>
+
+<p>At the end you have a base model that completes documents, a loss forecast you wrote down before training it, and a short report that puts every measured number next to the chapter's.</p>
+
+<h3>The deliverable</h3>
+<ul>
+  <li>A <code>nanopretrain/</code> package (data, optimizer, training loop, profiler, scaling fits, cost model) with a <code>pytest</code> suite, one test file per milestone.</li>
+  <li>~3B tokens of FineWeb-Edu as <code>uint16</code> shards (~6 GB) plus a held-out validation shard, and a loader that resumes bit-exactly.</li>
+  <li>Plots: learning-rate sweep, cosine vs WSD, three precision modes, memory vs tokens in flight, isoFLOP curves, and the final loss curve with your forecast drawn on it.</li>
+  <li>A 114M base model saved with <code>save_pretrained</code>, loadable with <code>AutoModelForCausalLM</code>, plus a page of its completions.</li>
+  <li><code>REPORT.md</code>: a "the chapter says / I measured / why they differ" table covering every row of the Reference numbers table below.</li>
+</ul>
+
+<h3>Setup</h3>
+<p>Install <code>torch transformers datasets tiktoken numpy matplotlib scipy pytest</code>. Data: the Hugging Face dataset <code>HuggingFaceFW/fineweb-edu</code>, config <code>sample-10BT</code> (~10B GPT-2 tokens). Stream it with <code>streaming=True</code> and stop after ~3B tokens. Tokenizer: GPT-2's, via <code>tiktoken.get_encoding("gpt2")</code>. Its 50,257 IDs fit in <code>uint16</code>, half the bytes of the <code>uint32</code> shards that Llama 3's 128,256-entry vocabulary needs (the data loader deep dive). It also lets you compare against GPT-2 itself in Milestone 7. Pad the model's vocabulary to 50,304, a multiple of 64, so the LM-head GEMM gets tensor-core-friendly shapes.</p>
+
+<p>Why not Llama 3.1 8B itself? Its model states alone are 128.5 GB (Training memory), so it cannot be trained on one GPU. You build a scale model with the same architecture, and you use your own tools to compute the 8B numbers analytically. The model is <code>LlamaForCausalLM(LlamaConfig(vocab_size=50304, hidden_size=768, intermediate_size=2048, num_hidden_layers=12, num_attention_heads=12, num_key_value_heads=4, max_position_embeddings=1024, tie_word_embeddings=True))</code>. If you built the Chapter 6 project, plug in your own forward pass instead.</p>
+
+<pre><code>nanopretrain/
+  data.py      <span class="c"># stream → filter → tokenize → pack → shards; Loader</span>
+  model.py     <span class="c"># build_model(d, layers, ...) → LlamaForCausalLM (or your ch06 model)</span>
+  optim.py     <span class="c"># AdamW, lr_at, clip_grad_norm</span>
+  train.py     <span class="c"># the loop: accumulation, precision modes, logging, checkpoints</span>
+  measure.py   <span class="c"># memory, FLOPs, MFU, optimizer bandwidth</span>
+  scaling.py   <span class="c"># sweep driver, isoFLOP and L(N, D) fits</span>
+  cost.py      <span class="c"># C = 6ND, time, dollars, memory model for any config</span>
+  tests/       <span class="c"># test_m1_data.py ... test_m7_resume.py</span>
+runs/          <span class="c"># JSONL logs and plots</span></code></pre>
+
+<h3>Reference numbers</h3>
+<p>Targets for the 114M model at sequence length <var>n</var> = 1,024, worked out from the chapter's formulas. The milestones refer back to them.</p>
+<div class="table-wrap">
+<table class="data">
+  <tr><th>Quantity</th><th>Chapter's claim (section)</th><th>Target in this project</th></tr>
+  <tr><td>Parameters</td><td>count every tensor (as in Chapter 6)</td><td>114,150,144 with tied embeddings</td></tr>
+  <tr><td>Loss at step 0</td><td>ln <var>V</var> (The objective)</td><td>ln 50,304 = 10.83, plus ~0.15 from the logits' spread at init</td></tr>
+  <tr><td>Backward ÷ forward FLOPs</td><td>2 (Backpropagation)</td><td>2.00 ± 0.02</td></tr>
+  <tr><td>Training FLOPs per token</td><td>6<var>N</var> + 6·<var>L</var>·<var>d</var>·<var>n</var> for attention (Backpropagation)</td><td>6<var>N</var> ≈ 685M; attention adds 57M (+8%)</td></tr>
+  <tr><td>Model states</td><td>16 B/param (Training memory)</td><td>1.83 GB; 0.91 GB (8 B/param) in pure BF16</td></tr>
+  <tr><td>Activations per token per layer</td><td>2 B × (6<var>d</var> + 2<var>d</var><sub>kv</sub> + 3<var>d</var><sub>ff</sub>), the Activations formula generalized</td><td>22,528 B by formula; your framework will save somewhat more</td></tr>
+  <tr><td>Activation checkpointing</td><td>+33% compute: 8<var>N</var> vs 6<var>N</var> (Activation checkpointing)</td><td>+20–40% step time</td></tr>
+  <tr><td>AdamW step</td><td>~28 B/param per step, memory-bound (Optimizers)</td><td>3.2 GB per step: ~1 ms on an H100, ~3 ms on an RTX 4090</td></tr>
+  <tr><td>Final run compute</td><td><var>C</var> ≈ 6<var>ND</var> (Compute, MFU, time and money)</td><td>~1.7 × 10<sup>18</sup> FLOPs for 2.3B tokens: ~1.2 h on an H100, ~3.8 h on an A100, ~7 h on a 4090 at 40% MFU</td></tr>
+  <tr><td>Compute-optimal allocation</td><td>~20 tokens/param, <var>N</var><sub>opt</sub> ∝ <var>C</var><sup>0.5</sup> (Scaling laws)</td><td>an exponent of 0.4–0.65 from your own sweep</td></tr>
+</table>
+</div>
+
+<h3>Milestones</h3>
+<ol class="milestones">
+  <li>
+    <div class="ms-title">The data pipeline: packed, resumable token shards</div>
+    <p>Stream documents and run a mini version of Figure 8.1's funnel: exact dedup (hash the normalized text) and two or three rules from Heuristic filters (minimum word count, symbol-to-word ratio, fraction of lines ending in punctuation). Log how many documents each rule drops. FineWeb-Edu is already filtered, so expect small percentages; the point is the plumbing and the bookkeeping. Tokenize in worker processes, append the end-of-text token (ID 50256) after every document, and write ~100M-token <code>uint16</code> shards. Hold out one shard for validation. Then write the loader from the data loader deep dive: rows of <var>n</var> + 1 = 1,025 tokens, <code>x = row[:-1]</code>, <code>y = row[1:]</code>, a seeded permutation of row offsets, a <code>(rank, world_size)</code> split for later, and a state you can save and restore.</p>
+    <pre><code><span class="c"># returns stats: docs seen, docs dropped per rule, tokens written</span>
+<span class="k">def</span> <span class="f">write_shards</span>(docs: Iterable[str], out_dir: str, shard_tokens: int = <span class="n">100_000_000</span>) -&gt; dict: ...
+
+<span class="k">class</span> <span class="f">Loader</span>:
+    <span class="k">def</span> <span class="f">__init__</span>(self, shard_glob: str, batch_rows: int, seq_len: int,
+                 seed: int, rank: int = <span class="n">0</span>, world_size: int = <span class="n">1</span>): ...
+    <span class="k">def</span> <span class="f">next_batch</span>(self) -&gt; tuple[Tensor, Tensor]: ...   <span class="c"># x, y: [B, n] int64</span>
+    <span class="k">def</span> <span class="f">state_dict</span>(self) -&gt; dict: ...
+    <span class="k">def</span> <span class="f">load_state_dict</span>(self, state: dict) -&gt; None: ...</code></pre>
+    <p class="check">Tokens on disk equal total shard bytes ÷ 2, and decoding a random window gives readable text with <span class="tok">&lt;|endoftext|&gt;</span> exactly at document joins. Hash the first 300 batches, then build a fresh loader from the state saved after batch 100: batches 101–300 hash identically. Over one epoch every row offset appears exactly once. English web text should come out at roughly 4–5 bytes of text per token.</p>
+  </li>
+  <li>
+    <div class="ms-title">The objective and the step-0 sanity checks</div>
+    <p>Build the model from the config above. Write your own <code>loss_fn</code> rather than passing <code>labels</code> to the Hugging Face model, which shifts the targets internally; you want to own the shift. Write a parameter counter that works from the config alone and must match <code>sum(p.numel() for p in model.parameters())</code> exactly. Then run the three checks that The objective section hands you: the loss at initialization, the <var>p</var> − <var>y</var> gradient, and the ability to memorize.</p>
+    <pre><code><span class="k">def</span> <span class="f">loss_fn</span>(logits: Tensor, targets: Tensor) -&gt; Tensor:
+    <span class="s">"""Mean cross-entropy over all B*n positions. logits [B, n, V], targets [B, n]."""</span>
+    ...
+
+<span class="k">def</span> <span class="f">test_p_minus_y_worked_example</span>():
+    z = torch.tensor([[[<span class="n">2.</span>, <span class="n">1.</span>, <span class="n">0.</span>, <span class="n">-1.</span>]]], requires_grad=<span class="k">True</span>)
+    loss_fn(z, torch.tensor([[<span class="n">1</span>]])).backward()
+    expected = torch.tensor([[[<span class="n">0.644</span>, <span class="n">-0.763</span>, <span class="n">0.087</span>, <span class="n">0.032</span>]]])   <span class="c"># from the chapter</span>
+    torch.testing.assert_close(z.grad, expected, atol=<span class="n">1e-3</span>, rtol=<span class="n">0</span>)</code></pre>
+    <p class="check">Your counter gives 114,150,144. The step-0 loss on a real batch is 10.8–11.1 nats (ln 50,304 = 10.83, plus a small excess you can predict from the logits' standard deviation). On a real batch, autograd's ∂<var>L</var>/∂logits equals (softmax − one-hot) ÷ (<var>B</var>·<var>n</var>) to 1e-6 in FP32. One fixed batch of 8 rows overfits to a loss below 0.1 within ~300 steps.</p>
+  </li>
+  <li>
+    <div class="ms-title">Your own AdamW, schedule, clipping and accumulation</div>
+    <p>Implement AdamW exactly as written in Optimizers: from gradient descent to AdamW: two FP32 state tensors per weight, bias correction, decoupled weight decay, no decay on norm gains (decide what to do with the embedding and write down why). Add <code>lr_at</code> for warmup + cosine and for WSD, and a global-norm clip that returns the pre-clip norm. Log that norm every step: it is your loss-spike detector. Add gradient accumulation per the formula in Gradient accumulation. Then run two experiments on a ~29M-parameter config (<var>d</var> = 384, 6 layers, <var>d</var><sub>ff</sub> = 1,024), ~200M tokens each: a learning-rate sweep over five values from 3 × 10<sup>−4</sup> to 3 × 10<sup>−2</sup>, then cosine vs WSD at the best rate.</p>
+    <pre><code><span class="k">class</span> <span class="f">AdamW</span>:
+    <span class="k">def</span> <span class="f">__init__</span>(self, param_groups, betas=(<span class="n">0.9</span>, <span class="n">0.95</span>), eps=<span class="n">1e-8</span>, weight_decay=<span class="n">0.1</span>): ...
+    @torch.no_grad()
+    <span class="k">def</span> <span class="f">step</span>(self, lr: float) -&gt; None: ...
+    <span class="k">def</span> <span class="f">state_dict</span>(self) -&gt; dict: ...
+
+<span class="k">def</span> <span class="f">lr_at</span>(step: int, *, peak: float, warmup: int, total: int,
+          kind: str = <span class="s">"cosine"</span>, decay_frac: float = <span class="n">0.2</span>, floor: float = <span class="n">0.1</span>) -&gt; float: ...
+<span class="k">def</span> <span class="f">clip_grad_norm</span>(params, max_norm: float = <span class="n">1.0</span>) -&gt; float: ...</code></pre>
+    <p class="check">The chapter's worked example passes: at step 1, a gradient of 0.5 and a gradient of 0.0005 both move the weight by exactly <var>&#951;</var>. After one step your weights match <code>torch.optim.AdamW</code> (same hyperparameters and parameter groups) to ~1e-7; after 200 FP32 steps the two loss curves agree to 4 decimals. Your clip matches <code>torch.nn.utils.clip_grad_norm_</code>. One batch of 32 rows and 4 micro-batches of 8 give the same gradient to ~1e-6 relative. The LR sweep is a U with a cliff on the high side (spikes or NaN). WSD sits above cosine during its constant phase, drops sharply during its decay, and ends at or slightly below cosine (Figure 8.8).</p>
+  </li>
+  <li>
+    <div class="ms-title">Precision and memory: 16 bytes per parameter, measured</div>
+    <p>Add three precision modes to the loop. <b>amp</b>: FP32 parameters under <code>torch.autocast(dtype=torch.bfloat16)</code>, PyTorch's standard; its 16 B/param are composed as 4 + 4 + 4 + 4 (FP32 weights, FP32 grads, <var>m</var>, <var>v</var>). <b>master</b>: BF16 parameters and gradients, with your AdamW holding an FP32 master copy and writing a fresh BF16 copy back after each step; this is Figure 8.9's recipe and the chapter's 2 + 2 + 4 + 4 + 4 table. <b>bf16</b>: everything in BF16, no master. Train the 29M config in all three modes with a decaying LR and log, per step, the fraction of weight elements that did not change. Then measure memory on the 114M config: <code>memory_allocated</code> after building the model, after the first backward, and after the first optimizer step, plus the peak during a step. Fit peak memory against tokens per micro-batch at 6 and at 12 layers to separate bytes per token per layer from the per-token cost of the LM head and loss. Turn on activation checkpointing (<code>model.gradient_checkpointing_enable()</code>, or <code>torch.utils.checkpoint</code> per block in your own model) and measure again. Finally, write <code>cost.memory_model(config, tokens_in_flight, mode)</code> and feed it Llama 3.1 8B.</p>
+    <pre><code><span class="k">def</span> <span class="f">mem_gb</span>() -&gt; float:
+    torch.cuda.synchronize(); <span class="k">return</span> torch.cuda.memory_allocated() / <span class="n">1e9</span>
+
+torch.cuda.reset_peak_memory_stats()
+loss = loss_fn(model(x).logits, y); loss.backward()
+peak = torch.cuda.max_memory_allocated() / <span class="n">1e9</span>
+<span class="c"># repeat for several micro-batch sizes and two depths; the slopes are bytes per token</span></code></pre>
+    <p class="check">Model states come out at 16 B/param for amp and master and 8 B/param for bf16, within ~3%. In the bf16 run the RMSNorm gains, which start at exactly 1.0, never move at all: this is the chapter's "1.0 − 0.0001 rounds back to 1.0", live. Its unchanged-weight fraction climbs as the LR decays and its loss ends visibly above amp and master, which track each other closely. Measured activations per token per layer are the same order as the formula's 22,528 B, somewhat above it, and you can name the extra tensors. The LM head plus loss costs about as much memory per token as all 12 layers together (the logits deep dive, at small scale). Checkpointing shrinks layer activations to roughly the layer inputs and costs +20–40% step time. Your memory model reproduces the chapter's 128.5 GB of states and 139,264 B per token per layer for Llama 3.1 8B.</p>
+  </li>
+  <li>
+    <div class="ms-title">FLOPs, MFU, and making it fast</div>
+    <p>Count FLOPs with <code>torch.utils.flop_counter.FlopCounterMode</code> in eager mode, once for the forward alone and once for forward + backward. Compare with your analytic count: 2 FLOPs per matmul weight per token forward (count the LM head; the input-embedding lookup is free) plus attention scores. Note that the counter's attention formula ignores the causal mask, so it reports 4·<var>L</var>·<var>d</var>·<var>n</var> per token for the scores, twice the chapter's causal average. Then time steps properly and compute MFU = FLOPs per token × tokens per second ÷ peak, using dense BF16 peaks (H100 SXM 989, A100 312, RTX 4090 ~165 TFLOP/s). Climb a ladder and record every rung: eager FP32 → amp → SDPA FlashAttention → <code>torch.compile</code> → the largest micro-batch that fits → a multi-tensor optimizer step built on <code>torch._foreach_*</code> ops. Time the optimizer step on its own against the "optimizer step is memory-bound" deep dive. Finally, implement the formulas of Compute, MFU, time and money in <code>cost.py</code>.</p>
+    <pre><code><span class="k">from</span> torch.utils.flop_counter <span class="k">import</span> FlopCounterMode
+
+<span class="k">with</span> FlopCounterMode(display=<span class="k">False</span>) <span class="k">as</span> fc:
+    logits = model(x).logits
+fwd = fc.get_total_flops()
+<span class="c"># repeat with loss_fn(...).backward() inside the context to get fwd + bwd</span>
+<span class="c"># report per token: fwd / x.numel(), and bwd / fwd</span>
+
+<span class="k">def</span> <span class="f">mfu</span>(flops_per_token: float, tokens_per_s: float, peak_flops: float) -&gt; float: ...</code></pre>
+    <p class="check">Backward ÷ forward is 2.00 ± 0.02: the "6" in 6<var>N</var>, measured. Counted FLOPs per token match your analytic count within 1% once you use the counter's non-causal attention convention; in your own (causal) accounting, attention adds ~8% on top of 6<var>N</var> at <var>n</var> = 1,024. Your best rung reaches at least 30% MFU (well-tuned runs at this size reach 40% or more). The multi-tensor optimizer step lands within ~2× of 28 B × <var>N</var> ÷ HBM bandwidth, while a per-tensor Python loop is several times slower. <code>cost.py</code> reproduces the chapter's worked examples: ~66 days and ~26M GPU-hours for Llama 3 405B at 41% MFU, ~0.5M H100-hours for Llama 3.1 8B at 40%.</p>
+  </li>
+  <li>
+    <div class="ms-title">A scaling-law study on a budget</div>
+    <p>Pick a ladder of 5–6 model sizes with non-embedding parameters from ~1M to ~40M. Keep everything else fixed: data, sequence length, batch size, recipe. Scale the peak LR with width, using sweeps at the smallest and largest size. Pick three compute budgets, for example 10<sup>16</sup>, 3 × 10<sup>16</sup> and 10<sup>17</sup> FLOPs, and convert each to tokens with your <em>measured</em> FLOPs per token: at this size the LM head and attention are a large share, so 6<var>N</var> alone is wrong. To save compute, use WSD's "branch a short decay off any checkpoint" property from Decay: cosine and WSD (Milestone 3 showed it matches cosine): one constant-LR run per size, with a short cooldown branch forked for each budget. Evaluate every endpoint on the same validation tokens, then fit three things: a parabola in log <var>N</var> per budget, giving <var>N</var><sub>opt</sub>(<var>C</var>) and <var>D</var><sub>opt</sub>(<var>C</var>); the exponent in <var>N</var><sub>opt</sub> ∝ <var>C</var><sup><var>a</var></sup>; and the Chinchilla form <var>L</var>(<var>N</var>, <var>D</var>) = <var>E</var> + <var>A</var>/<var>N</var><sup>&#945;</sup> + <var>B</var>/<var>D</var><sup>&#946;</sup>. Use the fit to write down a forecast of Milestone 7's final validation loss before you start that run.</p>
+    <pre><code><span class="k">def</span> <span class="f">isoflop_optimum</span>(sizes: list[float], losses: list[float]) -&gt; float:
+    <span class="s">"""Fit loss = a*(log N)**2 + b*log N + c; return N at the minimum."""</span>
+    ...
+
+<span class="k">def</span> <span class="f">fit_chinchilla</span>(N, D, L) -&gt; dict:   <span class="c"># keys: E, A, alpha, B, beta</span>
+    <span class="s">"""Minimize a Huber loss on log-space residuals, as Hoffmann et al. did."""</span>
+    ...</code></pre>
+    <p class="check">Each budget's loss-vs-<var>N</var> curve is a U with its minimum inside the ladder (if the minimum sits at an edge, extend the ladder). The optimum moves to bigger models as <var>C</var> grows, and your exponent <var>a</var> is near the chapter's 0.5; anything in 0.4–0.65 is a success at this scale, while Kaplan's 0.73 is a red flag to investigate. Report tokens per parameter at the optimum next to Chinchilla's ~20, computed once with all parameters and once with non-embedding parameters, and explain why the two differ so much for small models. Your fitted &#945; and &#946; are positive and the same order as the Epoch refit (0.348, 0.366); <var>E</var> is not comparable, because the tokenizer and data differ.</p>
+  </li>
+  <li>
+    <div class="ms-title">The real run: forecast, train, crash, resume, ship a base model</div>
+    <p>Train the 114M model on ~2.3B tokens (about 20 tokens per parameter; ~4,400 steps of 524,288 tokens through accumulation) with your sweep's recipe. Before you start, write down three predictions: wall-clock time and dollars from <code>cost.py</code> with your measured MFU, the final validation loss from Milestone 6, and a checkpoint interval from Young's formula in "how often to checkpoint", using your measured checkpoint write time. Make the run crash-safe the way Things break describes: a checkpoint holds weights, optimizer state, step, loader state and RNG states, and is written atomically. Halfway through, <code>kill -9</code> the process and resume. At the end, export with <code>save_pretrained</code>, reload with <code>AutoModelForCausalLM</code>, and sample. Report validation loss, perplexity and bits per token. Evaluate <code>openai-community/gpt2</code> (the original 124M GPT-2) on the same validation tokens; per the Perplexity section, the comparison is meaningful only because the tokenizer and the text are identical.</p>
+    <pre><code><span class="k">def</span> <span class="f">save_checkpoint</span>(path: str, model, opt, loader, step: int) -&gt; None:
+    state = {<span class="s">"model"</span>: ..., <span class="s">"opt"</span>: opt.state_dict(), <span class="s">"loader"</span>: loader.state_dict(),
+             <span class="s">"step"</span>: step, <span class="s">"rng"</span>: ...}   <span class="c"># torch, cuda and numpy generator states</span>
+    torch.save(state, path + <span class="s">".tmp"</span>)
+    os.replace(path + <span class="s">".tmp"</span>, path)   <span class="c"># atomic: a crash never leaves a half-written file</span></code></pre>
+    <p class="check">Wall-clock lands within 10% of your prediction; if not, account for the lost time (evaluation, checkpoints, data loading, warmup). After the kill and resume, the next 50 steps match an uninterrupted reference run to within BF16 noise (bit-exact if you enable deterministic kernels). The final validation loss is within ~0.1 nats of your scaling-law forecast. Asked a question, the model often continues with more questions or quiz-like text instead of answering and stopping: a document completer, exactly as What comes out: a base model describes.</p>
+  </li>
+</ol>
+
+<h3>Done when</h3>
+<ul class="checklist">
+  <li><code>pytest</code> passes: loader resume, the <var>p</var> − <var>y</var> worked example, AdamW vs <code>torch.optim.AdamW</code>, clipping, and accumulation equivalence.</li>
+  <li>Your plots show the chapter's shapes: step-0 loss near ln 50,304, a U-shaped LR sweep with a divergence cliff, WSD's late drop, and the pure-BF16 run falling behind as the LR decays.</li>
+  <li>Your memory report shows 16 B/param of model states (8 in pure BF16) within 3%, explains the measured activation slope tensor by tensor, quantifies the checkpointing trade-off, and reproduces the Llama 3.1 8B numbers (128.5 GB, 139,264 B per token per layer).</li>
+  <li>The FLOP counter shows backward = 2 × forward, your best configuration reaches at least 30% MFU, and <code>cost.py</code> reproduces the chapter's Llama 3 405B worked example.</li>
+  <li>You have an isoFLOP plot, a fitted <var>N</var><sub>opt</sub> ∝ <var>C</var><sup><var>a</var></sup> with <var>a</var> in 0.4–0.65, and a forecast written down before the final run.</li>
+  <li>A 114M base model is on disk, trained through a deliberate crash, within 10% of the predicted wall-clock and ~0.1 nats of the forecast loss, with a page of sample completions.</li>
+  <li><code>REPORT.md</code> fills every row of the Reference numbers table with your measurement and an explanation of any gap.</li>
+</ul>
+
+<details class="deep-dive"><summary>Hints (open only when stuck)</summary>
+<ul>
+  <li><strong>Loss falls toward 0 within a few hundred steps:</strong> you forgot the shift, and the model is copying its input. <strong>Loss stuck near 10.8:</strong> your warmup starts at an LR of exactly 0 and never moves, or you call the optimizer on zeroed gradients.</li>
+  <li><strong>Step-0 loss a bit above ln <var>V</var>:</strong> for roughly Gaussian logits with standard deviation <var>&#963;</var>, the expected loss is about ln <var>V</var> + <var>&#963;</var><sup>2</sup>/2. Measure <var>&#963;</var> on a real batch and check that it explains the excess.</li>
+  <li><strong>Accumulation mismatch:</strong> divide each micro-batch loss by the number of micro-batches (or weight by token count if rows differ in length), and clip and step only after the last micro-batch.</li>
+  <li><strong>Not matching <code>torch.optim.AdamW</code>:</strong> it applies decay as a multiplication by (1 − <var>&#951;</var>·<var>&#955;</var>) before the Adam update, adds <var>&#949;</var> to √<var>v&#770;</var> after bias correction, and counts steps from 1. Match its parameter groups too.</li>
+  <li><strong>Memory numbers look too big:</strong> <code>memory_allocated</code> excludes the CUDA context and the allocator cache, which is why <code>nvidia-smi</code> shows more. Under autocast, PyTorch also caches BF16 copies of the weights during the forward pass; those are transient, not model states. In amp mode the residual stream and RMSNorm run in FP32, which explains a good part of the activation excess.</li>
+  <li><strong>Timing and FLOP counting:</strong> call <code>torch.cuda.synchronize()</code> before reading the clock, and discard the first ~10 steps (compilation, autotuning, allocator warmup). Count FLOPs in eager mode, then reuse the per-token number for compiled runs.</li>
+  <li><strong>WSD branches:</strong> for each budget <var>D</var><sub><var>i</var></sub>, save the constant-LR run at about 0.8·<var>D</var><sub><var>i</var></sub>, then decay to near zero over the remaining 0.2·<var>D</var><sub><var>i</var></sub>, and count the cooldown tokens inside the budget. Hägele et al. (2024, "Scaling Laws and Compute-Optimal Training Beyond Fixed Training Durations") use exactly this to cut the cost of scaling-law sweeps.</li>
+  <li><strong>Exponent near Kaplan's 0.73, or a strange tokens-per-parameter ratio:</strong> check whether you counted embeddings in <var>N</var> and the LM head in <var>C</var>, and whether the short runs had a warmup that is too long for them. Pearce &amp; Song (2024) and Porian et al. (2024) trace much of the Kaplan–Chinchilla gap to exactly these choices.</li>
+</ul>
+</details>
+
+<h3>Stretch goals</h3>
+<ul>
+  <li><strong>Go data-parallel (2–8 rented GPUs).</strong> Launch with <code>torchrun</code> under DDP and show that <var>P</var> GPUs give the same loss curve as one GPU with <var>P</var>× accumulation. Switch to FSDP and check per-GPU memory against the ZeRO formulas in ZeRO and FSDP (4Ψ + 12Ψ/<var>P</var>, 2Ψ + 14Ψ/<var>P</var>, 16Ψ/<var>P</var>). Time the gradient all-reduce against 2(<var>P</var>−1)/<var>P</var> × bytes ÷ link bandwidth.</li>
+  <li><strong>MinHash and a data ablation.</strong> Implement MinHash-LSH with FineWeb's 14 bands × 8 hashes and confirm that the measured candidate rate vs Jaccard similarity follows 1 − (1 − <var>J</var><sup>8</sup>)<sup>14</sup>. Then train two identical 29M models on the same number of tokens from <code>HuggingFaceFW/fineweb</code> and from FineWeb-Edu, and measure what quality filtering buys you.</li>
+  <li><strong>FP8 training.</strong> On a GPU with FP8 tensor cores (Ada or Hopper), convert the linear layers with torchao's <code>convert_to_float8_training</code>, keeping the LM head in BF16. Compare throughput and the relative loss gap against your BF16 run; DeepSeek-V3 reported less than 0.25%.</li>
+  <li><strong>Fused, chunked cross-entropy.</strong> Write a custom <code>torch.autograd.Function</code> that computes the LM head, softmax, loss and <var>p</var> − <var>y</var> chunk by chunk, so the full logits tensor never exists (the "logits tensor is huge" deep dive). Measure the memory saved and how much larger a micro-batch now fits.</li>
+</ul>
 </section>
 
 <section>

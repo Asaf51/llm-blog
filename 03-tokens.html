@@ -55,6 +55,7 @@
     <li>The <strong>embedding lookup</strong> as a memory gather: row <var>id</var> lives at byte offset <var>id</var> × 8,192 in a 1.05 GB table.</li>
     <li>Special tokens and <strong>chat templates</strong>: the exact 50-token sequence Llama 3.1 sees for a short chat, and what counts as input vs output tokens.</li>
     <li>Language differences, number and code tokenization, glitch tokens, streaming partial UTF-8, and how images become "tokens".</li>
+    <li><strong>Build it:</strong> write a byte-level BPE tokenizer from scratch (trainer, rank-order encoder, chat template, streaming decoder) that reproduces Llama 3's token IDs exactly, then use it to measure vocabulary size, language cost and under-trained tokens.</li>
   </ul>
 </div>
 
@@ -504,6 +505,170 @@ Finish the sentence: The cat sat on the<span class="sp">&lt;|im_end|&gt;</span>�
 </table>
 </div>
 <p>Next, <a href="04-neural-net-toolkit.html">Chapter 4</a> looks at what the model does with these 4,096-number vectors: dot products, linear layers, softmax and normalization.</p>
+</section>
+
+<section class="build">
+<h2><span class="build-tag">Build it</span>A byte-level BPE tokenizer that matches Llama 3 bit for bit</h2>
+
+<div class="build-meta">
+  <span><b>Time</b>14–22 hours</span>
+  <span><b>Level</b>Intermediate</span>
+  <span><b>Stack</b>Python, regex, tiktoken, Hugging Face tokenizers + transformers, matplotlib</span>
+  <span><b>Hardware</b>CPU for milestones 1–4 and 6; 1 GPU, 24 GB+ for 5 and 7</span>
+  <span><b>Uses</b>Sections: Byte Pair Encoding, Encoding: applying merges in rank order, Byte-level BPE, Pre-tokenization, Special tokens, Chat templates, Detokenization and streaming, How big should the vocabulary be?, Token IDs and the embedding lookup, Artifacts</span>
+</div>
+
+<p>You will write a complete tokenizer in plain Python: the pre-tokenization regex, a BPE trainer (first the naive loop from this chapter, then a fast incremental one), an encoder that applies merges in rank order, special-token handling, the Llama 3.1 chat template, and a streaming detokenizer. Then you load Llama 3's real vocabulary into <em>your</em> code and require it to produce exactly the IDs that <code>tiktoken</code> and Hugging Face produce, on megabytes of English, code, eleven languages, emoji and random Unicode. Not close: identical.</p>
+<p>A bit-exact target is the best teacher this chapter can offer. One wrong regex alternative, a missing whole-chunk lookup, a stray BOS or a misplaced newline in the template, and a diff shows up somewhere in 10 MB of text. Every diff you chase down is one of this chapter's details turning into something you know. Once the tokenizer is right, you use it as an instrument: one training run gives you a whole vocabulary-size sweep, you measure what each language costs, and you open the 1.05 GB embedding table to find tokens the model never learned.</p>
+<p>At the end you have a small library of a few hundred lines, a test suite that reproduces Figures 3.2, 3.3, 3.4, 3.5, 3.8 and 3.12, and a short report with plots.</p>
+
+<h3>The deliverable</h3>
+<ul>
+  <li><code>minitok/</code>: <code>pretokenize</code>, <code>train_naive</code>, <code>train_fast</code>, an <code>Encoder</code> (<code>encode</code>, <code>encode_ordinary</code>, <code>decode</code>), <code>render_llama31</code> and <code>StreamDecoder</code>. Its only dependency is <code>regex</code>.</li>
+  <li><code>tests/</code>: one test per chapter figure, plus differential tests against <code>tiktoken</code> (<code>cl100k_base</code>) and the Hugging Face Llama 3.1 tokenizer.</li>
+  <li>Your own 64K-merge tokenizer, saved in tiktoken's file format (one line per token: base64 bytes and rank) and loaded by the same code that loads Llama 3.</li>
+  <li><code>report.md</code>: a vocabulary-size plot, a language-cost plot, a speed table (yours vs <code>tiktoken</code> vs Hugging Face), the chapter's Llama 2 → Llama 3 worked example redone with your measurements, and an embedding-norm histogram.</li>
+</ul>
+
+<h3>Setup</h3>
+<p>Python 3.10+. Accept the Llama 3.1 license on the <code>meta-llama/Llama-3.1-8B-Instruct</code> model page and log in, so you can download <code>tokenizer.json</code>, <code>tokenizer_config.json</code> and <code>generation_config.json</code>. The 16 GB of weights are needed only in milestones 5 and 7. Milestones 1–3 also work ungated: Llama 3's first 100,256 tokens come from <code>cl100k_base</code>, so every ID in Figures 3.3, 3.4 and 3.12 is the same in <code>tiktoken.get_encoding("cl100k_base")</code>.</p>
+<pre><code>pip install regex tiktoken tokenizers transformers datasets safetensors \
+            huggingface_hub matplotlib pytest torch accelerate
+hf auth login                 <span class="c"># older huggingface_hub: huggingface-cli login</span>
+
+minitok/   bytemap.py  pretok.py  train.py  encoder.py  chat.py  stream.py
+tests/     test_figures.py  test_diff.py      <span class="c"># chapter figures; you vs the references</span>
+scripts/   get_data.py  sweep.py  probe_embeddings.py
+data/      train.txt (~100 MB)  heldout_en.txt  code.txt  lang/*.txt</code></pre>
+<p>Data: stream about 100 MB of <code>HuggingFaceFW/fineweb-edu</code> (config <code>sample-10BT</code>) with <code>datasets</code> for training, and keep the next 5 MB as held-out English. For code, concatenate the <code>.py</code> files of your installed <code>transformers</code> package. For languages, take a few MB each from <code>wikimedia/wikipedia</code> (configs such as <code>20231101.he</code>, <code>20231101.hi</code>, <code>20231101.ko</code>), plus Figure 3.10's weather sentence in all 11 languages (translate it yourself). Copy the widget's built-in training corpus too (open "Training corpus" in the widget above); it is the chapter's reference text.</p>
+
+<h3>Milestones</h3>
+<ol class="milestones">
+  <li>
+    <div class="ms-title">Bytes and chunks</div>
+    <p>Write <code>bytes_to_unicode()</code>, GPT-2's printable byte map from the Byte-level BPE section, and its inverse. Then write <code>pretokenize()</code> with the Llama 3 pattern from the Pre-tokenization section. Use the third-party <code>regex</code> module; the standard <code>re</code> has no <code>\p{L}</code>. Finally, decode every key of <code>model.vocab</code> in Llama 3.1's <code>tokenizer.json</code> back to raw bytes through your inverse map. That <code>bytes → ID</code> table is what your encoder will run on.</p>
+    <pre><code><span class="c"># minitok/pretok.py</span>
+PATTERN = <span class="s">r"""(?i:'s|'t|'re|'ve|'m|'ll|'d)|..."""</span>     <span class="c"># copy it from the Pre-tokenization section</span>
+<span class="k">def</span> <span class="f">bytes_to_unicode</span>() -&gt; dict[int, str]: ...        <span class="c"># 256 entries, a bijection</span>
+<span class="k">def</span> <span class="f">pretokenize</span>(text: str) -&gt; list[str]: ...
+
+<span class="k">def</span> <span class="f">test_figure_3_5</span>():
+    s = <span class="s">"It's 2024... Hello  world!\n    x = 12345"</span>
+    <span class="k">assert</span> pretokenize(s) == [<span class="s">"It", "'s", " ", "202", "4", "...", " Hello", " ", " world",
+                              "!\n", "   ", " x", " =", " ", "123", "45"</span>]</code></pre>
+    <p class="check">The Figure 3.5 test passes. Your map sends space to <code>Ġ</code> (U+0120), newline to <code>Ċ</code> and the two bytes of <em>é</em> to <code>Ã©</code>. All 128,000 non-special vocabulary keys decode to distinct byte strings; ID 0 is <code>b"!"</code> and ID 220 is <code>b" "</code> (the "byte IDs are not byte values" deep dive). On your held-out English, code and language files, your chunks equal the Llama 3 tokenizer's own pre-tokenizer output, <code>tok.backend_tokenizer.pre_tokenizer.pre_tokenize_str(text)</code> mapped back to bytes, for every document.</p>
+  </li>
+  <li>
+    <div class="ms-title">Train BPE, then make training fast</div>
+    <p>Start from the chapter's <code>train_bpe</code> loop (Byte Pair Encoding section): count chunks with your pre-tokenizer, start from bytes, merge the most frequent pair, repeat. Make the tie-break a parameter: the chapter's first-seen rule, and one that does not depend on iteration order (highest count, then smallest <code>(left_id, right_id)</code>). Then write <code>train_fast</code> following the "what training a real tokenizer costs" callout: a pair → count table, a pair → chunks index and a heap, updating only the pairs around each new token. Save in tiktoken's format, where rank = ID = 256 + merge number.</p>
+    <pre><code><span class="c"># minitok/train.py</span>
+TOY = {<span class="s">"low"</span>: <span class="n">5</span>, <span class="s">"lower"</span>: <span class="n">2</span>, <span class="s">"lowest"</span>: <span class="n">2</span>, <span class="s">"newer"</span>: <span class="n">6</span>, <span class="s">"wider"</span>: <span class="n">3</span>}   <span class="c"># Figure 3.2</span>
+
+<span class="k">def</span> <span class="f">train_naive</span>(chunk_counts: dict[str, int], n_merges: int,
+                tie: str = <span class="s">"first_seen"</span>) -&gt; list[tuple[int, int]]: ...  <span class="c"># or "smallest_ids"</span>
+<span class="k">def</span> <span class="f">train_fast</span>(chunk_counts: dict[str, int], n_merges: int) -&gt; list[tuple[int, int]]: ...
+<span class="k">def</span> <span class="f">save_tiktoken</span>(merges: list[tuple[int, int]], path: str) -&gt; <span class="k">None</span>: ...</code></pre>
+    <p class="check">On <code>TOY</code> with first-seen ties you get Figure 3.2 exactly: <span class="tok">er</span> <span class="tok">lo</span> <span class="tok">low</span> <span class="tok">ne</span> <span class="tok">new</span> <span class="tok">newer</span> <span class="tok">wi</span> <span class="tok">wid</span> <span class="tok">wider</span>, with counts 11, 9, 9, 6, 6, 6, 3, 3, 3, and the corpus shrinks from 82 to 26 tokens. With the ID tie-break, <code>train_naive</code> and <code>train_fast</code> return identical lists for 1,500 merges on about 1 MB of text, and the fast one is at least 20× faster (on our machine: about 25 s naive, under 0.5 s for a straightforward fast version). Then train 65,536 merges on your 100 MB, and time it next to Hugging Face's <code>BpeTrainer</code> on the same data and regex. The two vocabularies should overlap by 95% or more; the rest are tie-breaks.</p>
+  </li>
+  <li>
+    <div class="ms-title">Encode in rank order, bit-exact</div>
+    <p>Write the <code>Encoder</code> from the Encoding section. Pre-tokenize; for each chunk, look up the whole chunk first; only if that fails, run the merge loop: among adjacent parts whose concatenation is in the table, merge the one with the lowest rank, and repeat. As the "how tiktoken stores merges" callout explains, you need no merge list, only <code>bytes → rank</code>. Load three tables with the same code: <code>cl100k_base</code> (<code>decode_single_token_bytes(i)</code> for <var>i</var> &lt; 100,256), Llama 3.1 (your milestone 1 table) and your own file from milestone 2. Add a dictionary cache of recent chunks and measure what it buys. For your own tokenizer, also write a variant that replays your exact merge pairs, and count how often the two disagree on held-out text: that question is why the Hugging Face conversion of Llama 3 spells out 280,147 merges (count them in <code>tokenizer.json</code>).</p>
+    <pre><code><span class="c"># minitok/encoder.py</span>
+<span class="k">class</span> <span class="f">Encoder</span>:
+    <span class="k">def</span> <span class="f">__init__</span>(self, ranks: dict[bytes, int], pattern: str,
+                 special: dict[str, int] | <span class="k">None</span> = <span class="k">None</span>): ...
+    <span class="k">def</span> <span class="f">encode_ordinary</span>(self, text: str) -&gt; list[int]: ...
+    <span class="k">def</span> <span class="f">_bpe</span>(self, chunk: bytes) -&gt; list[int]: ...    <span class="c"># whole-chunk lookup, then lowest rank first</span>
+    <span class="k">def</span> <span class="f">decode_bytes</span>(self, ids: list[int]) -&gt; bytes: ...
+
+<span class="c"># tests/test_diff.py: the harness that keeps you honest</span>
+<span class="k">for</span> doc <span class="k">in</span> docs:                                  <span class="c"># English, code, 11 languages, emoji, fuzz</span>
+    mine, ref = enc.encode_ordinary(doc), reference(doc)
+    <span class="k">assert</span> mine == ref, first_diff(doc, mine, ref)  <span class="c"># print the chunk, both splits, the ranks</span></code></pre>
+    <p class="check">Figure 3.3: tracing <span class="tok">&#9251;strawberry</span> prints the ranks 261, 267, 357, 610, 618, 675, 5515, 15717, 31107, 73700. Figure 3.4: <em>café</em>, a space and the llama emoji give 5 tokens, 936 59958 11410 99 247. The running sentence gives 791 8415 7731 389 279. The real test: zero mismatches against <code>tiktoken</code>'s <code>encode_ordinary</code> and against Hugging Face's <code>encode(text, add_special_tokens=False)</code> on all your data (≥ 10 MB) plus 100,000 random strings drawn from letters, digits, CJK, Hebrew, emoji, <code>\r</code>, <code>\t</code> and runs of spaces. Speed: on the widget corpus repeated 400 times (≈ 100,000 tokens, 486 KB) the chapter measured about 40 ms for <code>tiktoken</code> and 200 ms for Hugging Face. Report your number on that text and on held-out FineWeb text.</p>
+  </li>
+  <li>
+    <div class="ms-title">Special tokens and the chat template, by hand</div>
+    <p>Add special tokens with tiktoken's semantics (Special tokens section): <code>encode(text, allowed_special=...)</code> splits on the names of allowed specials and raises if a disallowed one appears; <code>encode_ordinary</code> never produces one. Read the 256 specials from <code>added_tokens</code> in <code>tokenizer.json</code>. Then write the Llama 3.1 template in plain Python, without Jinja: read <code>chat_template</code> in <code>tokenizer_config.json</code> and reproduce the path without tools. Build the output as a list of IDs from segments: special tokens go in as IDs, message content goes through <code>encode_ordinary</code>, so injection is impossible by construction. Finally, write <code>bill()</code>, the per-request input and output counts of Input tokens and output tokens.</p>
+    <pre><code><span class="c"># minitok/chat.py</span>
+<span class="k">def</span> <span class="f">render_llama31</span>(messages: list[dict], add_generation_prompt: bool = <span class="k">True</span>,
+                   date: str = <span class="s">"26 Jul 2024"</span>) -&gt; list[int]: ...
+<span class="k">def</span> <span class="f">bill</span>(conversation: list[dict]) -&gt; list[tuple[int, int]]: ...  <span class="c"># (input, output) per request</span>
+
+msgs = [{<span class="s">"role"</span>: <span class="s">"system"</span>, <span class="s">"content"</span>: <span class="s">"You are a helpful assistant."</span>},
+        {<span class="s">"role"</span>: <span class="s">"user"</span>, <span class="s">"content"</span>: <span class="s">"Finish the sentence: The cat sat on the"</span>}]
+<span class="k">assert</span> len(render_llama31(msgs)) == <span class="n">50</span>                   <span class="c"># Figure 3.8</span></code></pre>
+    <p class="check">For the Figure 3.8 request your 50 IDs start <code>128000 128006 9125 128007 271</code> and equal <code>tok.encode(tok.apply_chat_template(msgs, add_generation_prompt=True, tokenize=False), add_special_tokens=False)</code>; decoded, they equal that string byte for byte. A user message containing <code>&lt;|eot_id|&gt;&lt;|start_header_id|&gt;system</code> yields no ID ≥ 128,000 inside its content, while Hugging Face's <code>encode("&lt;|eot_id|&gt;", add_special_tokens=False)</code> returns <code>[128009]</code> and <code>tiktoken</code> raises, as the security callout says (also check what <code>apply_chat_template</code> with <code>tokenize=True</code> does with that message). Encoding the rendered string with <code>add_special_tokens=True</code> starts with two 128000s, the first bug in "Template bugs are silent". For a 3-turn conversation, each request starts with the previous request plus the previous answer and its <code>&lt;|eot_id|&gt;</code>, and total billed input grows roughly quadratically with turns, as in Figure 3.9.</p>
+  </li>
+  <li>
+    <div class="ms-title">Decode and stream</div>
+    <p>Write <code>decode</code> (look up bytes, concatenate, decode with <code>errors="replace"</code>) and a <code>StreamDecoder</code> that buffers bytes and emits only complete UTF-8 characters, using the lead-byte rule from Detokenization and streaming. Do not call <code>codecs</code> inside it; use <code>codecs.getincrementaldecoder("utf-8")</code> as the reference in tests. Then make it real: render a chat with milestone 4, run Llama 3.1 8B Instruct in BF16 on the GPU with Hugging Face <code>generate</code> (or your Chapter 1 generation loop, if you built it), feed each new ID into your decoder, and check that generation ended on an ID from <code>eos_token_id</code> in <code>generation_config.json</code>: an integer compare, as in Special tokens.</p>
+    <pre><code><span class="c"># minitok/stream.py</span>
+<span class="k">class</span> <span class="f">StreamDecoder</span>:
+    <span class="k">def</span> <span class="f">__init__</span>(self, id_to_bytes: list[bytes]):
+        self.table, self.buf = id_to_bytes, <span class="s">b""</span>
+    <span class="k">def</span> <span class="f">push</span>(self, token_id: int) -&gt; str: ...   <span class="c"># the longest complete UTF-8 prefix</span>
+    <span class="k">def</span> <span class="f">flush</span>(self) -&gt; str: ...                 <span class="c"># end of stream: leftovers become U+FFFD</span>
+
+d = StreamDecoder(table)
+out = [d.push(t) <span class="k">for</span> t <span class="k">in</span> [<span class="n">40</span>, <span class="n">3021</span>, <span class="n">11410</span>, <span class="n">99</span>, <span class="n">247</span>, <span class="n">0</span>]]   <span class="c"># Figure 3.12</span>
+<span class="k">assert</span> out == [<span class="s">"I"</span>, <span class="s">" love"</span>, <span class="s">" "</span>, <span class="s">""</span>, <span class="s">"\U0001F999"</span>, <span class="s">"!"</span>]</code></pre>
+    <p class="check">The Figure 3.12 test passes, and decoding the same IDs one at a time with plain <code>decode</code> shows <em>�</em> where your streamer shows none. For 10,000 random multilingual strings, the concatenated pushes plus <code>flush()</code> equal the original text, no emitted piece contains U+FFFD, and after each push at most 3 bytes are held back. The live run streams an emoji-heavy or Hebrew answer without a single <em>�</em>, logs how many pushes returned an empty string, ends on 128009, and its input and output counts match <code>bill()</code>.</p>
+  </li>
+  <li>
+    <div class="ms-title">Measure vocabulary size and language cost</div>
+    <p>One training run gives the whole sweep: the first <var>k</var> merges of your 65,536-merge run are exactly the tokenizer you would get by training <var>k</var> merges (convince yourself why). For <var>V</var> = 256 + 1K, 2K, 4K … 64K and each domain (held-out English, code, each language), measure bytes per token and characters per token. Add the real tokenizers at their own <var>V</var>: GPT-2 (<code>tiktoken</code>'s <code>"gpt2"</code>, 50,257), <code>cl100k_base</code>, Llama 3 (128,256) and <code>o200k_base</code>. On a second panel, plot the cost side from How big should the vocabulary be?: <var>V</var> × <var>d</var> × 2 bytes for one BF16 table and 2·<var>V</var>·<var>d</var> head FLOPs per token, at <var>d</var> = 4,096.</p>
+    <pre><code><span class="c"># scripts/sweep.py</span>
+<span class="k">for</span> k <span class="k">in</span> [<span class="n">1024</span>, <span class="n">2048</span>, <span class="n">4096</span>, <span class="n">8192</span>, <span class="n">16384</span>, <span class="n">32768</span>, <span class="n">65536</span>]:
+    enc = Encoder(first_k(my_ranks, k), PATTERN)            <span class="c"># V = 256 + k</span>
+    <span class="k">for</span> domain, text <span class="k">in</span> heldout.items():                <span class="c"># en, code, he, hi, ko, ru, zh, ...</span>
+        record(<span class="n">256</span> + k, domain, len(text.encode()) / len(enc.encode_ordinary(text)))</code></pre>
+    <p class="check">The real tokenizers reproduce the chapter: the widget corpus is 250 Llama 3 tokens for 211 words (1.18 tokens per word, ≈ 4.85 characters per token; Tokens per word section), and the English weather sentence is 14 tokens in all four. English bytes per token rises with <var>V</var> with diminishing returns: each doubling buys less than the one before. Scripts your English-heavy corpus barely contains stay near the byte level (1–2 bytes per token) at every <var>V</var>, which is GPT-2's shape in Figure 3.10. Last, redo the Llama 2 → Llama 3 worked example with your own numbers: take the measured token ratio between two vocabularies on held-out English (your 16K vs 64K, or GPT-2 vs Llama 3), add the head FLOP difference at <var>d</var> = 4,096 against ≈ 16 GFLOP per token, and state the net compute change.</p>
+  </li>
+  <li>
+    <div class="ms-title">Open the embedding table</div>
+    <p>Find the shard holding <code>model.embed_tokens.weight</code> in <code>model.safetensors.index.json</code>. Parse the safetensors header yourself (an 8-byte little-endian length, then JSON with dtype, shape and data offsets), seek to row 791 with the arithmetic of Figure 3.7, read it with plain file I/O and compare it with <code>safe_open(...).get_tensor(...)[791]</code>. Then hunt under-trained tokens (Artifacts: glitch tokens; the last paragraph of Special tokens). Compute every row's norm in the embedding table and in <code>lm_head.weight</code>, histogram them, and mark the 248 reserved tokens. Rank ordinary tokens by an under-training indicator (start with norms; Land &amp; Bartolo's "Fishing for Magikarp" (2024) describes better ones), decode the top 50 with your decoder, and on the GPU ask Llama 3.1 8B Instruct to repeat each one exactly. Use 50 random tokens of similar byte length as the control.</p>
+    <pre><code><span class="c"># scripts/probe_embeddings.py</span>
+<span class="k">with</span> open(shard, <span class="s">"rb"</span>) <span class="k">as</span> f:
+    n = int.from_bytes(f.read(<span class="n">8</span>), <span class="s">"little"</span>)
+    info = json.loads(f.read(n))[<span class="s">"model.embed_tokens.weight"</span>]  <span class="c"># dtype, shape, data_offsets</span>
+    f.seek(...)                                    <span class="c"># your Figure 3.7 arithmetic goes here</span>
+    raw = f.read(...)</code></pre>
+    <p class="check">The header says <code>BF16</code> and <code>[128256, 4096]</code>, the tensor spans 1,050,673,152 bytes, row 791 starts 6,479,872 bytes (0x0062E000) after the tensor's start, and your raw bytes equal the library's row exactly. The reserved tokens form their own cluster, clearly separated from the bulk of the histogram. Your top candidates look like junk fragments rather than words (the paper's published Llama 3.1 results include tokens such as <code>ForCanBeConverted</code> and <code>PostalCodesNL</code>), and the model repeats them correctly noticeably less often than the control set.</p>
+  </li>
+</ol>
+
+<h3>Done when</h3>
+<ul class="checklist">
+  <li><code>pytest</code> passes, with one test per chapter figure: 3.2 (toy merges), 3.3 (strawberry ranks), 3.4 (<em>café</em> + emoji), 3.5 (regex chunks), 3.8 (the 50-token chat) and 3.12 (streaming).</li>
+  <li>Zero ID mismatches against <code>tiktoken</code> <code>cl100k_base</code> and the Hugging Face Llama 3.1 tokenizer on ≥ 10 MB of mixed text plus 100,000 random strings.</li>
+  <li><code>train_fast</code> equals <code>train_naive</code> on 1,500 merges, is ≥ 20× faster, and your 64K vocabulary overlaps Hugging Face's trainer by ≥ 95%.</li>
+  <li>Your hand-written template produces the same 50 IDs as <code>apply_chat_template</code>, and the injection test passes.</li>
+  <li>A live Llama 3.1 8B Instruct answer streams through your decoder with no U+FFFD and ends on a stop-token ID.</li>
+  <li><code>report.md</code> has the vocabulary-size and language plots, the speed table, your version of the worked example, the embedding histogram and the row-791 offset check.</li>
+</ul>
+
+<details class="deep-dive"><summary>Hints (open only when stuck)</summary>
+<ul>
+  <li>Do not diff your chunk lists against tiktoken's internal pattern (<code>enc._pat_str</code>). It was rewritten with possessive quantifiers and chunks some whitespace differently (<code>"\r\t"</code> is one chunk there, two with the chapter's pattern), yet the final IDs agree. Diff chunks against the Hugging Face pre-tokenizer and IDs against both.</li>
+  <li>Whole-chunk lookup is not just a speedup. <code>tiktoken</code> checks the whole chunk first, and Llama 3's <code>tokenizer.json</code> asks Hugging Face to do the same (look for <code>ignore_merges</code>). Do it too, so you match by construction rather than by luck.</li>
+  <li>Fast trainer divergence: count pairs exactly as the naive loop does (a run like <span class="tok">aaa</span> adds 2 to (a, a) in both, although only one merge fits), and merge left to right without overlap, like <code>replace_pair</code>. Stale entries in the pair → chunks index are fine if you rescan each chunk. For the heap, use lazy deletion: push (−count, pair) whenever a count changes, and skip popped entries whose count no longer matches the table.</li>
+  <li>Comparing with <code>BpeTrainer</code>: its <code>vocab_size</code> includes the 256 base bytes. Use <code>pre_tokenizers.Sequence([Split(Regex(PATTERN), behavior="isolated"), ByteLevel(add_prefix_space=False, use_regex=False)])</code> with <code>initial_alphabet=pre_tokenizers.ByteLevel.alphabet()</code>, then map its vocabulary keys back to bytes with your milestone 1 map.</li>
+  <li>A diff against Hugging Face on web text that contains a literal special-token name is the security callout in action: Hugging Face parsed it as a special token. Log those documents as a finding; do not "fix" your encoder.</li>
+  <li>Template diffs: compare <code>repr()</code> of both strings first. The usual culprits are the double newline after each header, the injected date lines and whitespace handling in the Jinja source (look for filters such as <code>trim</code>).</li>
+  <li>Streaming: bytes 10xxxxxx are continuation bytes. Scan back at most 3 bytes from the end of the buffer for a lead byte, and hold the tail only if it is an incomplete but valid start of a character. Bytes that can never complete (a stray continuation byte, 0xFF) should come out as U+FFFD at once, not sit in the buffer forever. <code>generate(..., streamer=...)</code> accepts any object with <code>put()</code> and <code>end()</code>; its first <code>put</code> carries the whole prompt.</li>
+  <li>The widget corpus repeated 400 times is 400 copies of the same chunks, so a chunk cache flatters it. That is why you also benchmark held-out text.</li>
+  <li>NumPy has no bfloat16. Read the row as <code>uint16</code> and widen it: <code>(u.astype(np.uint32) &lt;&lt; 16).view(np.float32)</code>. Or let PyTorch do it.</li>
+</ul>
+</details>
+
+<h3>Stretch goals</h3>
+<ul>
+  <li>Port to Qwen3 (for example the ungated <code>Qwen/Qwen3-0.6B</code> tokenizer): different vocabulary, special tokens and regex (one digit per token), and the ChatML template. Get bit-exact again, and write down what you had to change besides data: whole-chunk lookup or not, concatenation ranks or exact merge pairs.</li>
+  <li>Implement Unigram encoding (Viterbi over piece log-probabilities, Other tokenizer families) and match the <code>sentencepiece</code> library on T5's model (<code>google-t5/t5-small</code>), starting with plain ASCII text.</li>
+  <li>Token healing (Artifacts: trailing spaces): for a prompt ending in "on the&#9251;", drop the last token and allow as the first generated token only vocabulary entries whose bytes start with the dropped bytes. Compare completions with and without healing on Llama 3.1 8B.</li>
+  <li>Digit grouping (Artifacts: arithmetic): measure Llama 3.1 8B Instruct's accuracy on 5–8 digit additions written plainly vs with thousands separators, and see whether you reproduce the direction of Singh &amp; Strouse (2024).</li>
+</ul>
 </section>
 
 <section>

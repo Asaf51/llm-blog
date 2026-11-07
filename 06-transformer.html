@@ -62,6 +62,7 @@
     <li><b>FLOPs per token</b> (≈ 2N plus an attention term that grows with position) and how they split.</li>
     <li>A verified <b>NumPy reference forward pass</b>, the <b>safetensors</b> file format byte by byte, and how <b>mmap</b> loads it.</li>
     <li>A first look inside: <b>logit lens</b>, features, <b>superposition</b> and <b>sparse autoencoders</b>.</li>
+    <li><strong>Build it:</strong> load Llama 3.1 8B straight from its safetensors bytes into your own PyTorch forward pass, prove it matches Hugging Face layer by layer, then instrument it to verify the chapter's parameter and FLOP counts, ablate sublayers and run a logit lens.</li>
   </ul>
 </div>
 
@@ -1946,6 +1947,274 @@ uses rather than a convenient summary.</p>
 <p>All interpretability tools here rely on the architecture of this chapter: an additive residual stream that every
 component reads and writes in one shared coordinate system. The logit lens reads it with the model's own head; SAEs
 re-express it as a sparse sum of directions.</p></aside>
+</section>
+
+<section class="build">
+<h2><span class="build-tag">Build it</span>Llama 3.1 8B from raw bytes: your own loader, forward pass and residual-stream microscope</h2>
+
+<div class="build-meta">
+  <span><b>Time</b>14–22 hours</span>
+  <span><b>Level</b>Intermediate–advanced</span>
+  <span><b>Stack</b>Python, PyTorch, matplotlib (transformers only as the reference)</span>
+  <span><b>Hardware</b>1 GPU, 24 GB+; 32 GB RAM; ~25 GB disk</span>
+  <span><b>Uses</b>Sections: The residual stream, The block (pre-norm), Every tensor shape in Llama 3.1 8B, Counting every parameter, FLOPs per token, The whole forward pass in 40 lines of NumPy, Model files, Looking inside</span>
+</div>
+
+<p>The 40-line NumPy program above is the whole model, but it was checked on a 135M-parameter model in full
+precision. In this project you run the real one. You read Llama 3.1 8B's four safetensors shards byte by byte, map
+16 GB of BF16 weights into your own PyTorch forward pass on the GPU, with no <code>transformers</code> model class
+involved, and prove that all 33 residual-stream snapshots (x<sub>0</sub> … x<sub>32</sub>) and the logits match
+Hugging Face's.</p>
+
+<p>Then you turn the engine into an instrument. It counts its own parameters and FLOPs, records every write into the
+residual stream, switches sublayers off, and reads the middle of the stack with a logit lens. Every number in this
+chapter becomes a test: 291 tensors, 8,030,261,248 parameters, 218,112,000 per block, 15 GFLOP per token plus
+524,288·t for attention, the crossover near 28,600 tokens, <span class="tok">&#9251;bed</span> at 7.2%. Your code either
+reproduces them or has a bug, and the layer-by-layer comparison tells you which layer it is in. Hunting down a forward
+pass that "runs but produces garbage" (RoPE pairing, a missing final norm, a BF16 cast in the wrong place) is the
+fastest way to learn what each line of the block does.</p>
+
+<p>At the end you have a small package, <code>lfb</code> ("llama from bytes"), with a test suite, and a short report
+in which every measured number sits next to the chapter's.</p>
+
+<h3>The deliverable</h3>
+<ul>
+  <li><code>lfb/</code>: a zero-copy safetensors reader, a config-driven shape and parameter model, and a hookable
+  forward pass (BF16 and FP32) for Llama-architecture checkpoints: tied or untied, with or without q/k/v biases.</li>
+  <li><code>scripts/inspect.py</code>: prints the "Counting every parameter" table for any checkpoint directory.</li>
+  <li><code>tests/</code>: pytest for shapes and counts, causality, parity with Hugging Face, and the exact FLOP formula.</li>
+  <li><code>report/</code>: the shape trace for n = 5, a parity table, a Figure 6.8-style FLOP breakdown, a stream-RMS
+  plot, a 64-sublayer ablation chart, logit-lens heatmaps and a KL-vs-layer curve, and <code>numbers.md</code>.</li>
+</ul>
+
+<h3>Setup</h3>
+<p>Use the base model, not Instruct: the perplexity and logit-lens runs feed plain text. Develop everything on
+SmolLM2-135M first (it loads in a second and runs in FP32 anywhere), then point the same code at the 8B. Text comes from
+<code>load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="test")</code>.</p>
+<pre><code>pip install torch numpy safetensors transformers datasets matplotlib pytest
+hf auth login     <span class="c"># first accept the license on the meta-llama/Llama-3.1-8B model page</span>
+hf download meta-llama/Llama-3.1-8B --include "*.json" "*.safetensors" --local-dir ckpt/llama-3.1-8b
+hf download HuggingFaceTB/SmolLM2-135M --local-dir ckpt/smollm2-135m   <span class="c"># tied, tiny</span>
+hf download Qwen/Qwen2.5-0.5B --local-dir ckpt/qwen2.5-0.5b            <span class="c"># tied + q/k/v biases</span>
+
+llama-from-bytes/
+  lfb/st.py  lfb/config.py      <span class="c"># M1: safetensors reader, Cfg, shapes, parameter count</span>
+  lfb/model.py  lfb/hooks.py    <span class="c"># M2: forward(); M2, M4-M6: Tracer, FlopCounter, Recorder, Ablator, Lens</span>
+  scripts/  tests/  report/</code></pre>
+
+<h3>Reference numbers</h3>
+<div class="table-wrap">
+<table class="data">
+  <tr><th>Quantity (Llama 3.1 8B unless noted)</th><th class="num">Target</th><th>Chapter section</th></tr>
+  <tr><td>Tensors in the checkpoint</td><td class="num">291</td><td>Shards and the index</td></tr>
+  <tr><td>Parameters (= <code>total_size</code> 16,060,522,496 ÷ 2)</td><td class="num">8,030,261,248</td><td>Counting every parameter</td></tr>
+  <tr><td>Parameters per block</td><td class="num">218,112,000</td><td>Counting every parameter</td></tr>
+  <tr><td>Parameter share: FFN / attention / vocabulary matrices</td><td class="num">70% / 17% / 13%</td><td>Counting every parameter</td></tr>
+  <tr><td>Matmul FLOPs per token, weights only (LM head on every row)</td><td class="num">15,009,316,864</td><td>FLOPs per token</td></tr>
+  <tr><td>Attention FLOPs for the token at position t</td><td class="num">524,288 · t</td><td>FLOPs per token</td></tr>
+  <tr><td>Short-context FLOPs: FFN / attention projections / LM head</td><td class="num">75% / 18% / 7%</td><td>Figure 6.8</td></tr>
+  <tr><td>Attention FLOPs equal weight FLOPs at</td><td class="num">t ≈ 28,600</td><td>FLOPs per token</td></tr>
+  <tr><td>SmolLM2-135M, <span class="tok">The cat sat on the</span>: top next token</td><td class="num"><span class="tok">&#9251;bed</span>, 7.2%</td><td>The whole forward pass in 40 lines of NumPy</td></tr>
+</table>
+</div>
+
+<h3>Milestones</h3>
+<ol class="milestones">
+  <li>
+    <div class="ms-title">Read the checkpoint from its bytes</div>
+    <p>Implement the format exactly as "safetensors: the file format, byte by byte" describes: an 8-byte little-endian
+    header size N, a JSON header, and a data section whose <code>data_offsets</code> are relative to the data start,
+    not the file start. Use <code>model.safetensors.index.json</code> to find each tensor's shard (single-file models
+    have no index). Map each shard once and return every tensor as a zero-copy BF16 view into the mapping, as in "Why
+    the layout matters: mmap". Separately, write <code>expected_shapes(cfg)</code>, which predicts every tensor name and
+    shape from <code>config.json</code> alone (the seven integers plus the tied and bias flags of "config.json, field by
+    field"), and <code>count_params(cfg)</code>, the formula from "Counting every parameter". No
+    <code>safetensors</code> library in <code>lfb/</code>; it is only allowed in the tests, as the referee.</p>
+    <pre><code><span class="k">@dataclass</span>
+<span class="k">class</span> <span class="f">Cfg</span>:
+    V: int; d: int; L: int; h: int; h_kv: int; dh: int; d_ff: int
+    tied: bool; qkv_bias: bool; eps: float; rope_theta: float; rope_scaling: dict | None
+
+<span class="k">def</span> <span class="f">load_cfg</span>(model_dir) -&gt; Cfg: ...                      <span class="c"># config.json only</span>
+<span class="k">def</span> <span class="f">read_header</span>(path) -&gt; tuple[int, dict]: ...          <span class="c"># (data_start, header)</span>
+<span class="k">def</span> <span class="f">open_checkpoint</span>(model_dir) -&gt; dict[str, torch.Tensor]: ...  <span class="c"># all shards, no copies</span>
+<span class="k">def</span> <span class="f">expected_shapes</span>(c: Cfg) -&gt; dict[str, tuple[int, ...]]: ...
+<span class="k">def</span> <span class="f">count_params</span>(c: Cfg) -&gt; int: ...</code></pre>
+    <p class="check">On the 8B: exactly 291 tensors, no missing or extra names, every shape as predicted; the sum of
+    numels equals <code>count_params</code> equals 8,030,261,248 equals <code>total_size</code> ÷ 2; one layer is
+    218,112,000. Every tensor is <code>torch.equal</code> to what <code>safetensors.safe_open</code> returns. Listing all
+    291 names and shapes takes milliseconds, because only four headers are read. SmolLM2-135M (no
+    <code>lm_head.weight</code>) and Qwen2.5-0.5B (<code>q_proj.bias</code> and friends) pass the same tests unchanged.</p>
+  </li>
+  <li>
+    <div class="ms-title">The forward pass on the GPU, with a shape tracer</div>
+    <p>Port the chapter's NumPy forward pass to PyTorch on the tensors from Milestone 1: plain <code>x @ W.T</code>,
+    BF16 on the GPU for real runs, FP32 for tests. Read ε, RoPE settings, tying and biases from <code>Cfg</code>; never
+    hard-code 4,096 or 32. For the attention core, plug in your Chapter 5 project if you built one; otherwise a masked
+    softmax as in the NumPy code or <code>F.scaled_dot_product_attention</code> is fine. This project is about the
+    stack around it. Design the hook interface now: every matmul, every residual write and every stream snapshot passes
+    through it, so Milestones 4–6 are just new hook classes. The first one is a <code>Tracer</code> that prints the table
+    from "Every tensor shape in Llama 3.1 8B".</p>
+    <pre><code><span class="k">class</span> <span class="f">Hooks</span>:                                  <span class="c"># base class: does nothing</span>
+    <span class="k">def</span> <span class="f">op</span>(self, tag, inputs, out, weight=<span class="k">None</span>): ...   <span class="c"># tag: "L3.q_proj", "lm_head", ...</span>
+    <span class="k">def</span> <span class="f">write</span>(self, layer, kind, delta): <span class="k">return</span> delta  <span class="c"># kind: "attn" | "ffn"; may edit</span>
+    <span class="k">def</span> <span class="f">stream</span>(self, layer, x): ...               <span class="c"># x_0 ... x_L</span>
+
+<span class="k">def</span> <span class="f">forward</span>(ids, W, cfg: Cfg, hooks: Hooks = Hooks()) -&gt; torch.Tensor:
+    <span class="s">"""ids [n] int64 -&gt; logits [n, V]."""</span></code></pre>
+    <p class="check">The trace for <span class="tok">The</span> <span class="tok">&#9251;cat</span>
+    <span class="tok">&#9251;sat</span> <span class="tok">&#9251;on</span> <span class="tok">&#9251;the</span> (n = 5) on the 8B
+    matches the chapter's shape table row for row. Appending tokens leaves the earlier positions' logits unchanged to
+    within FP32 rounding (causality). On SmolLM2-135M in FP32, <span class="tok">The cat sat on the</span> ranks
+    <span class="tok">&#9251;bed</span> first at about 7.2%, then <span class="tok">&#9251;edge</span>,
+    <span class="tok">&#9251;window</span>, <span class="tok">&#9251;table</span>, and greedy generation continues "The cat
+    sat on the bed, and the cat sat".</p>
+  </li>
+  <li>
+    <div class="ms-title">Prove it: layer-by-layer parity with Hugging Face</div>
+    <p>Write <code>scripts/golden.py</code>: run <code>AutoModelForCausalLM</code> with
+    <code>output_hidden_states=True</code> on fixed token ids, save the stream snapshots and logits to disk, and free
+    the GPU before loading your engine (two 16 GB copies do not fit on a 24 GB card). Inputs: the running sentence, a few
+    prompts of your own, four 2,048-token windows of WikiText-2, and one 8,192-token window, because positions past a few
+    thousand are where a missing Llama 3.1 RoPE rescaling shows up. Compare in two regimes: FP32 on SmolLM2-135M and
+    Qwen2.5-0.5B (tight; catches math bugs) and BF16 on the 8B (statistical; catches dtype and scale bugs). Plot
+    relative error against layer. A bug appears as a jump at one layer, and that tells you where to look.</p>
+    <pre><code><span class="k">from</span> transformers <span class="k">import</span> AutoModelForCausalLM
+ref = AutoModelForCausalLM.<span class="f">from_pretrained</span>(path, dtype=torch.bfloat16).<span class="f">to</span>(<span class="s">"cuda"</span>)
+<span class="k">with</span> torch.<span class="f">no_grad</span>():
+    out = <span class="f">ref</span>(ids[<span class="k">None</span>].<span class="f">cuda</span>(), output_hidden_states=<span class="k">True</span>)
+<span class="c"># out.hidden_states: L+1 tensors [1, n, d] (read the hints about the last one)</span>
+<span class="c"># out.logits: [1, n, V]  -&gt; torch.save(...), del ref, torch.cuda.empty_cache()</span></code></pre>
+    <p class="check">FP32: relative error at most 1e-5 at every layer, and max |Δlogit| below 1e-3. BF16 on the 8B:
+    the same top-1 token at 99% or more of positions, mean KL(HF ‖ yours) below 0.01 nats, WikiText-2 perplexity within
+    0.5% of Hugging Face's, and an error curve that stays at BF16 noise level with no jumps. With a 40 GB+ GPU, also run
+    the 8B in FP32 on a short input and hit the tight tolerances there.</p>
+  </li>
+  <li>
+    <div class="ms-title">Count the FLOPs and check the chapter's formula</div>
+    <p>Write a <code>FlopCounter</code> hook that adds 2·m·k·n for every matmul, tagged by component: q/k/v/o
+    projections, FFN, LM head, attention scores, attention·V. For attention, count only what the causal mask keeps: the
+    token at position t attends to t keys. Then make the forward run on the <code>meta</code> device, with weights built
+    from <code>expected_shapes(cfg)</code> and no data at all, so you can "run" 131,072 tokens with no memory and no
+    checkpoint. Cross-check one real n = 2,048 run against PyTorch's <code>torch.utils.flop_counter.FlopCounterMode</code>
+    and explain the difference. Plot FLOPs per token by component at t = 1, 4K, 28.6K and 128K, like Figure 6.8.</p>
+    <pre><code><span class="k">@pytest.mark.parametrize</span>(<span class="s">"n"</span>, [<span class="n">1</span>, <span class="n">5</span>, <span class="n">2048</span>, <span class="n">131072</span>])
+<span class="k">def</span> <span class="f">test_flops_match_chapter</span>(n):
+    f = <span class="f">count_flops</span>(<span class="f">load_cfg</span>(<span class="s">"ckpt/llama-3.1-8b"</span>), n)  <span class="c"># meta device, LM head on all rows</span>
+    <span class="k">assert</span> f[<span class="s">"weights"</span>] == <span class="n">15_009_316_864</span> * n
+    <span class="k">assert</span> f[<span class="s">"attn"</span>] == <span class="n">524_288</span> * n * (n + <span class="n">1</span>) // <span class="n">2</span></code></pre>
+    <p class="check">The test passes exactly. (The chapter's 15.01 GFLOP is 2 × 7,504,924,672, which also counts the
+    266,240 norm scales; your integer counts only matmul weights.) At short context the split is 75% FFN, 18% attention
+    projections, 7% LM head. The attention cost of token t is 524,288·t: equal to the weight cost at t ≈ 28,600 and
+    68.7 GFLOP at t = 131,072. <code>FlopCounterMode</code> reports more attention FLOPs than you by exactly
+    524,288·n(n−1)/2, and your report says why.</p>
+  </li>
+  <li>
+    <div class="ms-title">Open up the residual stream</div>
+    <p>Add two hooks: a <code>Recorder</code> that keeps x<sub>0</sub> and all 64 writes a<sub>l</sub> and
+    m<sub>l</sub> (full vectors for a few positions, running norms for many), and an <code>Ablator</code> that replaces
+    chosen writes with zeros. Use them to test "The residual stream" section's claims:</p>
+    <ul>
+      <li>Check "The exact equations": x<sub>32</sub> equals x<sub>0</sub> + Σ(a<sub>l</sub> + m<sub>l</sub>).</li>
+      <li>Plot the stream's RMS against depth, position 0 separately from the rest, plus the norm of every write.</li>
+      <li>Zero each of the 64 sublayers in turn, then each whole block, and measure the change in mean cross-entropy on
+      about 16K WikiText-2 tokens. Write down your predicted shape first.</li>
+      <li>Skip the final norm: feed x<sub>32</sub> straight to the LM head and measure loss and entropy. That is why
+      "The top of the stack" needs it.</li>
+    </ul>
+    <p class="check">The unrolled sum matches to relative error below 1e-6 in FP32 (SmolLM2-135M). In BF16 it holds
+    only approximately; explain the size of the gap from BF16's 8-bit mantissa. The stream's RMS grows with depth, and
+    position 0 is far larger than the rest. The ablation chart is dominated by a handful of sublayers, typically in the
+    first block or two and the last; most single middle sublayers cost little ("Information can skip layers").</p>
+  </li>
+  <li>
+    <div class="ms-title">A logit lens for the whole stack</div>
+    <p>Add a <code>Lens</code> hook. For each snapshot x<sub>l</sub>, apply the model's own final RMSNorm
+    (<code>model.norm.weight</code>) and the LM head as if it were the last layer ("The logit lens"). For every position,
+    record the top-1 token and its probability, the probability and rank of the final top-1 token, and
+    KL(final ‖ lens<sub>l</sub>). Render a heatmap like Figure 6.11: layers as rows, positions as columns, the top token
+    in each cell, colored by probability. On the 8B, plot mean KL against layer over about 100 WikiText-2 windows
+    (leaving out position 0), a histogram of the first layer at which the final answer becomes the lens's top-1, and
+    heatmaps for three prompts of your own: a fact (<span class="tok">The capital of France is</span>), a line of code,
+    an idiom.</p>
+    <p class="check">On SmolLM2-135M your heatmap for <span class="tok">The cat sat on the</span> reproduces Figure 6.11
+    cell for cell. At the last position that is <span class="tok">&#9251;bed</span> 0.07 at layer 30,
+    <span class="tok">&#9251;edge</span> 0.14 at layer 29, <span class="tok">&#9251;left</span> 0.16 at layer 28, and the
+    bottom row decodes to the input tokens. On the 8B, KL stays high for much of the stack, falls mostly in the upper
+    layers, and reaches 0 at layer 32 by construction. Your report answers one question: does layer 0 of the untied 8B
+    still decode to the input token? Explain the result with "Tied vs untied embeddings".</p>
+  </li>
+</ol>
+
+<h3>Done when</h3>
+<ul class="checklist">
+  <li><code>pytest</code> passes for all three checkpoints: names, shapes and counts (291 tensors and 8,030,261,248
+  for the 8B), byte equality with <code>safetensors</code>, and causality.</li>
+  <li>FP32 parity on SmolLM2-135M and Qwen2.5-0.5B: relative error at most 1e-5 at every layer, max |Δlogit| below 1e-3.</li>
+  <li>BF16 parity on Llama 3.1 8B, including the 8,192-token window: 99% or more top-1 agreement, mean KL below
+  0.01 nats, perplexity within 0.5%.</li>
+  <li>The FLOP test holds exactly for n = 1, 5, 2,048 and 131,072, and the gap to <code>FlopCounterMode</code> is
+  explained.</li>
+  <li>The unrolled-sum identity is checked, and the stream-RMS and ablation plots are in <code>report/</code>.</li>
+  <li>Figure 6.11 is reproduced from your own engine, and the 8B KL-vs-layer curve and prompt heatmaps are in the report.</li>
+  <li><code>report/numbers.md</code> lists every row of the Reference numbers table, measured, next to the chapter's value.</li>
+</ul>
+
+<details class="deep-dive"><summary>Hints (open only when stuck)</summary>
+<ul>
+  <li><b>The last hidden state is not x<sub>32</sub>.</b> In <code>out.hidden_states</code>, entry 0 is the embedding
+  output and entry l is the stream after l blocks, except the last entry. Transformers overwrites it with the
+  final-normed output. Compare it against <code>rmsnorm(x_32)</code>, or hook the last decoder layer. And never apply
+  the final norm twice in the lens.</li>
+  <li><b>RoPE.</b> HF checkpoints pair dimension i with i + d<sub>h</sub>/2 ("rotate half"). Interleaved pairs run fine
+  and produce garbage. Llama 3.1's <code>llama3</code> rescaling only changes the low-frequency dimensions, so short
+  prompts look almost right without it; the 8,192-token window catches it. SmolLM2 and Qwen2.5 have no
+  <code>rope_scaling</code> at all.</li>
+  <li><b>Config gaps.</b> Qwen2.5's <code>config.json</code> has no <code>head_dim</code> (use d / h) and no bias flag
+  (the q/k/v biases come with the <code>Qwen2ForCausalLM</code> architecture). Its <code>rms_norm_eps</code> is 1e-6,
+  not 1e-5.</li>
+  <li><b>BF16 parity.</b> Mirror Hugging Face's casts: RMSNorm computes in FP32, casts the normalized vector back to BF16,
+  then multiplies by the BF16 weight; cos and sin are built in FP32 and cast to BF16 before rotating. A cast in a
+  different place is invisible at layer 1 and costs top-1 flips at layer 32. BF16 logits between 16 and 32 are
+  quantized in steps of 0.125, so upcast before comparing and expect exact ties.</li>
+  <li><b>FP32 parity.</b> Make sure nothing enabled TF32 (<code>torch.set_float32_matmul_precision("highest")</code>),
+  or "FP32" errors look like 1e-3 instead of 1e-6.</li>
+  <li><b>Zero-copy views.</b> <code>torch.frombuffer(mm, dtype=torch.bfloat16, count=numel, offset=8 + N + begin)</code>
+  on a read-only <code>mmap</code> works; PyTorch warns that the buffer is not writable, which is expected. If you go
+  through <code>np.memmap</code>, view as <code>int16</code> and then <code>.view(torch.bfloat16)</code>. The move to
+  the GPU should be the only copy.</li>
+  <li><b>Memory.</b> 2,048 × 128,256 logits in FP32 are 1.05 GB per window: store golden logits in BF16 or compute KL in
+  chunks. Explicit attention at 8,192 tokens materializes [32, 8192, 8192] scores (4 GiB in BF16) per layer, so use SDPA
+  or loop over heads there. A full-resolution <code>Recorder</code> costs 64 × 4,096 × 4 B = 1 MiB per token.</li>
+  <li><b>FLOP bookkeeping.</b> 15,009,316,864 = 2 × (32 × 218,103,808 + 525,336,576): every matmul weight once, no
+  embedding, no norm scales. Causal attention per layer and head is 2·d<sub>h</sub> FLOPs for each of the n(n+1)/2
+  unmasked pairs for scores, and the same again for weights·V. <code>FlopCounterMode</code> has no idea a mask exists.</li>
+  <li><b>Same ids on both sides.</b> Llama 3.1's tokenizer prepends <code>&lt;|begin_of_text|&gt;</code> (128000);
+  Figure 6.11 starts at <span class="tok">The</span> with no BOS. Tokenize once and feed the same id tensor to Hugging
+  Face and to your engine.</li>
+  <li><b>Position 0 is special.</b> In Llama-family models the first position's stream becomes huge in a few dimensions
+  (search for "massive activations"; Chapter 5 calls it an attention sink). Leave it out of averages, relative-error
+  norms and the lens KL curve, or plot it on its own. Ablation deltas span orders of magnitude: use a log axis.</li>
+</ul>
+</details>
+
+<h3>Stretch goals</h3>
+<ul>
+  <li><b>Meta's original format.</b> Download <code>original/consolidated.00.pth</code> from the same repository (load
+  with <code>torch.load(..., weights_only=True)</code>), map Meta's names (w1/w3/w2) with the "Tensor names across
+  ecosystems" table, use interleaved RoPE pairs, and work out the row permutation the HF conversion applies to
+  W<sub>q</sub> and W<sub>k</sub>. Both paths must give the same logits. Bonus: derive d<sub>ff</sub> = 14,336 from
+  <code>original/params.json</code> with the rule in "Why the hidden size is 14,336".</li>
+  <li><b>More families.</b> Extend <code>Cfg</code> to the "Variations you will meet in configs": Llama 3.2 1B (tied)
+  and Qwen3-0.6B (QK-norm, and 16 heads × 128 = 2,048 ≠ <code>hidden_size</code> 1,024). Parity tests and
+  <code>count_params</code> must pass for each.</li>
+  <li><b>Tuned lens.</b> Train one affine translator per layer (Belrose et al., 2023) on a few million tokens and plot
+  its KL-vs-layer curve next to the logit lens's.</li>
+  <li><b>The FFN as a key–value memory.</b> On a prompt, find the FFN slots with the largest coefficients
+  c<sub>i</sub> in one layer and read their value columns W<sub>down</sub>[:, i] through the LM head (Geva et al.,
+  2021). Then scale one slot's coefficient at run time through your hook and measure how the next-token distribution
+  moves.</li>
+</ul>
 </section>
 
 <section>

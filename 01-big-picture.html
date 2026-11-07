@@ -76,6 +76,7 @@
     <li>Training finds the numbers once, at enormous cost. Inference uses them, read-only, for every request.</li>
     <li>The pipeline map: every stage from text to text, each linked to the chapter that explains it.</li>
     <li>Why "just predicting the next token" produces real capability, and where that argument stops.</li>
+    <li><strong>Build it:</strong> read Llama&#160;3.1&#160;8B's safetensors files by hand, wrap them as the function <var>f</var>, write the generation loop yourself, then turn that loop into <code>llmzip</code>, a lossless compressor that stores each token in about &#8722;log<sub>2</sub>&#160;<var>p</var> bits.</li>
   </ul>
 </div>
 
@@ -1322,6 +1323,158 @@
 <aside class="callout key"><div class="callout-title">The mental model to carry forward</div>
 <p>An LLM is a deterministic function from tokens to a next-token distribution, defined by a few hundred lines of code and billions of learned numbers. Text comes from calling it in a serial loop. Training searches for the numbers once; inference reads them for every token. Every later chapter refines one box of the map in Figure&#160;1.6.</p>
 </aside>
+</section>
+
+<section class="build">
+<h2><span class="build-tag">Build it</span>llmzip: read the weights, call <var>f</var> in a loop, compress text with it</h2>
+
+<div class="build-meta">
+  <span><b>Time</b>14&#8211;20 hours</span>
+  <span><b>Level</b>Intermediate</span>
+  <span><b>Stack</b>Python, PyTorch, Hugging Face transformers</span>
+  <span><b>Hardware</b>1 GPU, 24&#160;GB+ (any GPU for the 0.5B dev model)</span>
+  <span><b>Uses</b>Sections: One function: tokens in, probabilities out &#183; The generation loop &#183; Parameters: the numbers that were learned &#183; Training vs inference, from 10,000 feet &#183; Why predicting the next token is so powerful</span>
+</div>
+
+<p>This chapter makes three claims you can check with your own hands. A model is code plus a pile of learned numbers. The code computes one function <var>f</var> from tokens to 128,256 probabilities. Text comes from calling <var>f</var> in a loop. In this project you build each piece yourself around the real Llama&#160;3.1&#160;8B files. Then you put them to a use that tolerates no hand-waving: <code>llmzip</code>, a lossless compressor that stores each token of a text in about &#8722;log<sub>2</sub>&#160;<var>p</var> bits, exactly as <em>Prediction is compression</em> describes.</p>
+
+<p>The compressor is the strictest exam this chapter can get. Its decompressor is your generation loop with the sampler swapped for an arithmetic decoder: the compressed file is nothing but the record of which token was chosen at each step. It only works if the decoder sees the very same probabilities, bit for bit, that the encoder saw. So you will learn exactly how deterministic <var>f</var> is, and where floating-point rounding breaks that. And the output size is a direct measurement of how well 16&#160;GB of learned numbers predict text.</p>
+
+<p>You use Hugging Face <code>transformers</code> for the inside of <var>f</var>; writing the forward pass yourself is the <a href="06-transformer.html">Chapter&#160;6</a> project (if you build it later, swap it in: llmzip is a ruthless bit-exactness test). Everything around it, from the bytes on disk to the bits in the output file, is yours.</p>
+
+<h3>The deliverable</h3>
+<ul>
+  <li><code>st_reader.py</code> and <code>census.py</code>: a safetensors parser that never imports <code>safetensors</code>, and a census that rebuilds Figure&#160;1.5 from the raw bytes.</li>
+  <li><code>fn.py</code>: <code>load_model()</code>, which builds the architecture from <code>config.json</code> and fills it with your tensors, and <code>next_token_probs()</code>, which is <var>f</var>.</li>
+  <li><code>loop.py</code>: a hand-written <code>generate()</code> with greedy and seeded random choice, all three stop conditions, and a step-time benchmark.</li>
+  <li><code>bits.py</code>: a meter that prices every token of a text in bits, per token and per byte.</li>
+  <li><code>llmzip.py</code>: an arithmetic coder plus <code>compress</code> / <code>decompress</code> commands that restore files byte for byte.</li>
+  <li>A one-page report: your measurements next to the chapter's numbers, four plots, and the answer to "when does a 16&#160;GB compressor pay for itself?"</li>
+</ul>
+
+<h3>Setup</h3>
+<p>Accept the Llama&#160;3.1 license on its Hugging Face page, then fetch the weights. Develop every milestone on <code>Qwen/Qwen2.5-0.5B</code> (ungated, about 1&#160;GB, seconds per experiment), and run the checks on Llama&#160;3.1&#160;8B: every reference number below is for that model. Its BF16 weights take 16.06&#160;GB of VRAM, so a 24&#160;GB card works if you keep contexts to a few thousand tokens. Budget about 35&#160;GB of disk for the base and Instruct models. The <code>safetensors</code> package is only there to check your reader against.</p>
+<pre><code>pip install torch transformers accelerate safetensors numpy matplotlib pytest
+huggingface-cli login
+huggingface-cli download meta-llama/Llama-3.1-8B \
+    --include <span class="s">"*.json"</span> <span class="s">"*.safetensors"</span> --local-dir models/Llama-3.1-8B
+huggingface-cli download Qwen/Qwen2.5-0.5B --local-dir models/Qwen2.5-0.5B
+
+llmzip/
+  st_reader.py  census.py     <span class="c"># milestone 1</span>
+  fn.py                       <span class="c"># milestone 2: the function f</span>
+  loop.py                     <span class="c"># milestone 3: the generation loop</span>
+  bits.py                     <span class="c"># milestone 4: the bit meter</span>
+  llmzip.py                   <span class="c"># milestone 5: coder + CLI</span>
+  swap.py                     <span class="c"># milestone 6: random / base / instruct</span>
+  corpus/  tests/  report.md</code></pre>
+
+<h3>Milestones</h3>
+<ol class="milestones">
+  <li>
+    <div class="ms-title">Read the weights with your bare hands</div>
+    <p>Write a parser for the format in <em>A model on disk</em>: an 8-byte little-endian header length, a JSON header mapping each tensor name to its <code>dtype</code>, <code>shape</code> and <code>data_offsets</code>, then the raw numbers packed back to back. Follow <code>model.safetensors.index.json</code> to find which of the four shards holds each tensor. Map files with <code>mmap</code> and build tensors with <code>torch.frombuffer</code>, so opening 16&#160;GB costs nothing until you touch a tensor. Then write the census: group the 291 names into embedding, attention, MLP, norms and LM head by their name patterns, and print counts, bytes and percentages. Do not derive the counts from <code>config.json</code> with formulas; that is Chapter&#160;6's job. Here you count what is actually on disk.</p>
+    <pre><code><span class="c"># st_reader.py: json, mmap, struct, torch only. No `import safetensors`.</span>
+<span class="k">@dataclass</span>
+<span class="k">class</span> <span class="f">TensorInfo</span>:
+    name: str
+    dtype: str                 <span class="c"># "BF16", "F32", ...</span>
+    shape: tuple[int, ...]
+    path: Path
+    start: int                 <span class="c"># absolute byte range in the file</span>
+    end: int
+
+<span class="k">def</span> <span class="f">read_header</span>(path: Path) -&gt; dict[str, TensorInfo]: ...
+<span class="k">def</span> <span class="f">open_model</span>(model_dir: Path) -&gt; dict[str, TensorInfo]: ...   <span class="c"># one file or a sharded index</span>
+<span class="k">def</span> <span class="f">load_tensor</span>(info: TensorInfo) -&gt; torch.Tensor: ...         <span class="c"># mmap-backed, no full read</span></code></pre>
+    <p class="check">291 tensors, 8,030,261,248 parameters and 16,060,522,496 data bytes, equal to <code>total_size</code> in the index file. Each shard's size is exactly 8 + header + data, and the byte ranges tile the data section with no gaps (the format forbids holes). The split is 525,336,576 (embedding) / 1,342,177,280 (attention) / 5,637,144,576 (MLP) / 266,240 (norms) / 525,336,576 (LM head): 6.5 / 16.7 / 70.2 / 0.003 / 6.5%. Row 0 of <code>model.layers.0.self_attn.q_proj.weight</code> starts +0.0053, &#8722;0.0291, &#8722;0.0058, as in Figure&#160;1.4. Every tensor is <code>torch.equal</code> to what <code>safetensors.safe_open(...).get_tensor()</code> returns.</p>
+  </li>
+  <li>
+    <div class="ms-title">Wrap the numbers as the function <var>f</var></div>
+    <p>Build the architecture from <code>config.json</code> alone with <code>AutoModelForCausalLM.from_config</code>: this is the "few hundred lines of code". Fill it from your reader with <code>load_state_dict(strict=True)</code>. That one call is the chapter's Intuition box made literal: an interpreter, and a 16&#160;GB program loaded into it. Wrap the result as <code>next_token_probs</code>: token IDs in, 128,256 probabilities out, with the softmax taken in float32 over the last position's logits. Test the three properties from <em>One function: tokens in, probabilities out</em>: it is a distribution, it is deterministic, it is stateless. Then count its cost. Run a 128-token forward pass (logits for every position, the default) inside <code>torch.utils.flop_counter.FlopCounterMode</code>, with the model loaded using <code>attn_implementation="eager"</code> so every matmul is visible to the counter.</p>
+    <pre><code><span class="c"># fn.py</span>
+<span class="k">def</span> <span class="f">load_model</span>(model_dir: Path, device=<span class="s">"cuda"</span>) -&gt; torch.nn.Module:
+    <span class="s">"""Code from config.json, numbers from st_reader. No from_pretrained."""</span>
+
+<span class="k">@torch.inference_mode</span>()
+<span class="k">def</span> <span class="f">next_token_probs</span>(model, ids: list[int]) -&gt; torch.Tensor:
+    <span class="s">"""f(x_1..x_n): shape [V], float32, sums to 1."""</span></code></pre>
+    <p class="check">Zero missing and zero unexpected keys, and your model's logits are bit-identical to <code>from_pretrained</code>'s on the same input. <code>"The cat sat on the"</code> tokenizes to <code>[128000, 791, 8415, 7731, 389, 279]</code> and <var>f</var> reproduces Figure&#160;1.1: ID 5634 (<span class="tok">&#9251;mat</span>) at 75.5% &#177; 1 point, the next four near 0.7&#8211;0.9%, about 21% left in the tail. Two calls return bit-identical vectors. The FLOP counter lands within 1% of 128 &#215; 2 &#215; (<var>N</var> &#8722; 525,336,576) &#8776; 1.92&#160;TFLOP. That is 15.0&#160;GFLOP per token, not the chapter's 16, because the embedding is a table lookup with no multiplications; the small excess is attention's <var>n</var><sup>2</sup> term (<a href="05-attention.html">Chapter&#160;5</a>).</p>
+  </li>
+  <li>
+    <div class="ms-title">The generation loop, by hand</div>
+    <p>Implement the five steps of <em>The generation loop</em> around your <var>f</var>. No cache: every step calls <var>f</var> on the whole context, exactly like the chapter's six-line <code>generate</code>. Support two ways to choose: greedy (argmax), and a plain draw in proportion to the probabilities with an explicitly seeded <code>torch.Generator</code>. Leave temperature, top-<var>p</var> and the rest to <a href="14-sampling.html">Chapter&#160;14</a>. Support all three stop conditions: an end token (read the IDs from <code>generation_config.json</code>), <code>max_tokens</code>, and stop strings. Stream the text as it grows. Then benchmark: time one step at context lengths 8, 16, &#8230;, 4,096 and plot it. Compute your GPU's ceiling from <em>Low-level view: the loop is serial</em>: memory bandwidth &#247; 16.06&#160;GB, which is 4.8&#160;ms per token, or 209 tokens/s, on an H100.</p>
+    <pre><code><span class="k">def</span> <span class="f">generate</span>(model, ids: list[int], max_tokens: int, *, greedy: bool = <span class="k">True</span>,
+             rng: torch.Generator | <span class="k">None</span> = <span class="k">None</span>,
+             stop_ids: frozenset[int] = frozenset(),
+             stop_strings: tuple[str, ...] = ()) -&gt; Iterator[int]:
+    <span class="s">"""Predict, sample, append, repeat, stop."""</span></code></pre>
+    <p class="check">Teacher-force the path of Figure&#160;1.3 (<span class="tok">&#9251;mat</span> <span class="tok">.</span> <span class="tok">&#9251;The</span> <span class="tok">&#9251;dog</span> <span class="tok">&#9251;sat</span> <span class="tok">&#9251;on</span> <span class="tok">&#9251;the</span> <span class="tok">&#9251;log</span>) and print each chosen token's probability: 75.5, 12.0, 38.9, 37.4, 50.8, 93.7, 99.2, 30.3%, each within about 1 point. Greedy output for 64 tokens matches <code>model.generate(do_sample=False)</code> token for token on at least 9 of 10 prompts; at any divergence the top two probabilities are nearly tied (rounding, not a bug; say why in your report). 10,000 seeded draws from the step-1 distribution pick <span class="tok">&#9251;mat</span> 75.5% &#177; 1 point of the time. Your step time never beats the bandwidth ceiling. The curve is flat for short contexts, then climbs roughly linearly: that is the cost of recomputing the whole context every step, which the KV cache of <a href="12-kv-cache.html">Chapter&#160;12</a> removes.</p>
+  </li>
+  <li>
+    <div class="ms-title">A bit meter: what every token costs</div>
+    <p>One forward pass over a whole text gives the distribution at every position at once. This is how training scores text too (<em>Training vs inference, from 10,000 feet</em>). Use it to price each actual token at &#8722;log<sub>2</sub>&#160;<var>p</var>, and report bits per token and bits per byte of UTF-8. Bits per byte is the fair unit because it does not depend on the tokenizer. Build a corpus of 10&#8211;50&#160;KB files: fresh English prose written after December 2023, Llama&#160;3.1's knowledge cutoff (your own writing is ideal); a famous text the model has surely seen many times; some of your own source code; a non-English text; and 10,000 random hex digits from <code>secrets.token_hex</code>. Score long files in windows of at most 2,048 tokens, each starting with the begin-of-text token, and plot the average cost by position within the window.</p>
+    <pre><code><span class="k">def</span> <span class="f">token_bits</span>(model, ids: list[int]) -&gt; np.ndarray:
+    <span class="s">"""bits[t-1] = -log2 p(ids[t] | ids[:t]) for t = 1..n-1, from ONE forward pass."""</span></code></pre>
+    <p class="check"><code>"The cat sat on the mat."</code> costs 5.3, 13.7, 8.7, 0.5, 0.2, 0.4, 3.1 bits token by token, as in Figure&#160;1.9 (each within about 0.3), and 31.9 &#177; 1 bits in total against 184 bits of UTF-8. Random hex costs at least 4.0 bits per digit, its true entropy; anything lower means you are scoring the wrong token. The famous text is far cheaper than the fresh prose: that gap is memorization. Average cost falls with position in the window: context makes prediction cheaper. For a few prefixes, compare this meter with milestone 2's <var>f</var> called on the prefix alone. They agree to a few hundredths of a bit but are <em>not</em> bit-identical. Remember that for the next milestone.</p>
+  </li>
+  <li>
+    <div class="ms-title">llmzip: turn the loop into a compressor</div>
+    <p>An arithmetic coder turns a sequence of choices, each a sub-interval of a known distribution, into one binary fraction, spending about &#8722;log<sub>2</sub>&#160;<var>p</var> bits per choice. Write one with integer arithmetic (Python's unbounded ints make this pleasant) and test it alone first, on symbols from a fixed toy distribution. Then connect it to <var>f</var>. The encoder walks the text's tokens and encodes each one with <var>f</var>'s distribution at that step. The decoder is your milestone 3 loop with the sampler replaced by <code>Decoder.target</code>: ask <var>f</var> for the distribution, read which token the bits point at, append it, repeat, and stop after the token count stored in the header. Both sides must turn probabilities into integer counts in exactly the same way. Use fixed-size windows (512 tokens is a good start) so each step's context stays bounded, and define a small file format: magic bytes, model name, window size, token count, payload.</p>
+    <pre><code><span class="k">def</span> <span class="f">quantize</span>(probs: torch.Tensor, total_bits: int = <span class="n">30</span>) -&gt; torch.Tensor:
+    <span class="s">"""float32 [V] -&gt; int64 CDF [V+1]; every token gets &gt;= 1 count. Reproducible."""</span>
+
+<span class="k">class</span> <span class="f">Encoder</span>:
+    <span class="k">def</span> <span class="f">encode</span>(self, lo: int, hi: int, total: int) -&gt; <span class="k">None</span>: ...
+    <span class="k">def</span> <span class="f">finish</span>(self) -&gt; bytes: ...
+
+<span class="k">class</span> <span class="f">Decoder</span>:
+    <span class="k">def</span> <span class="f">__init__</span>(self, data: bytes): ...
+    <span class="k">def</span> <span class="f">target</span>(self, total: int) -&gt; int: ...         <span class="c"># the count the code points at</span>
+    <span class="k">def</span> <span class="f">consume</span>(self, lo: int, hi: int, total: int) -&gt; <span class="k">None</span>: ...</code></pre>
+    <p class="check">Alone, the coder packs 100,000 symbols drawn with probabilities (1/2, 1/4, 1/8, 1/8) into the sample's own &#8721;&#8722;log<sub>2</sub>&#160;<var>p</var> plus a few bytes: about 21,875 bytes, 1.75 bits per symbol. With <var>f</var>, every corpus file survives <code>compress</code> then <code>decompress</code> byte for byte (<code>cmp</code> is silent), and the payload is at most 1% plus a few bytes above the ideal &#8721;&#8722;log<sub>2</sub>&#160;<var>p</var> along the same path. The running sentence, 23 bytes, becomes about 4&#8211;5 bytes of payload. In your table against <code>zlib</code> (level 9), <code>bz2</code> (level 9) and <code>lzma</code> (preset 9 | <code>PRESET_EXTREME</code>), llmzip is at least 2&#215; smaller than the best of them on fresh prose, and far better still on the famous text. On random hex nothing beats 4 bits per digit (50%), and llmzip ties or loses to <code>lzma</code>: there is nothing to predict.</p>
+  </li>
+  <li>
+    <div class="ms-title">Same code, different numbers</div>
+    <p>The chapter claims that changing the weights turns the same code into a different model, and that training is what moves the numbers from noise to knowledge. Test both. First, skip loading: <code>from_config</code> alone gives you the architecture filled with random numbers. Generate from it and score your fresh prose. Second, download <code>meta-llama/Llama-3.1-8B-Instruct</code>, open it with your reader and diff its header against the base model's. Compute the relative change &#8214;<var>W</var><sub>instruct</sub> &#8722; <var>W</var><sub>base</sub>&#8214; / &#8214;<var>W</var><sub>base</sub>&#8214; for every tensor and plot it by layer for each tensor kind: this is how far post-training moved the numbers (<em>The life of a model</em>). Load the Instruct numbers into the same code, format one question with <code>tokenizer.apply_chat_template</code>, and run base and Instruct on the identical token sequence with your loop. Third, settle the caveat under Figure&#160;1.9: the comparison ignores the size of the model. Count the 16.06&#160;GB of weights as part of llmzip's output (Del&#233;tang et al. call this the adjusted compression rate) and compute how much fresh text you would need before llmzip beats <code>lzma</code> overall.</p>
+    <p class="check">The random model writes gibberish and costs about 17 bits per token or more: log<sub>2</sub>&#160;128,256 &#8776; 16.97, no better than a uniform guess. The trained base model costs a small fraction of that on the same text; the difference is what 1.46 million GPU-hours bought. The Instruct header has the same 291 names, shapes and dtypes as the base header: only the numbers differ. Instruct answers and stops at <code>&lt;|eot_id|&gt;</code> (128009); base behaves like a document completer. Your break-even size comes out far beyond any file you own: tens of gigabytes of text or more.</p>
+  </li>
+</ol>
+
+<h3>Done when</h3>
+<ul class="checklist">
+  <li><code>census.py</code> prints 291 tensors, 8,030,261,248 parameters, 16,060,522,496 bytes and the five-way split of Figure&#160;1.5 from raw bytes, and every tensor is bit-identical to the <code>safetensors</code> library's.</li>
+  <li>The model assembled from <code>config.json</code> plus your reader gives logits bit-identical to <code>from_pretrained</code>, and <var>f</var> reproduces Figures&#160;1.1 and 1.3 within 1 point.</li>
+  <li>Your loop matches <code>generate(do_sample=False)</code> on at least 9 of 10 prompts (divergences only at near-ties), its seeded draws match the probabilities, and its step-time plot sits above your GPU's bandwidth ceiling.</li>
+  <li>The bit meter reproduces Figure&#160;1.9 (31.9 &#177; 1 bits) and never prices random hex below 4 bits per digit.</li>
+  <li><code>llmzip</code> restores every corpus file byte for byte, stays within 1% (plus a few bytes) of the ideal code length, and beats the best classic compressor by at least 2&#215; on fresh prose.</li>
+  <li>Your report holds the census table, FLOPs per token, the step-time plot, the bits-by-position plot, the compression table, the random / base / Instruct comparison with the per-tensor change plot, and the break-even size.</li>
+</ul>
+
+<details class="deep-dive"><summary>Hints (open only when stuck)</summary>
+<ul>
+  <li><code>data_offsets</code> count from the start of the data section (byte 8 + header length), not from the start of the file. The JSON may be padded with trailing spaces. Skip the <code>__metadata__</code> key: it is not a tensor.</li>
+  <li>NumPy has no bfloat16, but <code>torch.frombuffer(buf, dtype=torch.bfloat16, count=..., offset=...)</code> reads BF16 directly (how BF16 is laid out is <a href="02-numbers-and-hardware.html">Chapter&#160;2</a>'s business). A read-only <code>mmap</code> triggers a non-writable-buffer warning; it is harmless here, or map with <code>mmap.ACCESS_COPY</code>.</li>
+  <li>A skeleton built on the <code>meta</code> device leaves non-persistent buffers, such as the rotary <code>inv_freq</code>, unmaterialized, because they are not in the file. The simplest route is to build the skeleton directly on the GPU in BF16, then copy your tensors in. As a bonus, the untouched skeleton is milestone 6's random model.</li>
+  <li>Small models such as Qwen2.5-0.5B tie the LM head to the embedding (<code>tie_word_embeddings</code> in <code>config.json</code>), so the file has no <code>lm_head.weight</code>. Accept exactly that one missing key and tie the weights. Qwen's tokenizer also adds no begin-of-text token: prepend <code>&lt;|endoftext|&gt;</code> yourself so the first real token has a context.</li>
+  <li>Llama&#160;3's tokenizer prepends <code>&lt;|begin_of_text|&gt;</code> (128000) by default, and the chapter's numbers include it. If <span class="tok">&#9251;mat</span> comes out far from 75.5%, check <code>ids[0]</code>.</li>
+  <li>The logits at position <var>t</var> predict token <var>t</var>+1: score <code>log_softmax(logits[:-1])</code> against <code>ids[1:]</code>.</li>
+  <li>Time GPU work inside <code>torch.inference_mode()</code>, after a few warm-up steps, with <code>torch.cuda.synchronize()</code> before every clock read. For long contexts, ask for last-position logits only (recent <code>transformers</code> versions accept <code>logits_to_keep=1</code>): full float32 logits at <var>n</var> = 4,096 are 2.1&#160;GB.</li>
+  <li>A stop string can be split across two tokens. Check the tail of the decoded text after every step, not individual tokens.</li>
+  <li>If decompressed text turns to garbage after some token, encoder and decoder computed different probabilities at that step. Make the encoder call <var>f</var> on exactly the prefixes the decoder will, with the same shapes, dtype and device. Never encode with milestone 4's one-pass probabilities. Set <code>torch.use_deterministic_algorithms(True)</code> (with <code>CUBLAS_WORKSPACE_CONFIG=:4096:8</code>), log the first mismatching position, and compare the two CDFs there.</li>
+  <li>Quantize in float64 then int64: counts = floor(<var>p</var> &#183; (<var>T</var> &#8722; <var>V</var>)) + 1, cumulative sum, and use the actual final sum as the total. Keep the coder's state at about 62 bits and the total at or below 2<sup>30</sup>, so every token's interval stays non-empty after renormalizing.</li>
+  <li>Before blaming the coder, check that <code>tokenizer.decode(ids, clean_up_tokenization_spaces=False)</code> returns each corpus file exactly (minus the begin-of-text token). A lossy tokenizer round trip makes the whole compressor lossy.</li>
+  <li>Compression with the 8B model is slow: a window of <var>W</var> tokens costs <var>W</var> forward passes on both sides. Keep 8B test files near 10&#160;KB. If you want speed, the library's built-in cache (<code>use_cache=True</code>, <code>past_key_values</code>) is allowed as long as encoder and decoder make identical calls. Building a cache yourself is the Chapter&#160;12 project.</li>
+</ul>
+</details>
+
+<h3>Stretch goals</h3>
+<ul>
+  <li><strong>Bits vs size.</strong> Price your fresh prose with <code>HuggingFaceTB/SmolLM2-135M</code>, <code>-360M</code> and <code>-1.7B</code>, <code>Qwen/Qwen2.5-0.5B</code>, <code>-1.5B</code>, <code>-3B</code> and <code>-7B</code>, and Llama&#160;3.1&#160;8B. Plot bits per byte against parameter count on a log axis. Different families and data mean you get a trend, not a law; <a href="08-pretraining.html">Chapter&#160;8</a> has the real scaling laws.</li>
+  <li><strong>Check the training row.</strong> Run <code>FlopCounterMode</code> over a forward plus backward pass of a small model. The ratio to the forward pass alone should be close to 3, the 6<var>N</var> vs 2<var>N</var> of the <em>Worked numbers</em> box.</li>
+  <li><strong>The decoder is a sampler.</strong> Feed the decoder random bytes instead of a compressed file. It writes text, drawing each token in proportion to its probability. Check its statistics against milestone 3's sampler, and explain why the two must agree.</li>
+  <li><strong>Portability.</strong> Compress on one GPU model and decompress on another, or on the CPU. Does it survive? Explain the result with "deterministic up to floating-point rounding", and estimate what a portable llmzip would cost.</li>
+</ul>
 </section>
 
 <section>

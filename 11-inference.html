@@ -97,6 +97,7 @@
     <li>The roofline applied to LLMs: decode does about <var>B</var> FLOPs per byte, so you need a batch of hundreds before the GPU's compute matters.</li>
     <li>Latency metrics (TTFT, TPOT, E2E, goodput) and the one formula that predicts decode speed: <b>bandwidth &#247; bytes read per token</b>.</li>
     <li>The full VRAM budget, what happens when a model does not fit (CPU offload, mmap, unified memory), multi-GPU splits, cold starts, and why output tokens cost more than input tokens.</li>
+    <li><strong>Build it:</strong> a predict-then-measure profiler that checks this chapter's formulas (decode bound, roofline knee, TTFT/TPOT, batching curve, VRAM edge, offload, cold start) against your own GPU and Llama&#160;3.1&#160;8B.</li>
   </ul>
 </div>
 
@@ -1188,6 +1189,179 @@
 <aside class="callout key"><div class="callout-title">Key takeaway</div>
 <p>Three numbers answer almost every inference question: <b>bytes of weights</b> (does it fit, and how fast can decode be: bandwidth &#247; bytes), <b>KV bytes per token</b> (how much context and concurrency fit), and <b>FLOP/s</b> (how fast prefill and large batches run). Everything else is efficiency.</p>
 </aside>
+</section>
+
+<section class="build">
+<h2><span class="build-tag">Build it</span>A speed-limit profiler: predict, then measure, prefill, decode and memory on your own GPU</h2>
+
+<div class="build-meta">
+  <span><b>Time</b>16&#8211;24 hours</span>
+  <span><b>Level</b>Intermediate&#8211;advanced</span>
+  <span><b>Stack</b>Python, PyTorch, transformers, accelerate, matplotlib; llama.cpp and (optionally) vLLM as reference engines</span>
+  <span><b>Hardware</b>1 NVIDIA GPU, 24 GB+ (80 GB reproduces the H100 numbers one to one); 32 GB+ RAM; ~50 GB disk</span>
+  <span><b>Uses</b>Sections: Prefill and decode, One decode step byte by byte, The roofline applied to LLMs, Latency: TTFT and TPOT, The decode speed limit, Batching, The VRAM budget, When the model does not fit, Loading a model: cold starts</span>
+</div>
+
+<p>This chapter makes a strong claim: you can predict an LLM's speed and memory with arithmetic, before you run it. Bytes of weights, KV bytes per token and FLOP/s, and the rest is efficiency. In this project you test that claim on your own machine. You build <code>speedlimit</code>, a small Python package with two halves. The first is a paper model that computes every number in this chapter from a <code>config.json</code> and a datasheet. The second is a set of benchmarks that measure the same quantities on a real GPU, from one 33.5&#160;MB GEMV up to Llama&#160;3.1&#160;8B decoding static batches until memory runs out.</p>
+
+<p>Every section above ends in a formula and an H100 number. You turn each one into a ratio: measured &#247; predicted. A ratio of 0.7 is your MBU, and the formula held. A ratio of 0.3 or 1.6 means you found something the formula ignores: the L2 cache, Python launch overhead, a cache that copies itself every step, an attention path that expands 8 KV heads to 32. Explaining those ratios is where the chapter stops being something you read and becomes something you know.</p>
+
+<p>At the end you have a calibrated &#8220;will it fit, and how fast?&#8221; tool for your own hardware, a folder of plots that reproduce Figures 11.4, 11.6 and 11.9 from your own measurements, and a one-page report with every claim of this chapter next to your numbers.</p>
+
+<h3>The deliverable</h3>
+<ul>
+  <li><code>speedlimit/predict.py</code> + <code>tests/test_predict.py</code>: the paper model, with this chapter's numbers as unit tests.</li>
+  <li><code>speedlimit/calibrate.py</code>: writes <code>machine.json</code> with your measured copy bandwidth, BF16 GEMM FLOP/s, host-to-device bandwidth (pinned and pageable) and disk read speed.</li>
+  <li><code>bench/</code>: <code>decode_step.py</code> (the byte-by-byte table, measured), <code>roofline.py</code>, <code>e2e.py</code> (TTFT, TPOT, MBU), <code>batching.py</code> (step-time fit and OOM edge), <code>offload.py</code> and <code>coldstart.py</code>.</li>
+  <li><code>results/</code>: CSVs, the plots, and <code>REPORT.md</code>: one row per claim in the table below, with predicted, measured, ratio, and one line of explanation for every ratio outside 0.6&#8211;1.0.</li>
+</ul>
+
+<h3>The claims you will check</h3>
+<div class="table-wrap">
+<table class="data">
+  <tr><th>Claim (Llama&#160;3.1&#160;8B, BF16)</th><th>Section</th><th class="num">Chapter's H100 number</th><th>What you measure</th></tr>
+  <tr><td>Bytes and time of one decode step</td><td>One decode step, byte by byte</td><td class="num">436.2&#160;MB/layer, 15.01&#160;GB, 4.48&#160;ms</td><td>a synthetic replay, kernel by kernel</td></tr>
+  <tr><td>Decode needs a big batch to hit compute</td><td>The roofline, applied to LLMs</td><td class="num"><var>B</var>* = 295 (4090: 164)</td><td>the knee of time vs tokens per pass</td></tr>
+  <tr><td>The KV cache does not batch</td><td>The catch: the KV cache does not batch</td><td class="num">&#8776; 4 FLOPs/byte</td><td>decode attention time vs <var>B</var></td></tr>
+  <tr><td>Prefill is compute-bound</td><td>Latency: TTFT, TPOT</td><td class="num">29.0&#160;TFLOP, 59&#160;ms for 2,000 tokens</td><td>TTFT and MFU vs prompt length</td></tr>
+  <tr><td>Decode speed limit and MBU</td><td>The decode speed limit</td><td class="num">223 bound, ~152 measured; 173 at 32K</td><td>TPOT vs context, eager vs compiled</td></tr>
+  <tr><td>One weight read, many tokens</td><td>Batching</td><td class="num">156 &#8594; 6,535 tok/s (<var>B</var> 1 &#8594; 64)</td><td>step time <var>T</var>(<var>B</var>), trade-off curve</td></tr>
+  <tr><td>Everything left over becomes KV</td><td>The VRAM budget</td><td class="num">14.96&#160;GiB weights, &#8776;453,000 KV tokens</td><td>a memory ledger and the real OOM edge</td></tr>
+  <tr><td>The slow tier dominates</td><td>Layer offload in llama.cpp</td><td class="num">half on a 10&#215; GPU &#8594; only 1.75&#215;</td><td>an <code>-ngl</code> sweep</td></tr>
+  <tr><td>The slowest hop sets the cold start</td><td>Loading a model: cold starts</td><td class="num">bytes &#247; slowest link</td><td>a per-hop load ledger</td></tr>
+</table>
+</div>
+
+<h3>Setup</h3>
+<p>Use <code>meta-llama/Llama-3.1-8B</code> (accept the license on its model page first). Its 16.06&#160;GB fits a 24&#160;GB card with a modest KV budget. If you have no license or only 24&#160;GB, run Milestones 4 and 5 on <code>Qwen/Qwen2.5-1.5B</code> as well: it is ungated, ties its embeddings (so it exercises the other branch of the &#8220;223 or 209?&#8221; rule), and, being small, it shows the low MBU that the chapter predicts for small models on fast GPUs. Milestones 2 and 3 need no download at all: decode speed depends on shapes and bytes, not on the values of the weights.</p>
+<pre><code>pip install torch transformers accelerate matplotlib numpy pytest gguf
+pip install vllm                                  <span class="c"># optional reference engine (M4, M5)</span>
+hf download meta-llama/Llama-3.1-8B --local-dir models/llama-3.1-8b
+git clone https://github.com/ggml-org/llama.cpp   <span class="c"># M6: build with -DGGML_CUDA=ON</span>
+
+speedlimit/
+  speedlimit/predict.py  calibrate.py  timing.py  configs/*.json
+  bench/decode_step.py  roofline.py  e2e.py  batching.py  offload.py  coldstart.py
+  tests/test_predict.py
+  results/                                        <span class="c"># CSV, PNG, REPORT.md</span></code></pre>
+
+<h3>Milestones</h3>
+<ol class="milestones">
+  <li>
+    <div class="ms-title">The paper model: this chapter as a test suite</div>
+    <p>Write <code>predict.py</code>: pure arithmetic from a Hugging Face <code>config.json</code> and a hardware spec, no GPU. It must produce the per-kernel byte table from <b>One decode step, byte by byte</b>; <var>W</var><sub>read</sub> with the embedding rule from &#8220;223 or 209?&#8221; (excluded when untied, read in full as the LM head when tied); <var>s</var><sub>kv</sub> = 2&#183;<var>L</var>&#183;<var>h</var><sub>kv</sub>&#183;<var>d</var><sub>h</sub>&#183;bytes; prefill FLOPs (weights plus the causal attention term); the decode bound with context and a tensor-parallel split; <var>B</var>* = ridge &#215; <var>b</var>/2; the step-time model <var>T</var>(<var>B</var>) from <b>Batching</b>; and the KV budget from <b>How vLLM sizes it</b>. Everything later is &#8220;measured &#247; predicted&#8221;, so this file is your yardstick. Support q/k/v biases (Qwen2.5 has them) and tied embeddings.</p>
+    <pre><code><span class="k">@dataclass</span>
+<span class="k">class</span> <span class="f">Model</span>:                       <span class="c"># every field comes from config.json</span>
+    L: int; d: int; d_ff: int; h: int; h_kv: int; d_h: int; V: int
+    tied: bool; qkv_bias: bool = False; b_w: float = 2.0; b_kv: float = 2.0
+
+<span class="k">def</span> <span class="f">layer_bytes</span>(m: Model) -&gt; dict[str, int]: ...   <span class="c"># one entry per kernel</span>
+<span class="k">def</span> <span class="f">w_read</span>(m: Model, strict: bool = True) -&gt; int: ...
+<span class="k">def</span> <span class="f">s_kv</span>(m: Model) -&gt; int: ...
+<span class="k">def</span> <span class="f">decode_tok_s</span>(m, hw, ctx=<span class="n">0</span>, tp=<span class="n">1</span>, eta=<span class="n">1.0</span>) -&gt; float: ...
+<span class="k">def</span> <span class="f">prefill_flops</span>(m, n: int) -&gt; float: ...
+<span class="k">def</span> <span class="f">step_time</span>(m, hw, B, c, eta, mfu, t_fixed) -&gt; float: ...
+<span class="k">def</span> <span class="f">kv_tokens</span>(m, total, util, act, runtime) -&gt; int: ...
+
+<span class="k">def</span> <span class="f">test_one_decode_step</span>():
+    m, h100 = Model.from_config(<span class="s">"configs/llama-3.1-8b.json"</span>), HW(<span class="s">"H100"</span>, <span class="n">3.35e12</span>, <span class="n">989e12</span>)
+    <span class="k">assert</span> sum(layer_bytes(m).values()) == approx(<span class="n">436.2e6</span>, rel=<span class="n">1e-3</span>)
+    <span class="k">assert</span> decode_tok_s(m, h100) == approx(<span class="n">223</span>, abs=<span class="n">1</span>)
+    <span class="k">assert</span> decode_tok_s(m, h100, ctx=<span class="n">32768</span>) == approx(<span class="n">173</span>, abs=<span class="n">1</span>)</code></pre>
+    <p class="check">At least 12 chapter numbers pass as tests: 436.2&#160;MB per layer, 15.01&#160;GB and 223&#160;tok/s (209 with <code>strict=False</code>), 128&#160;KiB per token, 29.0&#160;TFLOP and 59&#160;ms for a 2,000-token prompt at 50% MFU, 173&#160;tok/s at 32K context, <var>B</var>* = 295 (H100) and 164 (4090), 48&#160;tok/s for the 70B with TP&#160;=&#160;2, 42&#160;FLOPs/byte for <var>B</var>&#160;=&#160;128 &#215; 2,048 tokens, 156 / 6,535 / 12,768&#160;tok/s for the batching model at <var>B</var> = 1 / 64 / 256, and about 453,000 KV tokens (55 sequences at 8K) on an H100. For Qwen2.5-1.5B, <var>w_read</var> equals the full 3.09&#160;GB of weights, because the tied table is read in full.</p>
+  </li>
+  <li>
+    <div class="ms-title">Calibrate your roofs, then replay one decode step kernel by kernel</div>
+    <p>First measure the two roofs of your own GPU: copy bandwidth (a 4&#160;GiB buffer or larger; a copy reads <i>and</i> writes) and BF16 GEMM FLOP/s (8,192&#179;). Save them to <code>machine.json</code>; every later ratio uses them alongside the datasheet values. Then build a synthetic Llama&#160;3.1&#160;8B: 32 layers of random BF16 matrices with the real shapes, plus the LM head, about 15&#160;GB in total. Time each kernel of the table in <b>One decode step, byte by byte</b> as an <var>M</var>&#160;=&#160;1 GEMV, then the whole step back to back. Print the chapter's table with three new columns: measured &#181;s, achieved GB/s and per-kernel MBU.</p>
+    <pre><code><span class="k">def</span> <span class="f">time_cuda</span>(fn, iters=<span class="n">50</span>, warmup=<span class="n">5</span>) -&gt; float:
+    <span class="s">"""Median seconds per call, from torch.cuda.Event pairs."""</span>
+
+SHAPES = {<span class="s">"qkv"</span>: (<span class="n">6144</span>, <span class="n">4096</span>), <span class="s">"o"</span>: (<span class="n">4096</span>, <span class="n">4096</span>),       <span class="c"># (out, in), like nn.Linear</span>
+          <span class="s">"gate_up"</span>: (<span class="n">28672</span>, <span class="n">4096</span>), <span class="s">"down"</span>: (<span class="n">4096</span>, <span class="n">14336</span>)}
+layers = [{k: torch.randn(o, i, dtype=torch.bfloat16, device=<span class="s">"cuda"</span>)
+           <span class="k">for</span> k, (o, i) <span class="k">in</span> SHAPES.items()} <span class="k">for</span> _ <span class="k">in</span> range(<span class="n">32</span>)]
+lm_head = torch.randn(<span class="n">128256</span>, <span class="n">4096</span>, dtype=torch.bfloat16, device=<span class="s">"cuda"</span>)</code></pre>
+    <p class="check">The whole step lands within 15% of <var>W</var><sub>read</sub> &#247; <i>your measured</i> copy bandwidth (the datasheet bound on an H100 is 4.48&#160;ms; on a 4090, 14.9&#160;ms). Gate+up (234.9&#160;MB) reaches at least 85% of your copy bandwidth, while the 33.6&#160;MB output projection is visibly lower: the &#8220;kernels that cannot saturate HBM&#8221; effect from <b>Measured reality</b>. Achieved FLOP/s for the step is below 1% of your GEMM number. If any kernel reports more than your copy bandwidth, you are measuring the L2 cache, not HBM.</p>
+  </li>
+  <li>
+    <div class="ms-title">Sweep the roofline: from one token per pass to 8,192</div>
+    <p>Reuse the synthetic layers. For each shape, time <var>X</var>[<var>M</var>&#215;<var>k</var>]&#183;<var>W</var><sup>T</sup> for <var>M</var> = 1, 2, 4, &#8230;, 8,192. <var>M</var>&#160;=&#160;1 is decode at batch 1, <var>M</var>&#160;=&#160;<var>B</var> is batched decode, <var>M</var>&#160;=&#160;<var>n</var> is a prefill chunk: one kernel, three regimes (<b>Prefill and decode: the same layers, two different shapes</b>). Make two plots: time vs <var>M</var> (log-log), and achieved FLOP/s vs arithmetic intensity on a roofline drawn with your measured roofs, like Figure 11.4. Then do <b>The catch</b>: time decode attention for <var>B</var> sequences with <var>c</var> cached tokens each. Group the 32 query heads as [<var>B</var>, 8, 4, 128] so each K,V head is read once and serves 4 query heads, and sweep <var>B</var>.</p>
+    <pre><code>cyc = itertools.cycle(layers)                      <span class="c"># a different layer every call</span>
+<span class="k">for</span> name, (n_out, k) <span class="k">in</span> SHAPES.items():
+    <span class="k">for</span> M <span class="k">in</span> [<span class="n">2</span>**i <span class="k">for</span> i <span class="k">in</span> range(<span class="n">14</span>)]:
+        x = torch.randn(M, k, dtype=torch.bfloat16, device=<span class="s">"cuda"</span>)
+        t = time_cuda(<span class="k">lambda</span>: x @ next(cyc)[name].T)
+        flops, nbytes = <span class="n">2</span>*M*k*n_out, <span class="n">2</span>*(k*n_out + M*k + M*n_out)
+        rows.append((name, M, t, flops / t, flops / nbytes))
+
+<span class="k">def</span> <span class="f">decode_attention</span>(q, K, V): ...   <span class="c"># q [B,32,1,128]; K,V [B,8,c,128]; 2 matmuls + softmax</span></code></pre>
+    <p class="check">The time curve is flat (within ~30%) up to <var>M</var>&#160;&#8776;&#160;32&#8211;64, then turns linear. The knee, where the flat and linear asymptotes meet, lands within 2&#215; of ridge &#215; <var>b</var>/2 computed from your own roofs (about 295 on an H100 and 164 on a 4090 with datasheet roofs). Decode attention time grows linearly with <var>B</var> (constant time per sequence once <var>B</var>&#160;&#8805;&#160;8), and its achieved FLOP/s stays near 4 &#215; its achieved bandwidth: about <var>h</var>/<var>h</var><sub>kv</sub> FLOPs per byte, far under the compute roof, at every batch size.</p>
+  </li>
+  <li>
+    <div class="ms-title">The real model: TTFT, TPOT and MBU from your own loop</div>
+    <p>Load Llama&#160;3.1&#160;8B with <code>transformers</code> and write your own prefill-then-decode loop: one forward pass over the prompt, then single-token forward passes that hand the library's <code>past_key_values</code> back in, greedy argmax, one CUDA-event pair around every pass. Do not implement a KV cache; use the library's (<a href="12-kv-cache.html">Chapter 12</a> builds one). Measure three things. (a) Prefill time and MFU for prompts of 128 to 16,384 tokens. (b) TPOT at batch 1 for contexts of 256 to 32K, then fit TPOT = <var>a</var> + <var>b</var>&#183;<var>c</var> and turn the slope into bytes per cached token. (c) The same TPOT in plain eager mode and with the static-cache + <code>torch.compile(mode="reduce-overhead")</code> recipe from the transformers docs; optionally add <code>vllm bench latency --batch-size 1</code> as a reference engine. Report MBU exactly as <b>One decode step, byte by byte</b> defines it.</p>
+    <pre><code>model = AutoModelForCausalLM.from_pretrained(PATH, dtype=torch.bfloat16, device_map=<span class="s">"cuda"</span>)
+
+<span class="k">@torch.inference_mode</span>()
+<span class="k">def</span> <span class="f">generate_timed</span>(ids: torch.Tensor, n_out: int) -&gt; dict:
+    <span class="s">"""ids: [B, n] token IDs. Returns {"ttft": s, "itl": [s, ...], "tokens": [...]}.
+    The prefill pass must only compute logits for the last position."""</span>
+
+<span class="k">def</span> <span class="f">mbu</span>(tpot: float, ctx: int, m: Model, peak_bw: float) -&gt; float: ...</code></pre>
+    <p class="check">E2E = TTFT + (<var>n</var><sub>out</sub>&#160;&#8722;&#160;1)&#183;TPOT holds within 2%. Prefill MFU rises with prompt length and plateaus (expect roughly 40&#8211;70% on an H100 at <var>n</var>&#160;&#8805;&#160;2,000), and a 2,000-token prefill costs about as much as 5&#8211;20 compiled decode steps (the chapter says about 10). Eager MBU is far below compiled MBU, and a <code>torch.profiler</code> trace shows why: gaps between kernels. The compiled path (or vLLM) reaches 55&#8211;80% MBU; the chapter measured 68%. Your fitted slope, times the achieved bandwidth, gives 128&#160;KiB per cached token within 30%, or a multiple of it that you can explain.</p>
+  </li>
+  <li>
+    <div class="ms-title">Batching until memory says stop</div>
+    <p>Run <i>static</i> batches: <var>B</var> prompts of the same length <var>c</var> (random token IDs are fine; equal lengths need no padding), decoded together for 64 steps, for <var>B</var> = 1, 2, 4, &#8230; until it no longer fits. Use <var>c</var>&#160;=&#160;1,024 on 80&#160;GB, 512 on 24&#160;GB. Record the step time <var>T</var>(<var>B</var>), the aggregate throughput <var>B</var>/<var>T</var> and the per-user speed 1/<var>T</var>. Fit &#951;, MFU and <var>t</var><sub>fixed</sub> of the step-time model from <b>Batching: one weight read, many tokens</b> and plot your version of Figure 11.6: measured dots, fitted curve. All sequences start and stop together; swapping them in and out every step is continuous batching, which is <a href="15-serving.html">Chapter 15</a>'s job. Then audit <b>The VRAM budget</b>: measure the weights, the memory outside PyTorch (CUDA context, cuBLAS workspaces), the peak activations of a prefill step, and the KV. Predict the largest <var>B</var> that fits with <code>kv_tokens()</code>, then find the real OOM edge by binary search.</p>
+    <pre><code><span class="k">def</span> <span class="f">fit_step_model</span>(B: list[int], T: list[float], c: int) -&gt; tuple[float, float, float]:
+    <span class="s">"""Return (eta, mfu, t_fixed) that minimise the relative error of step_time()."""</span>
+
+free, total = torch.cuda.mem_get_info()           <span class="c"># what the driver sees</span>
+outside_torch = (total - free) - torch.cuda.memory_reserved()</code></pre>
+    <p class="check">The fitted model reproduces every measured <var>T</var>(<var>B</var>) within 10%. Step time grows less than 30% from <var>B</var>&#160;=&#160;1 to 16, and aggregate throughput at <var>B</var>&#160;=&#160;64 (or your largest <var>B</var> that fits) is at least 20&#215; that at <var>B</var>&#160;=&#160;1. Measured weights are 14.96&#160;GiB (within 1%). Your predicted OOM edge is within 10% of the real one. On an 80&#160;GB card, start vLLM with <code>gpu_memory_utilization=0.92</code> and <code>max_model_len=8192</code>: its <code>GPU KV cache size</code> and <code>Maximum concurrency</code> log lines agree with your predictor within 5% (the chapter's budget says about 453,000 tokens and 55&#215;).</p>
+  </li>
+  <li>
+    <div class="ms-title">Off the GPU: offload and cold starts</div>
+    <p><b>Offload.</b> Convert the model to GGUF and quantize it to Q4_K_M with llama.cpp's own tools, then read the exact bytes per layer from the file with the <code>gguf</code> package. Sweep the number of GPU layers with <code>llama-bench</code>. Calibrate two points (all layers on the CPU gives your effective DDR bandwidth; all on the GPU, your effective GPU bandwidth) and predict every point in between with the formula from <b>Layer offload in llama.cpp</b>. Plot it like Figure 11.9. Then load the BF16 model with <code>transformers</code> and <code>device_map="auto"</code> plus a <code>max_memory</code> limit that pushes about half the layers to the CPU. Accelerate then copies those weights to the GPU on every forward pass, which is exactly the &#8220;stream the missing weights for every token&#8221; strategy the chapter says never pays for decode. Predict its TPOT from your measured host-to-device bandwidth. <b>Cold start.</b> Time each hop from <b>Loading a model: cold starts</b> for the 16.06&#160;GB of safetensors: disk read with the page cache evicted, the same read warm, host to GPU from pageable and from pinned memory, <code>from_pretrained</code> end to end, and the compile warm-up from Milestone 4.</p>
+    <pre><code>python convert_hf_to_gguf.py models/llama-3.1-8b --outtype bf16 --outfile l8b-bf16.gguf
+./build/bin/llama-quantize l8b-bf16.gguf l8b-q4_k_m.gguf Q4_K_M
+./build/bin/llama-bench -m l8b-q4_k_m.gguf -ngl 0-33+3 -p 512 -n 128 -o json &gt; ngl.json</code></pre>
+    <p class="check">The intermediate <code>-ngl</code> points fall within 15% of your two-point prediction, and moving half the layers to the GPU buys less than 2&#215; even though the GPU is more than 10&#215; faster (Amdahl, as the 70B example showed). As layers leave the GPU, <code>pp512</code> falls by a much smaller factor than <code>tg128</code>, because prompt batches still have their weights shipped to the GPU and computed there (the <code>--op-offload</code> behaviour). The accelerate TPOT is within 25% of <var>W</var><sub>CPU</sub> &#247; your host-to-device bandwidth (plus the GPU part), and per CPU-resident byte it is slower than llama.cpp computing in place. In the cold-start ledger every hop is within 25% of bytes &#247; that link's measured bandwidth, and you can name the hop that dominates.</p>
+  </li>
+</ol>
+
+<h3>Done when</h3>
+<ul class="checklist">
+  <li><code>pytest tests/test_predict.py</code> passes with at least 12 of this chapter's numbers, for an untied (Llama) and a tied (Qwen2.5) config.</li>
+  <li><code>bench/decode_step.py</code> prints the byte-by-byte table with measured time and MBU per kernel; the full synthetic step is within 15% of <var>W</var><sub>read</sub> &#247; your copy bandwidth.</li>
+  <li>The roofline plot uses your measured roofs, shows the decode, batched-decode and prefill points, and the measured knee is within 2&#215; of ridge &#215; <var>b</var>/2.</li>
+  <li>For the real model you report TTFT and MFU vs prompt length, TPOT and MBU vs context for eager and compiled paths, and the KV bytes per token recovered from the TPOT slope.</li>
+  <li>The batching fit matches every measured step within 10%, the trade-off plot is drawn from your data, and the OOM edge is predicted within 10%.</li>
+  <li>The <code>-ngl</code> sweep matches the offload formula within 15%, and the cold-start ledger names the slowest hop.</li>
+  <li><code>REPORT.md</code> has one row per claim in the table above: predicted, measured, ratio, and a one-line explanation for every ratio outside 0.6&#8211;1.0.</li>
+</ul>
+
+<details class="deep-dive"><summary>Hints (open only when stuck)</summary>
+<ul>
+  <li><b>Timing.</b> Kernel launches are asynchronous, so <code>time.perf_counter()</code> without a synchronize measures the launch, not the work. Use CUDA events, warm up first (cuBLAS picks algorithms and the allocator grows on the first calls), and report the median.</li>
+  <li><b>Faster than HBM?</b> A 33.6&#160;MB matrix timed in a loop stays in L2 (50&#160;MB on an H100, 72&#160;MB on a 4090) and reports impossible bandwidth. Cycle through the 32 layers' copies so each call touches cold memory, as the real model does.</li>
+  <li><b>Counting bytes.</b> A copy of <var>N</var> bytes moves 2<var>N</var>. Write <code>x @ W.T</code> for weights stored as (out, in); calling <code>W.t().contiguous()</code> inside the timed region adds a full extra read and write of the matrix.</li>
+  <li><b>Prefill OOM in your own loop.</b> A plain forward computes logits for every position: <var>n</var> &#215; 128,256 values, which is 16.8&#160;GB in FP32 for 64 &#215; 512 prompt tokens. Recent transformers versions accept <code>logits_to_keep=1</code> (older ones call it <code>num_logits_to_keep</code>). That buffer is the &#8220;logits&#8221; line of the VRAM budget.</li>
+  <li><b>KV slope too steep?</b> Write down the bytes each step actually moves. A cache that appends with <code>torch.cat</code> copies the whole layer cache every step. An attention path that expands 8 KV heads to 32 (<code>repeat_kv</code> in the HF Llama code; its SDPA path does that whenever an explicit mask is passed) reads 4&#215; the bytes. A static cache may scan its whole preallocated length, so size <code>max_cache_len</code> to the context of each measurement point.</li>
+  <li><b>Compiled timings.</b> <code>mode="reduce-overhead"</code> captures CUDA graphs per input shape, so the first call at every new (<var>B</var>, cache length) recompiles. Warm up each shape before timing. Leave compile time out of TPOT and put it in the cold-start ledger.</li>
+  <li><b>Binary-searching OOM.</b> After catching <code>torch.cuda.OutOfMemoryError</code>, drop every reference and call <code>torch.cuda.empty_cache()</code>, or the next trial starts with a fragmented pool. The peak includes the prefill activations, so the edge depends on whether you prefill all <var>B</var> prompts in one pass or one at a time. State which.</li>
+  <li><b>Cold disk reads without root.</b> <code>os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)</code> on each shard evicts its clean pages from the page cache. If your &#8220;cold&#8221; read runs at 20+&#160;GB/s, it was not cold.</li>
+  <li><b>llama-bench.</b> <code>-ngl</code> counts the output layer too, so 33 means everything for a 32-layer model. Set <code>-t</code> to your physical core count; the CPU side is bandwidth-bound, and extra threads only add noise.</li>
+</ul>
+</details>
+
+<h3>Stretch goals</h3>
+<ul>
+  <li><b>Two GPUs.</b> Rent a 2-GPU box and run vLLM with <code>--tensor-parallel-size 2</code> and then <code>--pipeline-parallel-size 2</code> at batch 1 and batch 32. Add 2 all-reduces per layer to your predictor, fit their latency, and check <b>One model, many GPUs</b>: TP speeds up batch-1 decode by 1.5&#8211;2&#215;, PP does not, and PP's aggregate throughput rises once several sequences are in flight.</li>
+  <li><b>The edge.</b> Run the Milestone 6 llama.cpp sweep on a laptop, a Mac or a single-board computer, and add your rows (bandwidth, bound, measured, MBU) to the calibration table in <b>The decode speed limit</b>. Then run Qwen2.5-0.5B on your big GPU and watch MBU collapse, the &#8220;small models on very fast GPUs&#8221; effect.</li>
+  <li><b>Precision moves the speed, not the knee.</b> Repeat the Milestone 3 sweep with an FP8 library GEMM (for example <code>torch._scaled_mm</code> on Hopper or Ada) and, if you can, a W4A16 kernel from a quantization library. Check that FP8 halves the step time but keeps <var>B</var>* near 295, while W4A16 moves it to about 74 (<b>The roofline, applied to LLMs</b>; the formats are <a href="13-quantization.html">Chapter 13</a>'s).</li>
+  <li><b>A planner.</b> Wrap <code>predict.py</code> and <code>machine.json</code> in a <code>speedlimit plan --model ... --gpu ...</code> CLI that reproduces every row of <b>What hardware do I need?</b>. Then predict a model you have never run (say Qwen3-32B at 4 bits), run it, and score your prediction.</li>
+</ul>
 </section>
 
 <section>

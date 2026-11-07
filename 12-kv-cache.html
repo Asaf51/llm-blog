@@ -61,6 +61,7 @@
     <li>PagedAttention, prefix caching and radix trees: virtual memory and content-addressed storage for attention state.</li>
     <li>Prompt caching in the Anthropic, OpenAI and Gemini APIs, and how to structure prompts so they hit the cache.</li>
     <li>Quantized caches, offload to CPU and SSD, preemption, and lossy eviction (StreamingLLM, H2O, SnapKV).</li>
+    <li><strong>Build it:</strong> write <code>kvlab</code>, a paged KV cache for a real model with copy-on-write, prefix caching, swap, recompute and FP8 entries, and check this chapter's byte counts, slopes and hit rates against your own measurements.</li>
   </ul>
 </div>
 
@@ -599,6 +600,173 @@
 <aside class="callout key"><div class="callout-title">Key takeaway</div>
 <p>There are four levers on the cache: store fewer heads or a compressed latent (architecture), store fewer bytes per number (quantization), store it somewhere cheaper (offload), or store fewer tokens (windows and eviction). Only the last one changes what the model can see.</p>
 </aside>
+</section>
+
+<section class="build">
+<h2><span class="build-tag">Build it</span>kvlab: a paged, prefix-sharing KV cache for a real model</h2>
+
+<div class="build-meta">
+  <span><b>Time</b>16–22 hours</span>
+  <span><b>Level</b>Intermediate to advanced</span>
+  <span><b>Stack</b>Python, PyTorch, Hugging Face transformers, pytest, matplotlib</span>
+  <span><b>Hardware</b>1 GPU, 24 GB+ (80 GB to reproduce the long-context Llama 3.1 8B numbers)</span>
+  <span><b>Uses</b>Sections: What exactly is stored, and why not Q · One decode step, with the cache · The layout · How big is it? · The cache decides your batch size · The cache slows every token · Managing cache memory · Prefix caching · The exact-prefix rule · Smaller entries · Spilling over · When memory runs out</span>
+</div>
+
+<p>You will build <code>kvlab</code>, the memory manager that sits between a model and its keys and values. It starts as the simplest cache that works: two preallocated tensors per layer, written in place by a decode loop you write yourself. Then it grows into the machinery of this chapter: a pool of 16-token blocks with block tables and reference counts, copy-on-write for parallel samples, a content-addressed prefix cache with chained hashes and a least-recently-used free queue, swap and recompute for preemption, a CPU tier, and FP8 entries.</p>
+
+<p>Every claim in this chapter is a statement about bytes, and bytes can be counted. The size formula predicts <code>torch.cuda.memory_allocated</code> to the byte. The bandwidth bound predicts how much slower each step gets per 1,000 tokens of context. Block arithmetic predicts how many blocks 100 conversations behind one system prompt occupy. You will check each of them. And because caching is exact, you get a perfect oracle for free: every variant you build must reproduce the logits of the plain cache.</p>
+
+<p>At the end you have a tested library, a folder of benchmark plots, and a one-page report that puts the chapter's numbers next to yours.</p>
+
+<h3>The deliverable</h3>
+<ul>
+  <li><code>kvlab/</code>: a decode loop over the model's own modules, three contiguous caches (none, <code>torch.cat</code>, static), a paged pool with an allocator and block tables, a prefix cache, swap, recompute and CPU-tier code, and FP8 and INT4 entries.</li>
+  <li>A <code>pytest</code> suite: the size formula against real <code>config.json</code> files, allocator invariants under random operations, greedy parity with <code>model.generate</code>, and logit equality across every cache variant.</li>
+  <li>Benchmark scripts that write CSVs and plots: step time vs position for the three contiguous caches, step time vs context at several batch sizes, time to first token with and without a prefix hit, swap time vs block size, restore vs recompute, and perplexity for each KV format.</li>
+  <li><code>REPORT.md</code>: one table, chapter number vs your number, with a line of explanation wherever they differ by more than the stated tolerance.</li>
+</ul>
+
+<h3>Setup</h3>
+<p>Develop on <code>Qwen/Qwen2.5-0.5B-Instruct</code>: ungated, about 1 GB, and fast enough to run in FP32 for exact comparisons. Its cache has the same structure as Llama's, only smaller: 24 layers, 2 KV heads, <var>d</var><sub>h</sub> = 64, so 12,288 B per token in BF16, and 7 query heads share each KV head. Take the headline numbers on <code>meta-llama/Llama-3.1-8B-Instruct</code> (gated: accept the license on Hugging Face first). On a 24 GB card its 16 GB of BF16 weights leave room for roughly 40,000–50,000 tokens of cache; an 80 GB card reaches the chapter's 128K-token examples.</p>
+<pre><code>pip install torch transformers accelerate datasets huggingface_hub pytest matplotlib
+hf auth login          <span class="c"># only for the gated Llama configs and weights</span>
+
+kvlab/
+  model.py        <span class="c"># thin wrapper over the Hugging Face modules you reuse</span>
+  sizing.py       <span class="c"># formulas from config.json</span>
+  contiguous.py   <span class="c"># none / cat / static caches + the decode loop</span>
+  paged.py        <span class="c"># allocator, block tables, pool, gather</span>
+  prefix.py       <span class="c"># block hashes, hash table, free queue</span>
+  tiers.py        <span class="c"># swap, recompute, CPU tier</span>
+  quant.py        <span class="c"># FP8 and INT4 entries</span>
+tests/  bench/  REPORT.md</code></pre>
+
+<h3>Reference numbers</h3>
+<div class="table-wrap">
+<table class="data">
+  <tr><th>quantity</th><th class="num">Llama 3.1 8B</th><th class="num">Qwen2.5-0.5B</th><th>from</th></tr>
+  <tr><td>KV bytes per token, BF16</td><td class="num">131,072 (128 KiB)</td><td class="num">12,288 (12 KiB)</td><td>How big is it?</td></tr>
+  <tr><td>one 16-token block, all layers</td><td class="num">2 MiB</td><td class="num">192 KiB</td><td>Managing cache memory</td></tr>
+  <tr><td>2,000-token shared prefix</td><td class="num">250 MiB</td><td class="num">23.4 MiB</td><td>Prefix caching</td></tr>
+  <tr><td>4,096-token sequence (one swap)</td><td class="num">512 MiB</td><td class="num">48 MiB</td><td>When memory runs out</td></tr>
+  <tr><td>8,192-token prefix (one restore)</td><td class="num">1 GiB</td><td class="num">96 MiB</td><td>Spilling over</td></tr>
+  <tr><td>prefill FLOPs per KV byte, 2<var>N</var> ÷ bytes per token</td><td class="num">≈ 122,500</td><td class="num">≈ 80,000</td><td>Spilling over</td></tr>
+  <tr><td>decode slowdown per 1,000 tokens of context, <var>B</var> = 1, H100</td><td class="num">≈ 0.04 ms</td><td class="num">≈ 0.004 ms</td><td>The cache slows every token</td></tr>
+</table>
+</div>
+
+<h3>Milestones</h3>
+<ol class="milestones">
+  <li>
+    <div class="ms-title">Your own decode loop, over a cache you own</div>
+    <p>Load the model with <code>transformers</code> and reuse its pieces: the embedding, each layer's two norms, its <code>q_proj</code>, <code>k_proj</code>, <code>v_proj</code>, <code>o_proj</code> and MLP, the final norm, the LM head, and the model's <code>rotary_emb</code> module (it returns cos and sin for given position IDs). Write the attention yourself, so that it reads and writes <em>your</em> cache. (If you built the <a href="06-transformer.html">Chapter 6</a> forward pass, use it instead.) Implement three modes. <code>none</code> recomputes the whole sequence every step, like the reference <code>generate</code>. <code>cat</code> appends with <code>torch.cat</code>, like <code>DynamicCache</code>. <code>static</code> preallocates [<var>B</var>, <var>h</var><sub>kv</sub>, <var>n</var><sub>max</sub>, <var>d</var><sub>h</sub>] for K and for V in every layer and writes in place. Prefill writes all prompt entries in one pass; each decode step writes one slot per layer and KV head and reads positions 0…<var>t</var> ("One decode step, with the cache"). Store keys after RoPE ("What exactly is stored, and why not Q"), and count token-passes as you go.</p>
+    <pre><code><span class="k">class</span> <span class="f">StaticKV</span>:
+    <span class="s">"""K and V per layer, preallocated as [B, h_kv, n_max, d_h], written in place."""</span>
+    <span class="k">def</span> <span class="f">__init__</span>(self, cfg, B: int, n_max: int, dtype, device): ...
+    <span class="k">def</span> <span class="f">write</span>(self, layer: int, k, v, start: int): ...  <span class="c"># k, v: [B, h_kv, m, d_h], after RoPE</span>
+    <span class="k">def</span> <span class="f">read</span>(self, layer: int, length: int): ...          <span class="c"># views of positions 0 .. length-1</span>
+
+<span class="k">def</span> <span class="f">forward</span>(m, ids, positions, cache) -&gt; torch.Tensor: ...  <span class="c"># logits [B, len(ids), vocab]</span>
+<span class="k">def</span> <span class="f">generate</span>(m, prompt_ids, max_new: int, mode=<span class="s">"static"</span>) -&gt; list[int]: ...  <span class="c"># "none" | "cat" | "static"</span></code></pre>
+    <p class="check">In FP32 on Qwen2.5-0.5B, <code>static</code> produces the same 128 greedy tokens as <code>model.generate(do_sample=False)</code> on 10 prompts, with max |Δlogit| below about 10<sup>−3</sup>, and all three modes agree. The token-pass counter reads <var>n</var>(<var>n</var>+1)/2 for <code>none</code> and <var>n</var> for the others (Figure 12.1). Allocating the static cache raises <code>torch.cuda.memory_allocated()</code> by exactly 2·<var>L</var>·<var>h</var><sub>kv</sub>·<var>d</var><sub>h</sub>·<var>b</var>·<var>B</var>·<var>n</var><sub>max</sub> bytes. Plot step time against position: <code>none</code> climbs, <code>static</code> stays flat, and on the 8B the gap between <code>cat</code> and <code>static</code> grows linearly, by roughly 2·<var>t</var>·128 KiB ÷ your bandwidth per step, because each append reads and rewrites the whole cache ("Gotcha: growing the tensor").</p>
+  </li>
+  <li>
+    <div class="ms-title">Size it, fill it, time it</div>
+    <p>Write <code>sizing.py</code> from the formula in "How big is it?". Read real <code>config.json</code> files (fetch only those with <code>huggingface_hub.hf_hub_download</code>; no weights needed) and cover GQA, MLA (no factor 2: one latent plus a shared RoPE key) and windowed layers (they stop growing at <var>W</var>). Then test the two claims about what the cache costs, on your own GPU. Capacity ("The cache decides your batch size"): predict the largest batch of static caches that fits at context <var>n</var> from <code>torch.cuda.mem_get_info()</code>, then find it by allocating. Bandwidth ("The cache slows every token"): time static-cache decode steps at <var>B</var> ∈ {1, 4, 16} (as memory allows) and contexts from 1K up to what fits, and measure your real bandwidth with a large device-to-device copy.</p>
+    <pre><code><span class="k">def</span> <span class="f">kv_bytes_per_token</span>(cfg: dict, b: float = <span class="n">2</span>) -&gt; int: ...           <span class="c"># layers that grow with n</span>
+<span class="k">def</span> <span class="f">kv_bytes_per_sequence</span>(cfg: dict, n: int, b: float = <span class="n">2</span>) -&gt; int: ...  <span class="c"># windows stop at W</span>
+<span class="k">def</span> <span class="f">max_sequences</span>(gpu_bytes, util, weight_bytes, per_token, n) -&gt; int: ...
+<span class="k">def</span> <span class="f">num_blocks</span>(cache_bytes, per_token, block_size=<span class="n">16</span>) -&gt; int: ...
+
+<span class="k">assert</span> kv_bytes_per_token(llama_8b) == <span class="n">131_072</span>
+<span class="k">assert</span> max_sequences(<span class="n">80e9</span>, <span class="n">0.9</span>, <span class="n">16.06e9</span>, <span class="n">131_072</span>, <span class="n">8192</span>) == <span class="n">52</span>
+<span class="k">assert</span> num_blocks(<span class="n">55.94e9</span>, <span class="n">131_072</span>) == <span class="n">26_674</span></code></pre>
+    <p class="check">Tests reproduce both columns of every row in the chapter's size table from real configs, from 131,072 B and 16 GiB for the 8B to 70,272 B for DeepSeek-V3 and 80 KiB + 416 MiB fixed for Gemma 3 27B, plus the H100 arithmetic: 426,788 tokens, 26,674 blocks, 52 sequences at 8,192 tokens, 3 at 131,072. Your predicted batch limit matches the allocation test within one sequence. Step time vs context is a straight line at each batch size, and its slope scales with <var>B</var>. The slope can never beat <var>B</var> × KV bytes per token ÷ measured bandwidth (for the 8B on an H100 at <var>B</var> = 1, 0.04 ms per 1,000 tokens: the chapter's 5.11 &rarr; 9.92 ms). With enough (sequence, KV head) pairs to keep every SM busy it lands within about 1.5× of that bound; at <var>B</var> = 1 it may be several times steeper, because a kernel that does not split the positions leaves most SMs idle (Flash-Decoding, <a href="15-serving.html">Chapter 15</a>). Compare slopes, not intercepts: Python and kernel-launch overhead lift the intercept above weight bytes ÷ bandwidth.</p>
+  </li>
+  <li>
+    <div class="ms-title">Pages: a block pool, block tables and copy-on-write</div>
+    <p>Replace per-sequence slabs with one pool per layer of 16-slot blocks, sized with your <code>num_blocks</code>. The same block number means the same slot in every layer's pool, so one block table per sequence serves all layers ("Managing cache memory: from slabs to pages"). Choose the pool's dimension order deliberately and write down why ("The layout: where every byte lives"). A sequence allocates a block only when its last one is full. Attention gathers the keys and values of positions 0…<var>t</var> through the block table (block <code>table[j // 16]</code>, offset <code>j % 16</code>) into a contiguous tensor and calls the <em>same</em> attention function as milestone 1, which is what makes exact comparison possible. Then add <code>fork()</code> for parallel samples: the child copies the block table, not the blocks, and every shared block's reference count goes up. A write into a block with count &gt; 1 first copies that block, in every layer.</p>
+    <pre><code><span class="k">class</span> <span class="f">BlockAllocator</span>:
+    <span class="k">def</span> <span class="f">__init__</span>(self, num_blocks: int): ...
+    <span class="k">def</span> <span class="f">allocate</span>(self) -&gt; int: ...          <span class="c"># raises NoFreeBlocks</span>
+    <span class="k">def</span> <span class="f">incref</span>(self, b: int) -&gt; <span class="k">None</span>: ...
+    <span class="k">def</span> <span class="f">decref</span>(self, b: int) -&gt; <span class="k">None</span>: ...  <span class="c"># at 0: back to the free list (milestone 4: free queue)</span>
+
+<span class="k">class</span> <span class="f">Sequence</span>:
+    block_table: list[int]
+    num_tokens: int
+    <span class="k">def</span> <span class="f">next_slot</span>(self, alloc, pool) -&gt; tuple[int, int]: ...  <span class="c"># (block, offset); copy-on-write if shared</span>
+    <span class="k">def</span> <span class="f">fork</span>(self, alloc) -&gt; <span class="s">"Sequence"</span>: ...
+
+<span class="k">def</span> <span class="f">gather_kv</span>(pool, layer: int, block_table, length: int): ...  <span class="c"># -&gt; contiguous K, V</span></code></pre>
+    <p class="check">For a batch of prompts of different lengths, paged logits are bit-identical (<code>torch.equal</code>) to the static cache at every step. Wasted slots never exceed one partial block per sequence, about 8 on average. A randomized test of 10,000 allocate, append, fork and free operations never drives a count negative and ends with every block free. Replaying Figure 12.7 with a 1,000-token prompt and two samples gives 63 blocks after the fork, not 126, and 64 once both have written their first divergent token (only the shared partial block is copied); each branch's tokens equal an unshared run forced to the same first token. Replay a trace of random request lengths against 2,048-token slabs and against pages: slabs hold real tokens in roughly (mean length ÷ 2,048) of their memory, inside the paper's 20.4%–38.2% for averages of 400–800 tokens, while pages hold them in nearly all of it.</p>
+  </li>
+  <li>
+    <div class="ms-title">Prefix caching: chained hashes and a free queue</div>
+    <p>Make full blocks content-addressable, as in "Hashing blocks: vLLM's design". A block's hash covers its parent's hash, its 16 token IDs and any extra keys, so it names the whole prefix; a table maps hashes to physical blocks. A new request walks its prompt from the left until the first miss, attaches the hits to its block table (count +1) and prefills only the rest, with positions starting where the hits end. When a request finishes, blocks whose count reaches 0 join an LRU free queue, tail first, and keep their contents and hash. The allocator takes never-used blocks first, then evicts the oldest queued block and deletes its hash; a hit on a queued block takes it back out. Then build a workload: one 2,000-token system prompt shared by many conversations, multi-turn chats that resend their history, and the anti-patterns from "The exact-prefix rule".</p>
+    <pre><code><span class="k">def</span> <span class="f">block_hash</span>(parent: bytes | <span class="k">None</span>, tokens: tuple[int, ...], extra: tuple = ()) -&gt; bytes:
+    <span class="s">"""SHA-256 over the parent hash, this block's token IDs and extra keys (LoRA ID, salt)."""</span>
+
+<span class="k">class</span> <span class="f">PrefixCache</span>:
+    <span class="k">def</span> <span class="f">match</span>(self, tokens: list[int], extra=()) -&gt; list[int]: ...  <span class="c"># blocks of the longest cached prefix</span>
+    <span class="k">def</span> <span class="f">register</span>(self, seq) -&gt; <span class="k">None</span>: ...  <span class="c"># hash the blocks that just became full</span>
+    <span class="k">def</span> <span class="f">release</span>(self, seq) -&gt; <span class="k">None</span>: ...   <span class="c"># decref; count-0 blocks join the free queue, tail first</span>
+    <span class="k">def</span> <span class="f">evict</span>(self) -&gt; int: ...           <span class="c"># oldest queued block, its hash dropped</span></code></pre>
+    <p class="check">Replaying Figure 12.8, the second request hits exactly its first three blocks and prefills from the fourth. Greedy outputs are the same with caching on and off, and logits agree to FP32 rounding. 100 conversations behind the 2,000-token prompt hold 125 shared blocks plus their own suffixes, not 100 × 125; on the 8B that is 99 × 250 MiB ≈ 24 GiB saved, the chapter's number. Time to first token on a hit is within about 20% of prefilling the suffix alone; a miss on the 8B costs about 2<var>N</var> FLOPs per prompt token at your GPU's achieved rate (the chapter's estimate for 2,000 tokens: about 60 ms on an H100). In the multi-turn replay each turn hits the previous turn's prompt and output, rounded down to a whole block, give or take one block. A timestamp at the top of the system prompt cuts the hits to the blocks before it; reordering the JSON keys of one tool definition cuts them at that tool's first block. A small-pool test confirms LRU order and tail-first eviction.</p>
+  </li>
+  <li>
+    <div class="ms-title">When the pool is full: swap, recompute and a CPU tier</div>
+    <p>Run a lockstep batch of 8 sequences in a pool too small for all of them to finish. No scheduler: admission and policy are <a href="15-serving.html">Chapter 15</a>'s job. Here, when <code>allocate</code> fails, preempt the most recently admitted sequence and resume it when others finish. Implement both ways back from "When memory runs out: preemption": <b>swap</b> (copy its blocks to pinned CPU memory, free them, later copy them into whatever blocks are free and rewrite the table) and <b>recompute</b> (drop the blocks, later prefill prompt + generated tokens in one pass). Then give the prefix cache a CPU tier ("Spilling over: CPU memory and SSD"): an evicted block goes to host memory under its hash, and a GPU miss looks there before recomputing.</p>
+    <pre><code><span class="k">def</span> <span class="f">swap_out</span>(seq, pool, alloc) -&gt; HostKV: ...                <span class="c"># pinned host copy; GPU blocks freed</span>
+<span class="k">def</span> <span class="f">swap_in</span>(host: HostKV, seq, pool, alloc) -&gt; <span class="k">None</span>: ...  <span class="c"># into any free blocks; table rewritten</span>
+<span class="k">def</span> <span class="f">recompute</span>(seq, m, pool, alloc) -&gt; <span class="k">None</span>: ...         <span class="c"># one prefill over prompt + generated IDs</span>
+
+<span class="k">class</span> <span class="f">HostTier</span>:                                           <span class="c"># CPU tier of the prefix cache</span>
+    <span class="k">def</span> <span class="f">put</span>(self, h: bytes, block_kv) -&gt; <span class="k">None</span>: ...
+    <span class="k">def</span> <span class="f">get</span>(self, h: bytes): ...                             <span class="c"># -&gt; K, V of all layers, or None</span></code></pre>
+    <p class="check">Every preempted sequence ends with the same tokens as a run with an unlimited pool: bit-identical logits for swap, identical greedy tokens (in FP32) for recompute. A 4,096-token swap on the 8B (512 MiB) takes about bytes ÷ your measured pinned-copy bandwidth: about 11 ms at 50 GB/s on PCIe 5.0, about twice that on PCIe 4.0. Sweep block sizes from 1 to 256 tokens: one copy per block per layer is slow for small blocks and nears link speed only when each copy is hundreds of KiB, while gathering the blocks into one staging buffer and copying once runs near link speed at any size. That is the paper's "swapping loses badly for small blocks", explained. Restoring an 8,192-token prefix from the CPU tier beats recomputing it by the ratio the "Spilling over" formula predicts, within 2× (on an H100: about 20 ms vs 0.3 s). Your own crossover link speed, measured prefill FLOP/s ÷ (2<var>N</var> ÷ KV bytes per token), is in the report; the chapter gets about 4 GB/s.</p>
+  </li>
+  <li>
+    <div class="ms-title">Smaller entries: FP8, INT4, and which axis gets the scale</div>
+    <p>Store the pool as <code>torch.float8_e4m3fn</code> with one absmax scale per layer and KV head, calibrated on a few prompts, and dequantize inside the gather ("Smaller entries: quantizing the cache"). Quantize on write, so both the prompt's own attention and every later token see the stored values. Then try INT4 (packed two per byte, or simulated with quantize-dequantize) with one scale per token versus one per channel, for keys and values separately; a 16-token block is a natural group for per-channel scales. Measure perplexity on the WikiText-2 test split (<code>Salesforce/wikitext</code>, config <code>wikitext-2-raw-v1</code>) through your paged path. Rounding schemes are <a href="13-quantization.html">Chapter 13</a>'s subject; plain absmax is enough here.</p>
+    <p class="check">At the same pool size in bytes, the FP8 pool holds twice the tokens minus the scales; applied to the H100 budget that is the chapter's 52 &rarr; 104 sequences at 8K. On the 8B, FP8 with per-head scales moves perplexity by about 1% or less. A plot of per-channel max |<var>k</var>| shows a few outlier channels in keys and none in values, and INT4 keys with per-channel scales clearly beat per-token keys: the split KIVI is built on. The report says why your PyTorch version gets the capacity but not the speed: the gather reads FP8 but writes and rereads a BF16 copy, so a step moves more bytes than a static BF16 cache (stretch goal 1 fixes that).</p>
+  </li>
+</ol>
+
+<h3>Done when</h3>
+<ul class="checklist">
+  <li><code>pytest</code> passes: the size formula reproduces the chapter's table and H100 arithmetic, and the allocator survives 10,000 random operations without leaking a block.</li>
+  <li>Your decode loop matches <code>model.generate</code> greedy output; the static, paged and swap-resumed paths give bit-identical logits; prefix hits and recompute give identical greedy tokens.</li>
+  <li>Measured cache memory equals 2·<var>L</var>·<var>h</var><sub>kv</sub>·<var>d</var><sub>h</sub>·<var>b</var> per token to the byte, and the FP8 pool holds twice the tokens.</li>
+  <li>A plot of decode step time vs context at several batch sizes, with each slope compared to <var>B</var> × KV bytes per token ÷ bandwidth.</li>
+  <li>The shared-prompt workload occupies 125 shared blocks, not 12,500, and hit and miss times to first token match the suffix-only and full-prefill predictions.</li>
+  <li>Swap, recompute and CPU-tier restore times sit next to the chapter's estimates, together with your own crossover bandwidth.</li>
+  <li><code>REPORT.md</code> lists each chapter number beside yours, with an explanation wherever they differ by more than the stated tolerance.</li>
+</ul>
+
+<details class="deep-dive"><summary>Hints (open only when stuck)</summary>
+<ul>
+  <li><b>Exact parity.</b> Compare in FP32, and compare logits, not only tokens: in BF16 a near-tie flips one greedy token after a few dozen steps and the runs diverge for good. Reuse the projection modules rather than raw weight matrices; Qwen2's q, k and v projections have biases.</li>
+  <li><b>Positions.</b> After a prefix hit of <var>p</var> tokens the suffix starts at position <var>p</var>, not 0. Output that is fluent but slightly different is the classic symptom of RoPE at the wrong positions.</li>
+  <li><b>Masks.</b> Decode (one query row) needs no mask. When a suffix of <var>m</var> tokens attends to <var>p</var> + <var>m</var> keys, <code>scaled_dot_product_attention(is_causal=True)</code> aligns the triangle to the top left, which is wrong here; pass an explicit bottom-right mask or <code>torch.nn.attention.bias.causal_lower_right</code>.</li>
+  <li><b>GQA without copies.</b> Reshape the decode query from [<var>B</var>, <var>h</var>, 1, <var>d</var><sub>h</sub>] to [<var>B</var>, <var>h</var><sub>kv</sub>, <var>g</var>, <var>d</var><sub>h</sub>], so each KV head is read once for its <var>g</var> query heads. Expanding K and V with <code>repeat_interleave</code> makes your decode slope up to <var>g</var> times too steep (4 for Llama 3.1 8B, 7 for Qwen2.5-0.5B).</li>
+  <li><b>Byte-exact memory.</b> Read <code>memory_allocated</code>, not <code>memory_reserved</code>, and pick <var>n</var><sub>max</sub> as a multiple of 16 so the allocator's 512-byte rounding never shows.</li>
+  <li><b>Timing.</b> Warm up, synchronize, use CUDA events and take medians. Fit slopes over many contexts instead of reading two points.</li>
+  <li><b>Hashing.</b> Use <code>hashlib.sha256</code> over a fixed byte encoding of the token IDs. Python's built-in <code>hash()</code> of strings changes between processes, so a string extra key would silently break any cache shared across processes. Delete a block's hash from the table before reusing the block, or a later lookup returns overwritten data.</li>
+  <li><b>Full hits.</b> If every block of a prompt hits, you still need logits for its last token: recompute at least that one token. vLLM does the same.</li>
+  <li><b>Multi-turn misses.</b> Append the generated token IDs to the history instead of re-tokenizing the decoded text. Re-tokenizing can produce different IDs at the boundary, and the exact-prefix rule turns that into a miss for everything after it.</li>
+  <li><b>Swaps and FP8.</b> Allocate host buffers with <code>pin_memory=True</code> and copy with <code>non_blocking=True</code>, then synchronize before stopping the clock, or you measure pageable-memory speed. Clamp to ±448, the largest e4m3 value, before casting to <code>float8_e4m3fn</code>, so nothing overflows the format.</li>
+</ul>
+</details>
+
+<h3>Stretch goals</h3>
+<ul>
+  <li><b>A real paged kernel.</b> Write a Triton decode-attention kernel that reads K and V through the block table directly, one program per (sequence, KV head), and dequantizes FP8 in registers. Now the FP8 slope should halve, and you can measure what the indirection costs against a contiguous cache (the 2023 kernel paid 20–26%).</li>
+  <li><b>A radix tree.</b> Re-implement the prefix cache as SGLang's radix tree with one-token pages, run the same shared-prompt and multi-turn workloads, and measure what block granularity costs: up to 15 tokens of extra prefill per request, and how often that matters.</li>
+  <li><b>Lossy eviction.</b> Add StreamingLLM to your pool: keep 4 sink tokens plus a recent window, cache keys before RoPE and rotate them by slot when read ("Throwing tokens away: lossy eviction"). Stream 100,000+ tokens and plot perplexity against position for a plain window and for sinks + window, both at constant memory.</li>
+  <li><b>Against the real thing.</b> Start vLLM with the same model and <code>--gpu-memory-utilization</code>, and compare the KV cache size it logs at startup with your formula. Then replay "Worked example: what caching saves" against a commercial API and check the bill from the usage fields (<code>cache_creation_input_tokens</code> and <code>cache_read_input_tokens</code> on Anthropic).</li>
+</ul>
 </section>
 
 <section>

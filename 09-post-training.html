@@ -60,6 +60,7 @@
     <li><strong>Tool calling at the token level</strong>: the schema in the prompt, the call the model emits, who runs it, and how the result comes back. Agents and MCP.</li>
     <li><strong>Distillation</strong>: copying a big model's text or its full probability distributions into a small one.</li>
     <li><strong>LoRA and QLoRA</strong> math with exact shapes and parameter counts, a memory calculator, and when to fine-tune vs prompt vs retrieve. Evaluation, briefly.</li>
+    <li><strong>Build it:</strong> turn Llama 3.1 8B base into an assistant on one GPU with your own loss masking, LoRA/QLoRA, reward model and DPO, checking the chapter's numbers as you go.</li>
   </ul>
 </div>
 
@@ -1388,6 +1389,186 @@
 <p><strong>LLM-as-a-judge</strong> grades open-ended answers with a strong model, either pairwise ("which is better?") or against a rubric. The MT-Bench paper found GPT-4's judgments agreed with human preferences over 80% of the time, about as often as humans agree with each other. It also documented the judge's biases: <em>position</em> (favoring the first or second answer), <em>verbosity</em> (favoring longer answers) and <em>self-enhancement</em> (favoring its own outputs). Practical mitigations: judge both orders and average, control for length, and use explicit rubrics.</p>
 <p><strong>Arenas</strong> such as LMArena (formerly Chatbot Arena) show users two anonymous models side by side and record which answer they prefer. The votes are turned into ratings with the same Bradley–Terry model that trains reward models. Arenas use real prompts that cannot be memorized in advance, but they measure what voters like, which includes length and formatting. The "Leaderboard Illusion" study (2025) also showed how private testing distorts them: it identified 27 private variants Meta tested before the Llama 4 release, with providers able to publish only their best score.</p>
 <aside class="callout key"><div class="callout-title">Key takeaway</div><p>No single number captures a post-trained model. For your own use case, 50–200 real examples with an automatic check or a rubric-guided judge tell you more than any leaderboard, and they catch regressions every time you change the prompt, the model or the fine-tune.</p></aside>
+</section>
+
+<section class="build">
+<h2><span class="build-tag">Build it</span>Post-train Llama 3.1 8B on one GPU: masked SFT, hand-written LoRA and QLoRA, a reward model and DPO</h2>
+
+<div class="build-meta">
+  <span><b>Time</b>16–24 hours, plus 3–12 GPU-hours mostly unattended</span>
+  <span><b>Level</b>Intermediate–advanced</span>
+  <span><b>Stack</b>Python, PyTorch, transformers, datasets, bitsandbytes, matplotlib (peft only for cross-checks)</span>
+  <span><b>Hardware</b>1 GPU, 24 GB+ (QLoRA on an RTX 4090; 80 GB also fits BF16 LoRA)</span>
+  <span><b>Uses</b>Sections: From document completer to assistant; Supervised fine-tuning (SFT); Learning from preferences: reward models and RLHF; Direct Preference Optimization (DPO); Fine-tuning it yourself: full, LoRA, QLoRA; Fine-tune, prompt, or retrieve?; How post-trained models are evaluated</span>
+</div>
+
+<p>You will run this chapter's pipeline (Figure 9.2) yourself, on real weights, writing every post-training piece. A data layer that renders conversations with the chat template and builds the <code>labels</code> array with −100 at every token the assistant did not write. A LoRA layer that wraps any linear module, including a 4-bit one. One SFT loop with three modes (full, LoRA, QLoRA) that reports its own memory and step time. A Bradley–Terry reward model. A DPO trainer with a cached reference. An evaluation harness. Hugging Face <code>transformers</code> supplies the forward pass and <code>bitsandbytes</code> the NF4 storage; you own everything this chapter explains.</p>
+<p>Why this project: almost every number in this chapter can be reproduced on one GPU. 42 of 50 positions masked in Figure 9.3. 14.1 nats on the base model's <code>&lt;|eot_id|&gt;</code>. Embedding rows that are exactly zero. 41,943,040 LoRA parameters. 6.37 GB for QLoRA. ln 2 at DPO's first step. Each milestone ends with one of those checks. You will also hit the failure modes that recipes quietly work around: a doubled <code>&lt;|begin_of_text|&gt;</code>, untrained special tokens, wrongly normalized gradient accumulation, and DPO lowering both answers at once.</p>
+<p>At the end you have an SFT adapter and a DPO adapter that turn Llama 3.1 8B base into a working assistant, a small reward model, and a report that puts base, your SFT, your DPO and Meta's Instruct side by side on the same evals.</p>
+
+<h3>The deliverable</h3>
+<ul>
+  <li>A <code>posttrain/</code> package (data, scoring, LoRA, SFT, reward model, DPO, evals) with one <code>pytest</code> file per milestone.</li>
+  <li>Two adapters for Llama 3.1 8B, <code>sft/</code> and <code>dpo/</code> (about 84 MB each at <var>r</var> = 16 in BF16, as Counting parameters exactly predicts), and a reward model built on Qwen2.5-1.5B-Instruct.</li>
+  <li>Plots: held-out loss for full vs LoRA vs attention-only LoRA; measured memory and step time next to the formulas; DPO's chosen and rejected log-ratios, margin and accuracy, with and without the SFT term.</li>
+  <li><code>report.md</code>: a "the chapter says / I measured / why they differ" table for every row of Reference numbers below, plus the final eval table (four checkpoints and one overtrained run).</li>
+</ul>
+
+<h3>Setup</h3>
+<p>Install <code>torch transformers datasets accelerate bitsandbytes peft matplotlib pytest</code>. Models: <code>meta-llama/Llama-3.1-8B</code> and <code>meta-llama/Llama-3.1-8B-Instruct</code> (gated: accept the license on Hugging Face first); <code>Qwen/Qwen2.5-0.5B</code> for development and the full-vs-LoRA comparison (494M parameters, so full fine-tuning fits in 24 GB); <code>Qwen/Qwen2.5-1.5B-Instruct</code> as the reward model's starting point. Data: <code>HuggingFaceH4/ultrachat_200k</code> (splits <code>train_sft</code>, <code>test_sft</code>; a <code>messages</code> column) for SFT, <code>HuggingFaceH4/ultrafeedback_binarized</code> (splits <code>train_prefs</code>, <code>test_prefs</code>; <code>chosen</code> and <code>rejected</code> message lists) for the reward model and DPO, and <code>cais/mmlu</code> (config <code>all</code>) for the forgetting check. A few thousand conversations and pairs are enough.</p>
+<p>No Llama access? Use <code>Qwen/Qwen2.5-1.5B</code> or <code>Qwen/Qwen2.5-3B</code> base for Milestones 4–7 and skip the Llama-only checks. Run Milestone 1's embedding-row check on it first: if its ChatML tokens are already trained, expect a smaller before/after contrast. If you built the <a href="08-pretraining.html">Chapter 8</a> project, SFT your own 114M base model as a warm-up. It needs new special tokens and resized embeddings, a preview of Milestone 4's untrained-token problem.</p>
+<pre><code>posttrain/
+  data.py      <span class="c"># render_with_labels, padding/packing collator</span>
+  scoring.py   <span class="c"># masked_nll, sequence_logprob</span>
+  lora.py      <span class="c"># LoRALinear, inject_lora, merge, adapter save/load</span>
+  sft.py       <span class="c"># one loop, three modes: full | lora | qlora</span>
+  rm.py        <span class="c"># RewardModel, bt_loss</span>
+  dpo.py       <span class="c"># reference cache, dpo_loss, trainer</span>
+  evals.py     <span class="c"># stop rate, judge in both orders, MMLU log-likelihood</span>
+  tests/       <span class="c"># test_m1_masking.py ... test_m7_evals.py</span>
+runs/          <span class="c"># JSONL logs, plots, adapters</span>
+report.md</code></pre>
+
+<h3>Reference numbers</h3>
+<p>The chapter's own measurements and formulas, and what you should get. The milestones refer back to them.</p>
+<div class="table-wrap">
+<table class="data">
+  <tr><th>Quantity</th><th>Chapter's claim (section)</th><th>Target in this project</th></tr>
+  <tr><td>Figure 9.3's example, rendered</td><td>50 tokens, 42 masked, 8 trained (Loss masking)</td><td>exact, with the template's default date</td></tr>
+  <tr><td>Masked mean loss on it</td><td>base 2.42 nats, Instruct 0.0002; base pays 14.1 on <code>&lt;|eot_id|&gt;</code> (Figure 9.3)</td><td>within ~5%</td></tr>
+  <tr><td>Summed log <var>p</var> of three answers</td><td>Paris −19.34 → −0.001, Lyon −30.71 → −21.17, rude −38.74 → −41.41 (A real measurement: Llama's implicit reward)</td><td>within ~0.3 nats; σ(Paris − Lyon) ≈ 0.73</td></tr>
+  <tr><td>Chat-token embedding rows</td><td>exactly zero in base; norm 0.03–0.05 in Instruct vs a median of 0.69 (From document completer to assistant)</td><td>exact zeros for IDs 128006, 128007, 128009</td></tr>
+  <tr><td>LoRA parameters, <var>r</var> = 16, all seven matrices</td><td>41,943,040 = 0.52% of 8,030,261,248 (Counting parameters exactly)</td><td>exact; Qwen2.5-0.5B by the same formula: 8,798,208</td></tr>
+  <tr><td>Full fine-tuning model states</td><td>16 B/param (Full fine-tuning and its bill)</td><td>Qwen2.5-0.5B: 7.90 GB, within 2%</td></tr>
+  <tr><td>LoRA model states</td><td>2 B × <var>N</var> + 16 B × trainable (memory calculator)</td><td>Qwen2.5-0.5B: 1.13 GB, within 3%</td></tr>
+  <tr><td>QLoRA, Llama 3.1 8B</td><td>6.37 GB including 0.67 GB of adapter state; ~2.4 GB of activations at 2,048 tokens (Figure 9.14, memory calculator)</td><td>states within ~5%; peak explained term by term</td></tr>
+  <tr><td>LoRA training compute</td><td>≈ 4<var>N</var> vs 6<var>N</var> FLOPs per token (Low-level: FLOPs, memory and kernels)</td><td>step-time ratio ≈ 0.67, or 0.75 with activation checkpointing, ± 0.1</td></tr>
+  <tr><td>Bradley–Terry worked example</td><td>scores 1.3 vs 0.4: loss 0.341, ∂<var>L</var>/∂<var>r<sub>w</sub></var> = −0.289; swapped: 1.241 (Step 2: train a reward model)</td><td>exact to 3 decimals</td></tr>
+  <tr><td>Reward model accuracy</td><td>InstructGPT's 6B RM: 69.6%; labelers agree 72.6% (Learning from preferences)</td><td>mid-60s to mid-70s on held-out pairs, above "the longer answer wins"</td></tr>
+  <tr><td>DPO at step 0</td><td>ln 2 ≈ 0.693, the loss of a coin flip (Figure 9.6)</td><td>0.693 to three decimals</td></tr>
+</table>
+</div>
+
+<h3>Milestones</h3>
+<ol class="milestones">
+  <li>
+    <div class="ms-title">Render, mask and score a conversation</div>
+    <p>Write <code>render_with_labels</code>: apply the chat template, then mark the tokens the assistant wrote. Use the rule from Loss masking: the mask is 1 for the assistant's content and its closing <code>&lt;|eot_id|&gt;</code>, 0 for everything else, including the <code>&lt;|start_header_id|&gt;assistant&lt;|end_header_id|&gt;↵↵</code> header. Find the assistant spans yourself rather than relying on a template feature. Then write <code>masked_nll</code> (the shift by one; −100 skipped in both the sum and the count) and <code>sequence_logprob</code>, the masked <em>sum</em> that DPO reuses. Use the Instruct repository's tokenizer and template for both checkpoints: same tokenizer, same IDs.</p>
+    <pre><code>IGNORE = <span class="n">-100</span>
+
+<span class="k">def</span> <span class="f">render_with_labels</span>(tok, messages: list[dict], max_len: int = <span class="n">2048</span>) -&gt; dict[str, list[int]]:
+    <span class="s">"""input_ids, plus labels: a copy with IGNORE wherever the assistant did not write."""</span>
+
+<span class="k">def</span> <span class="f">masked_nll</span>(logits: Tensor, labels: Tensor) -&gt; Tensor:
+    <span class="s">"""Mean -log p over positions whose next-token label is not IGNORE."""</span>
+
+<span class="k">def</span> <span class="f">sequence_logprob</span>(model, tok, messages: list[dict]) -&gt; float:
+    <span class="s">"""Masked SUM of log p over the last assistant turn, closing &lt;|eot_id|&gt; included."""</span></code></pre>
+    <p>Then reproduce the chapter's measurements with both Llama checkpoints in BF16 (each fits in 24 GB on its own), and read the three chat-token rows of <code>model.embed_tokens.weight</code> straight from the safetensors shards. Finally, log the fraction of trained tokens in 2,000 UltraChat conversations and compare it with Llama 3's SFT mix (310 of 846 tokens per example, 37%; The data).</p>
+    <p class="check">Figure 9.3's conversation (user "What is the capital of France?", assistant "The capital of France is Paris.") renders to 50 IDs, 42 of them −100, with targets 791 6864 315 9822 374 12366 13 128009. <code>masked_nll</code> equals <code>model(input_ids, labels=labels).loss</code> to 1e-4 on FP32 logits. Masked mean ≈ 2.42 nats (base) and ≈ 0.0002 (Instruct), base <code>&lt;|eot_id|&gt;</code> term ≈ 14.1. The three answers of the implicit-reward callout land within ~0.3 nats of the chapter's sums. The base rows for 128006, 128007 and 128009 are all zeros.</p>
+  </li>
+  <li>
+    <div class="ms-title">Write LoRA, then put it on a 4-bit base</div>
+    <p>Implement the formula of LoRA: train a low-rank correction as a module that wraps an existing linear layer: frozen <var>W</var>, <var>A</var> ∈ ℝ<sup><var>r</var>×<var>d</var><sub>in</sub></sup> with small random values, <var>B</var> ∈ ℝ<sup><var>d</var><sub>out</sub>×<var>r</var></sup> at zero, scale <var>α</var>/<var>r</var> (see Initialization for why one of them must be random). <code>inject_lora</code> swaps in the wrapper on the seven projections of every block; <code>merge</code> folds it back, <var>W</var>′ = <var>W</var> + (<var>α</var>/<var>r</var>)·<var>B</var>·<var>A</var> (Merging, and serving many adapters at once). Count parameters on a model built on the <code>meta</code> device from a <code>LlamaConfig</code> with the shapes in Every tensor shape in Llama 3.1 8B (<a href="06-transformer.html">Chapter 6</a>): no download needed. Then load Llama 3.1 8B base with <code>BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_use_double_quant=True, bnb_4bit_compute_dtype=torch.bfloat16)</code> and check that your wrapper works unchanged around the 4-bit layers. That is QLoRA (QLoRA: a 4-bit frozen base; <a href="13-quantization.html">Chapter 13</a> covers NF4 itself).</p>
+    <pre><code>TARGETS = (<span class="s">"q_proj"</span>, <span class="s">"k_proj"</span>, <span class="s">"v_proj"</span>, <span class="s">"o_proj"</span>, <span class="s">"gate_proj"</span>, <span class="s">"up_proj"</span>, <span class="s">"down_proj"</span>)
+
+<span class="k">class</span> <span class="f">LoRALinear</span>(nn.Module):
+    <span class="k">def</span> <span class="f">__init__</span>(self, base: nn.Linear, r: int, alpha: float, dropout: float = <span class="n">0.0</span>): ...
+    <span class="k">def</span> <span class="f">forward</span>(self, x: Tensor) -&gt; Tensor: ...   <span class="c"># W x + (alpha / r) * B(A x)</span>
+    <span class="k">def</span> <span class="f">merge</span>(self) -&gt; nn.Linear: ...            <span class="c"># same shape as W, zero extra inference cost</span>
+
+<span class="k">def</span> <span class="f">inject_lora</span>(model, r: int, alpha: float, targets=TARGETS) -&gt; int: ...  <span class="c"># trainable count</span>
+<span class="k">def</span> <span class="f">lora_state_dict</span>(model) -&gt; dict[str, Tensor]: ...                    <span class="c"># adapters only</span></code></pre>
+    <p class="check">On the meta-device model: 8,030,261,248 base parameters; <var>r</var> = 16 adds 41,943,040 (0.52%) and <var>r</var> = 256 adds 671,088,640, the chapter's 0.671B. Qwen2.5-0.5B at <var>r</var> = 16 gives 8,798,208, the same count PEFT's <code>print_trainable_parameters()</code> reports for the same targets. At initialization the logits are bit-identical to the base model's. After filling <var>B</var> with noise, merged and unmerged logits agree within BF16 rounding, and your forward matches PEFT's (same <var>A</var>, <var>B</var> copied in) to 1e-5 in FP32. After loading the 4-bit base, <code>torch.cuda.memory_allocated()</code> reads about 5.70 GB: Figure 9.14's 6.37 GB minus the 0.67 GB of adapter state.</p>
+  </li>
+  <li>
+    <div class="ms-title">One SFT loop, three modes, measured</div>
+    <p>Write the training loop once with a mode switch. <em>Full</em>: FP32 weights under BF16 autocast with AdamW, the 16 B/param setup. <em>LoRA</em>: BF16 frozen base, FP32 adapters. <em>QLoRA</em>: Milestone 2's 4-bit base. Pad or pack micro-batches (Packing, in Low-level: how masking is implemented), accumulate to a fixed token budget per step, and divide by the trained tokens in the <em>whole</em> step: the denominator of the SFT loss formula. Log loss, trained tokens, step time, <code>memory_allocated()</code> and <code>max_memory_allocated()</code> every step. Then train Qwen2.5-0.5B three times on the same ~10M UltraChat tokens: full at 2×10<sup>−5</sup>, all-linear LoRA (<var>r</var> = 16) at 2×10<sup>−4</sup> (the chapter's 10× rule), and <code>q_proj</code> + <code>v_proj</code> only at <var>r</var> = 128, almost the same budget (360,448 vs 366,592 parameters per layer). Score masked loss on 500 held-out <code>test_sft</code> conversations.</p>
+    <pre><code><span class="k">@dataclass</span>
+<span class="k">class</span> <span class="f">RunConfig</span>:
+    model_id: str
+    mode: str                          <span class="c"># "full" | "lora" | "qlora"</span>
+    r: int = <span class="n">16</span>; alpha: float = <span class="n">32</span>; targets: tuple = TARGETS
+    lr: float = <span class="n">2e-4</span>; tokens_per_step: int = <span class="n">16_384</span>; micro_batch_tokens: int = <span class="n">4_096</span>
+    grad_ckpt: bool = <span class="k">True</span>
+
+<span class="c"># one JSON line per step: loss, trained_tokens, step_s, mem_alloc_gb, mem_peak_gb</span>
+<span class="k">def</span> <span class="f">train_sft</span>(cfg: RunConfig, train_rows, eval_rows, log_path: str) -&gt; None: ...</code></pre>
+    <p class="check">Model states (<code>memory_allocated()</code> right after the first optimizer step, gradients still alive): 7.90 GB for full (16 B × 494,032,768) within 2%, 1.13 GB for LoRA within 3%. Halving the micro-batch roughly halves peak minus states. LoRA's step time over full's lands near 4<var>N</var>/6<var>N</var> ≈ 0.67 without activation checkpointing and 6<var>N</var>/8<var>N</var> = 0.75 with it (the recompute adds one forward to both), within 0.1. Full and all-linear LoRA end close together; attention-only LoRA ends worse (Which matrices). A unit test shows that one batch of 8 and four accumulated micro-batches of 2 with uneven trained-token counts give the same gradients to 1e-5 in FP32.</p>
+  </li>
+  <li>
+    <div class="ms-title">Turn Llama 3.1 8B base into an assistant</div>
+    <p>Before training, inspect the base checkpoint's rows for the template's special tokens in both <code>embed_tokens</code> and <code>lm_head</code>, and decide what must be trainable: adapters on the seven projections never touch those rows (Hints). Then QLoRA-SFT the base model on 5,000–10,000 UltraChat conversations cut to 2,048 tokens: <var>r</var> = 16 on all seven matrices, one epoch, gradient checkpointing on. Measure memory as in Milestone 3 and set it beside Figure 9.14 and the memory calculator. Compare per-token losses on Figure 9.3's example before and after. Generate greedily, stopping on <code>&lt;|eot_id|&gt;</code> and <code>&lt;|eom_id|&gt;</code>, on Figure 9.1's three prompts: "What is the capital of France?", "Write a haiku about a cat sitting on a mat." and "Explain what a mutex is in one sentence."</p>
+    <p class="check">Model states ≈ 6.37 GB (about 5.70 GB of 4-bit base plus 0.67 GB of FP32 adapters and AdamW state), within ~5%. Your peak for a 2,048-token step sits next to the widget's estimate (6.37 GB + ~2.4 GB), with each gap attributed to a named tensor. On Figure 9.3's example the masked loss falls far below base's 2.42 nats, and the two biggest per-token drops are the first answer token and <code>&lt;|eot_id|&gt;</code>, as step 3 of that figure predicts. All three Figure 9.1 prompts get an answer that ends its turn.</p>
+  </li>
+  <li>
+    <div class="ms-title">A Bradley–Terry reward model</div>
+    <p>Build the reward model exactly as Step 2: train a reward model describes it: the transformer body without its LM head, plus a <var>d</var> → 1 linear head (1,536 weights for Qwen2.5-1.5B) read at the last real token of each answer. Start from Qwen2.5-1.5B-Instruct, a stand-in for "the SFT model", with LoRA on the body and the head fully trainable and zero-initialized. Train one epoch on ~20,000 UltraFeedback pairs, chosen and rejected in the same batch. Evaluate on 1,000 <code>test_prefs</code> pairs, together with two diagnostics from Reward hacking and the KL leash: the accuracy of the rule "the longer answer wins" on the same pairs, and the correlation between your score and answer length.</p>
+    <pre><code><span class="k">class</span> <span class="f">RewardModel</span>(nn.Module):
+    <span class="c"># body: AutoModel (no LM head); head: Linear(d_model, 1), zero init</span>
+    <span class="k">def</span> <span class="f">__init__</span>(self, body, d_model: int): ...
+    <span class="c"># returns [B]: one score per row, read at that row's last real token</span>
+    <span class="k">def</span> <span class="f">forward</span>(self, input_ids: Tensor, attention_mask: Tensor) -&gt; Tensor: ...
+
+<span class="k">def</span> <span class="f">bt_loss</span>(r_w: Tensor, r_l: Tensor) -&gt; Tensor: ...   <span class="c"># mean of -log sigmoid(r_w - r_l)</span></code></pre>
+    <p class="check"><code>bt_loss</code> reproduces the chapter's worked example: 0.341 for scores 1.3 vs 0.4, gradient −0.289 on the winner, 1.241 when swapped. Step 0 gives exactly ln 2 (a zero head scores everything 0). Held-out accuracy lands in the mid-60s to mid-70s and above the length rule. If it barely beats the length rule, your RM is mostly a length detector: write that down, because Milestones 6 and 7 will show the consequence.</p>
+  </li>
+  <li>
+    <div class="ms-title">DPO with a cached reference, and Llama 3's two fixes</div>
+    <p>Use your Milestone 4 model as both the starting policy and <var>π</var><sub>ref</sub>. As Why everyone adopted it explains, the reference log-probabilities never change, so compute them once: one pass over 3,000–5,000 train pairs and the 1,000 test pairs, two floats per pair, saved to disk. Then only the policy is in memory. Implement the loss from The trick in three lines with <var>β</var> = 0.1, and log the implicit rewards <var>r̂</var> = <var>β</var>·(log <var>π<sub>θ</sub></var> − log <var>π</var><sub>ref</sub>) for both answers, their margin and the pairwise accuracy. Do two runs. Run A: plain DPO. Run B: Llama 3's recipe, with formatting tokens masked out of the log-prob sums (cache the reference that way too) and the per-token SFT loss on the chosen answer added with weight 0.2. Keep training the SFT adapter; start the learning rate at Llama 3's 10<sup>−5</sup> times the chapter's 10× LoRA factor, and lower it if the margins explode.</p>
+    <pre><code><span class="c"># one pass, no grad: two floats per pair, ref_w and ref_l</span>
+<span class="k">def</span> <span class="f">cache_reference</span>(model, tok, pairs, path: str, mask_format_tokens: bool) -&gt; None: ...
+
+<span class="c"># pi_*, ref_*: [B] summed log-probs; nll_w: per-token NLL of the chosen answer</span>
+<span class="c"># returns the loss and logs: reward_w, reward_l, margin, accuracy</span>
+<span class="k">def</span> <span class="f">dpo_loss</span>(pi_w, pi_l, ref_w, ref_l, beta: float = <span class="n">0.1</span>,
+             nll_w: Tensor | <span class="k">None</span> = <span class="k">None</span>, nll_coef: float = <span class="n">0.0</span>) -&gt; tuple[Tensor, dict]: ...</code></pre>
+    <p class="check">A unit test with the callout's numbers (Δ<sub><var>w</var></sub> = −0.001 − (−19.34), Δ<sub><var>l</var></sub> = −21.17 − (−30.71), <var>β</var> = 0.1) gives a margin of 0.98 and a loss of 0.319. Step 0 reads 0.693 to three decimals with dropout off; if it does not, your cache and your policy pass disagree. Train accuracy climbs from 50%. In run A, rejected log-ratios fall fastest and the chosen ones usually go negative too, the "both lose probability" failure from Why everyone adopted it; in run B the chosen ratio stays near or above zero. Report held-out implicit-reward accuracy for both runs beside Milestone 5's RM accuracy on the same 1,000 pairs, and mean answer length against SFT.</p>
+  </li>
+  <li>
+    <div class="ms-title">An evaluation harness, and the report</div>
+    <p>Following How post-trained models are evaluated, build a small portfolio and run it on four checkpoints: base (with the chat template), your SFT, your best DPO run, and Meta's Instruct as the reference. (1) Stop rate and mean length on 200 held-out <code>test_sft</code> prompts, greedy, 512 new tokens. (2) Your RM's mean score. (3) Pairwise LLM-as-a-judge against your SFT model, with a stronger judge (e.g. <code>Qwen/Qwen2.5-7B-Instruct</code>, or an API), every pair judged in both orders. (4) Forgetting (Catastrophic forgetting): 500 MMLU questions scored by option log-likelihood on raw text, with the identical prompt for every checkpoint. Then make one deliberately overtrained SFT run (say 5 epochs at 10× the learning rate on 1,000 narrow conversations) and add it as a fifth row.</p>
+    <pre><code><span class="k">def</span> <span class="f">stop_rate</span>(model, tok, prompts: list[str], max_new: int = <span class="n">512</span>) -&gt; dict: ...
+<span class="c"># P(a is better), averaged over the (a, b) and (b, a) orders, plus whether the verdict flipped</span>
+<span class="k">def</span> <span class="f">judge_pair</span>(judge, jtok, prompt: str, a: str, b: str) -&gt; tuple[float, bool]: ...
+<span class="c"># argmax over log p(" A") ... log p(" D") after the question; no chat template</span>
+<span class="k">def</span> <span class="f">mmlu_loglik</span>(model, tok, rows) -&gt; float: ...</code></pre>
+    <p class="check">Base's stop rate is near 0% (14.1 nats on <code>&lt;|eot_id|&gt;</code> means it practically never ends a turn); your SFT is above 90%. The table reports the order-averaged win rate and the judge's flip rate (MT-Bench's position bias, measured). Expect MMLU to move little for the sane runs and to drop for the overtrained one; if it does not, push harder and report where it breaks. Every number comes from one script and one prompt format, so the rows are comparable (the Benchmarks paragraph's warning).</p>
+  </li>
+</ol>
+
+<h3>Done when</h3>
+<ul class="checklist">
+  <li><code>pytest</code> passes: Figure 9.3's IDs and labels, masked loss equal to Hugging Face's, gradient-accumulation equivalence, both LoRA counts, identity at init, merge equivalence, and the Bradley–Terry and DPO unit values.</li>
+  <li>Measured model states fall within tolerance of 16 B/param, 2 B × <var>N</var> + 16 B × trainable, and 6.37 GB, and one paragraph explains your measured QLoRA peak against the memory calculator.</li>
+  <li>One plot shows held-out loss for full, all-linear LoRA and attention-only LoRA, and your LoRA/full step-time ratio is reported next to 4<var>N</var>/6<var>N</var>.</li>
+  <li>Your SFT adapter makes Llama 3.1 8B base answer and end its turn on Figure 9.1's three prompts and on more than 90% of 200 held-out prompts.</li>
+  <li>The RM's held-out accuracy is reported beside the length baseline, and DPO runs A and B have plotted log-ratios, margins and implicit-reward accuracy.</li>
+  <li><code>report.md</code> contains the eval table for all five rows, including the judge's flip rate and the forgetting result.</li>
+</ul>
+
+<details class="deep-dive"><summary>Hints (open only when stuck)</summary>
+<ul>
+  <li><strong>Finding assistant spans.</strong> Render <code>messages[:k]</code> with <code>add_generation_prompt=True</code> and <code>messages[:k+1]</code>, both with <code>tokenize=True</code>, and assert the first is a prefix of the second. The new tokens are the assistant's content plus its end-of-turn token. Templates that rewrite earlier turns break this prefix property; Llama 3.1's does not. Qwen2.5's template adds a default system prompt when you pass none and a newline after each <code>&lt;|im_end|&gt;</code>; decide whether that newline is trained and stay consistent.</li>
+  <li><strong>Double BOS.</strong> <code>apply_chat_template(..., tokenize=True)</code> already starts with <code>&lt;|begin_of_text|&gt;</code>. Rendering to a string and then calling the tokenizer with special tokens enabled adds a second one. Assert <code>ids[1] != ids[0]</code> in a test.</li>
+  <li><strong>Accumulation.</strong> Averaging per-micro-batch means gives every micro-batch equal weight, so tokens in short answers count more. Sum token losses and divide once by the trained tokens in the whole step. Hugging Face's Trainer had exactly this bug until a fix in late 2024.</li>
+  <li><strong>Untrained rows (Milestone 4).</strong> The base model's rows for <code>&lt;|start_header_id|&gt;</code>, <code>&lt;|end_header_id|&gt;</code> and <code>&lt;|eot_id|&gt;</code> were never trained. Check whether the LM-head rows are distinct from each other and from the reserved tokens' rows: if <code>&lt;|eot_id|&gt;</code> shares its row with other tokens, their logits are tied and it can never take most of the probability. The community fix in 2024 was to set these rows to the mean of the trained rows and train them (or the whole embedding and LM head) alongside the adapters.</li>
+  <li><strong>Silent zero gradients.</strong> With reentrant gradient checkpointing and frozen embeddings, nothing at the input requires grad, and the adapters can end up with no gradient at all. Use <code>gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})</code> or <code>model.enable_input_require_grads()</code>, and assert every adapter's <code>.grad</code> is set after the first backward.</li>
+  <li><strong>Measuring memory.</strong> Call <code>torch.cuda.reset_peak_memory_stats()</code> between phases. <code>nvidia-smi</code> reads higher because it includes the CUDA context and the caching allocator's reserve. bitsandbytes' paged optimizers allocate their state outside PyTorch's allocator, so use plain AdamW while you check the formulas.</li>
+  <li><strong>Where 16 B/param comes from.</strong> FP32 weights under BF16 autocast give 4 + 4 + 8 = 16 B, the same total as the chapter's BF16 weights and gradients plus FP32 master copy and moments. Load in BF16 with plain AdamW and you get 8 B/param, and updates of size ~2×10<sup>−5</sup> on weights of size ~10<sup>−2</sup> are smaller than half of BF16's spacing, so most of them round away (<a href="02-numbers-and-hardware.html">Chapter 2</a>). For LoRA, keep <var>A</var> and <var>B</var> in FP32.</li>
+  <li><strong>Reading the last token.</strong> With right padding the reward model's score is at index <code>attention_mask.sum(-1) - 1</code>; with left padding it is at <code>-1</code>. Reading a pad position gives about 50% accuracy forever.</li>
+  <li><strong>DPO's step 0 is not ln 2.</strong> Compute the reference with the exact code path you use for the policy: same padding side, dtype, mask and dropout setting. Use the masked <em>sum</em> of log-probs; the per-token mean is SimPO's reward, not DPO's.</li>
+  <li><strong>A stable judge.</strong> Ask for a single letter, A or B, and read the probabilities of those two tokens instead of parsing free text. Average over both orders and keep the flip count.</li>
+</ul>
+</details>
+
+<h3>Stretch goals</h3>
+<ul>
+  <li><strong>Goodhart in miniature (Figure 9.5).</strong> Best-of-<var>n</var> from your SFT model for <var>n</var> = 1 to 64, choosing by your RM as the proxy and scoring with a much stronger public RM as the gold (e.g. <code>Skywork/Skywork-Reward-Llama-3.1-8B-v0.2</code>). Plot both against best-of-<var>n</var>'s KL from the policy, ln <var>n</var> − (<var>n</var> − 1)/<var>n</var>, and against answer length. The proxy keeps rising; watch whether the gold curve flattens or turns down.</li>
+  <li><strong>RLAIF (AI feedback and Constitutional AI).</strong> Write a five-principle constitution, have Meta's Instruct label pairs of your SFT model's answers against it, and run DPO on AI labels vs UltraFeedback labels. Measure whether the judge's length and style biases show up in the policy.</li>
+  <li><strong>Distillation: text vs probabilities.</strong> Train Qwen2.5-0.5B base from Qwen2.5-1.5B-Instruct with sequence-level SFT and with logit-level KL on stored top-64 distributions (384 B per position; Low-level: the logit storage problem), at equal tokens. Verify the <var>p</var> − <var>q</var> gradient against autograd first.</li>
+  <li><strong>Tool calls (How a model learns to call tools).</strong> SFT on tool transcripts in Llama 3.1's <code>ipython</code> format with tool results masked out. Then train a second adapter that is <em>not</em> masked on tool results, and measure how often each one writes a fake tool result when you stop the loop after its call.</li>
+</ul>
 </section>
 
 <section>

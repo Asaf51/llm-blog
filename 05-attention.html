@@ -93,6 +93,7 @@
     <li>Position: why attention is blind to order, how RoPE rotates vectors, and how Llama 3.1 and YaRN stretch an 8K model to 128K.</li>
     <li>The n² cost at prefill, the one-row cost at decode, and why decode attention is memory-bound.</li>
     <li>How MHA, MQA, GQA and MLA differ in which heads share keys and values; sliding windows, sinks, sparse attention, and the linear-time alternatives.</li>
+    <li><strong>Build it:</strong> write your own GQA + RoPE attention layer, swap it into a real Llama until the logits match, then use it to find induction and sink heads, stretch a 2K-context model to 16K with five RoPE rules, and measure the n² and decode costs.</li>
   </ul>
 </div>
 
@@ -2029,6 +2030,140 @@
 <li>Prefill attention is O(n²) FLOPs. Decode attention is one query row against the cache, O(t) per token and memory-bound.</li>
 <li>Variants trade along two axes: make each cached token smaller (GQA, MQA, MLA) or read fewer of them (windows, sinks, sparse selection, recurrent hybrids).</li>
 </ul></aside>
+</section>
+
+<section class="build">
+<h2><span class="build-tag">Build it</span>An attention lab: your own GQA + RoPE layer inside a real Llama</h2>
+
+<div class="build-meta">
+  <span><b>Time</b>16–24 hours</span>
+  <span><b>Level</b>Intermediate to advanced</span>
+  <span><b>Stack</b>Python, PyTorch, Hugging Face transformers, matplotlib</span>
+  <span><b>Hardware</b>1 GPU, 24 GB+ (40 GB+ to check Llama 3.1 8B in FP32)</span>
+  <span><b>Uses</b>Sections: One attention head, exactly · Causal masking · Many heads in parallel · What heads learn · RoPE: position as rotation · Stretching the context window · The n² problem · Sharing keys and values · Local, sparse and sink attention</span>
+</div>
+
+<p>You will write the attention layer yourself: one head, then many, then grouped-query attention with RoPE and Llama 3.1’s scaling rule. Then you open a Hugging Face Llama, take out every layer’s <code>self_attn</code> module and put yours in its place. When the logits match the stock model, the one layer where tokens exchange information is code you wrote and understand line by line.</p>
+
+<p>Owning that layer is what makes the second half possible. The stock module does not let you cheaply read every head’s weights, switch single heads off, change the mask or swap the RoPE frequencies. Yours does. So you turn the chapter’s claims into experiments: find previous-token, sink and induction heads in a real model; break a sliding window by dropping the sinks and repair it with four tokens; stretch a 2,048-token model to 16,384 with five RoPE rules; and measure the 2·<var>n</var>² bytes and the <var>g</var> FLOPs/byte yourself.</p>
+
+<p>On paper attention is eight lines of NumPy. A real implementation hides a dozen ways to be silently wrong: the pair layout, the query-to-KV-head mapping, the scaling rule, the mask value, the softmax precision. A model that still writes fluent text with your layer inside it is the strictest test there is.</p>
+
+<h3>The deliverable</h3>
+<ul>
+  <li><code>attnlab/</code>, a small library: <code>attention.py</code> (GQA attention with causal, sliding-window and sink masks), <code>rope.py</code> (frequency table, both pair layouts, five scaling rules) and <code>patch.py</code> (swap your layer into a Llama-family model, with switches to record head statistics and ablate heads).</li>
+  <li>A <code>pytest</code> suite that checks your layer against PyTorch’s <code>scaled_dot_product_attention</code> and Hugging Face’s RoPE code, plus property tests for causality, permutation equivariance and relative position.</li>
+  <li>Four experiment scripts, each producing plots: head-type heatmaps and an ablation chart, a sinks-versus-window loss curve, a context-stretching loss curve, and prefill/decode cost curves.</li>
+  <li><code>REPORT.md</code>: a table with this chapter’s numbers next to the values you measured or computed.</li>
+</ul>
+
+<h3>Setup</h3>
+<p>Two models. <code>meta-llama/Llama-3.1-8B</code> (the base model) is the chapter’s running example: 32 query heads, 8 KV heads, <var>d</var><sub>h</sub> = 128, 16 GB in BF16. It is gated, so accept the license on its Hugging Face page first. <code>TinyLlama/TinyLlama_v1.1</code> is the ungated fallback for every milestone: the same Llama architecture with 22 layers, 32 query heads and 4 KV heads of 64 dimensions, RoPE base 10,000, and a training context of only 2,048 tokens. That short window and that base (the one in the chapter’s NTK example) make it the better subject for milestone 6 anyway. For long text, use <code>emozilla/pg19-test</code> on the Hub: 100 public-domain books from the PG-19 test split.</p>
+
+<pre><code>pip install torch transformers datasets matplotlib pytest
+hf auth login                  <span class="c"># only for the gated Llama 3.1 8B</span>
+
+attnlab/      attention.py  rope.py  patch.py
+tests/        test_attention.py  test_rope.py  test_patch.py
+experiments/  heads.py  sinks.py  context.py  cost.py
+REPORT.md</code></pre>
+
+<h3>Milestones</h3>
+<ol class="milestones">
+  <li>
+    <div class="ms-title">One head, then many: a reference GQA layer</div>
+    <p>Port the NumPy head from “The low-level view of one head” to batched PyTorch, then generalize it to <var>h</var> query heads and <var>h</var><sub>kv</sub> KV heads. Do not copy keys with <code>repeat_kv</code>: view the queries as (<var>B</var>, <var>h</var><sub>kv</sub>, <var>g</var>, <var>n</var>, <var>d</var><sub>h</sub>) so the <var>g</var> heads that share a KV head ride together, as in “GQA in practice”. The same function then covers MHA (<var>h</var><sub>kv</sub> = <var>h</var>) and MQA (<var>h</var><sub>kv</sub> = 1). Add a <code>q_chunk</code> option that processes query rows in blocks; it is exact and keeps the score tile small for the long runs later. Leave <code>window</code> and <code>n_sink</code> for milestone 5.</p>
+    <pre><code><span class="k">def</span> <span class="f">attention</span>(q, k, v, *, causal=<span class="k">True</span>, window=<span class="k">None</span>, n_sink=<span class="n">0</span>, q_chunk=<span class="k">None</span>,
+              scale=<span class="k">None</span>, return_probs=<span class="k">False</span>, backend=<span class="s">"naive"</span>):
+    <span class="s">"""q: (B, h, n, d_h); k, v: (B, h_kv, n, d_h) with h % h_kv == 0.
+    Returns o: (B, h, n, d_h), plus probs: (B, h, n, n) if return_probs."""</span>
+    ...</code></pre>
+    <p class="check">Your output matches <code>torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=True, enable_gqa=True)</code> to about 1e-5 in FP32 for <var>h</var> = 32 and <var>h</var><sub>kv</sub> ∈ {32, 8, 1}. Changing token <var>j</var>’s query, key and value leaves every output row <var>i</var> &lt; <var>j</var> exactly unchanged (<code>torch.equal</code>): the causal mask as a test. With the mask off and no RoPE, permuting the tokens permutes the outputs the same way (“Position: attention is blind to order”). For random unit-variance vectors with <var>d</var><sub>h</sub> = 128, raw dot products have a standard deviation near 11.3 and scaled ones near 1.</p>
+  </li>
+  <li>
+    <div class="ms-title">RoPE: two layouts, a frequency ladder and five scaling rules</div>
+    <p>Write the frequency table θ<sub><var>i</var></sub> = <var>b</var><sup>−2<var>i</var>/<var>d</var><sub>h</sub></sup> and a rotation that supports both pair layouts from the deep dive in “RoPE: position as rotation”: <code>"interleaved"</code> (Meta: pairs (0,1), (2,3), …) and <code>"half"</code> (Hugging Face’s <code>rotate_half</code>: pairs (0,64), (1,65), …). Then implement the rules from “Stretching the context window” as functions of the frequency vector: <code>none</code>, <code>pi</code> (divide every θ by <var>s</var>), <code>ntk</code> (raise the base), <code>llama3</code> (Meta’s <code>apply_scaling</code>, vectorized with <code>torch.where</code> instead of the loop) and <code>yarn</code> (a by-parts ramp plus the temperature factor, returned separately).</p>
+    <pre><code><span class="k">def</span> <span class="f">rope_freqs</span>(d_h: int, base: float) -&gt; Tensor: ...         <span class="c"># (d_h/2,) theta_i in fp32</span>
+<span class="k">def</span> <span class="f">scale_freqs</span>(theta, rule: str, s: float, L_train: int, **kw
+                ) -&gt; tuple[Tensor, float]: ...            <span class="c"># (theta', attention factor)</span>
+<span class="k">def</span> <span class="f">apply_rope</span>(x, pos, theta, layout=<span class="s">"half"</span>) -&gt; Tensor: ...  <span class="c"># x: (..., n, d_h)</span></code></pre>
+    <p class="check">With <var>d</var><sub>h</sub> = 128 and <var>b</var> = 500,000, the wavelengths 2π/θ<sub><var>i</var></sub> of pairs 0, 16, 32 and 63 come out at 6.28, 167, 4,443 and 2.56 M tokens. Your <code>llama3</code> rule leaves pairs 0–28 untouched, divides pairs 35–63 by exactly 8, blends 29–34, and moves the slowest wavelength to 20.5 M. <code>ntk</code> with <var>b</var> = 10,000 and <var>s</var> = 4 gives <var>b</var>′ ≈ 40,890; the <code>yarn</code> factor for <var>s</var> = 8 is 1.208. Your <code>llama3</code> and <code>yarn</code> frequencies match Hugging Face’s <code>ROPE_INIT_FUNCTIONS</code> (in <code>transformers.modeling_rope_utils</code>) to 1e-6 relative. Property tests: rotation preserves norms; shifting both positions by the same offset leaves ⟨<var>R</var><sub><var>m</var></sub><var>q</var>, <var>R</var><sub><var>n</var></sub><var>k</var>⟩ unchanged (reproduce the worked example’s 0.071); the two layouts give identical scores once you permute the dimensions of <var>q</var> and <var>k</var> to match.</p>
+  </li>
+  <li>
+    <div class="ms-title">Swap it into a real Llama and match the logits</div>
+    <p>Write a module that reuses the stock layer’s <code>q_proj</code>, <code>k_proj</code>, <code>v_proj</code> and <code>o_proj</code> and does everything in between with your code: the reshapes from “Shapes and memory layout”, RoPE computed from <code>position_ids</code> (ignore the cos/sin tables Hugging Face passes in), your <code>attention()</code>, and the head merge. Replace <code>model.model.layers[i].self_attn</code> in every layer. Run with <code>use_cache=False</code> on unpadded inputs; the KV cache is <a href="12-kv-cache.html">Chapter 12</a>’s project. Debug one layer at a time before swapping them all: capture each stock module’s input and output with <code>register_forward_hook(..., with_kwargs=True)</code>, feed the same input to yours, compare.</p>
+    <pre><code><span class="k">class</span> <span class="f">MyAttention</span>(nn.Module):
+    <span class="k">def</span> <span class="f">__init__</span>(self, stock, config, rope_rule=<span class="s">"auto"</span>): ...  <span class="c"># reuse stock.q_proj etc.</span>
+    <span class="k">def</span> <span class="f">forward</span>(self, hidden_states, position_ids=<span class="k">None</span>, **kwargs):
+        ...
+        <span class="k">return</span> out, <span class="k">None</span>   <span class="c"># the decoder layer unpacks two values; check your version</span>
+
+<span class="k">def</span> <span class="f">patch</span>(model, **opts) -&gt; list[MyAttention]: ...   <span class="c"># keep handles for milestones 4-6</span></code></pre>
+    <p class="check">TinyLlama in FP32: every layer’s output matches the stock module to FP32 rounding (around 1e-5 relative), the largest logit difference is below 1e-3, and a 50-token greedy continuation is identical. Llama 3.1 8B in BF16 (FP32 if you have the memory): the next-token argmax agrees at 99%+ of positions over a few thousand PG-19 tokens, and perplexity agrees within 0.5%. Then sabotage on purpose: use the <code>interleaved</code> layout on Hugging Face weights, or send query head <var>j</var> to KV head <var>j</var> mod <var>h</var><sub>kv</sub> instead of ⌊<var>j</var>/<var>g</var>⌋. Perplexity should get dramatically worse both times. Keep these as tests; they prove your checks can fail.</p>
+  </li>
+  <li>
+    <div class="ms-title">Find the heads the chapter describes</div>
+    <p>Give your module a recording switch that reduces each head’s attention weights to a few numbers on the GPU; full (<var>h</var>, <var>n</var>, <var>n</var>) tensors for every layer fill memory fast. Following “What heads learn”, compute three scores per (layer, head): <em>previous-token</em>, the mean weight on <var>i</var>−1; <em>sink</em>, the mean weight on position 0; and <em>induction</em>: on BOS followed by <var>T</var> random tokens repeated twice, the mean weight from each second-copy position <var>i</var> onto <var>i</var>−<var>T</var>+1, the token that followed the earlier occurrence. Then add a head mask that zeroes chosen heads before <var>W</var><sub>O</sub>; the second form of the multi-head formula shows this removes exactly that head’s additive contribution. Measure the loss on the repeated half with nothing ablated, with the top-<var>k</var> induction heads ablated, and with <var>k</var> random heads ablated, for <var>k</var> = 1, 4, 16.</p>
+    <pre><code><span class="k">def</span> <span class="f">head_scores</span>(probs: Tensor, T: int) -&gt; dict[str, Tensor]:
+    <span class="s">"""probs: (h, n, n) for one layer, n = 2T + 1 (BOS first).
+    Returns 'prev', 'sink' and 'induction', each of shape (h,)."""</span></code></pre>
+    <p class="check">You have three layer × head heatmaps. No layer-0 head has a high induction score, because an induction head needs a previous-token head in an earlier layer; the strongest previous-token heads sit in earlier layers than the strongest induction heads. Loss on the second copy is far below loss on the first (the model copies). Ablating the top-<var>k</var> induction heads raises that loss far more than ablating <var>k</var> random heads (average several draws), and random ablation barely moves it: the redundancy the chapter warns about. Averaged over heads, the sink score is small in the first layer or two and large in most later layers. Cross-check one layer’s recorded weights against the stock model loaded with <code>attn_implementation="eager"</code> and <code>output_attentions=True</code>.</p>
+  </li>
+  <li>
+    <div class="ms-title">Change the mask: sliding windows and attention sinks</div>
+    <p>Implement <code>window</code> and <code>n_sink</code>: row <var>i</var> may read keys <var>j</var> with <var>i</var> − <var>W</var> &lt; <var>j</var> ≤ <var>i</var>, plus keys <var>j</var> &lt; <var>n</var><sub>sink</sub>, the patterns of Figure 5.14. Use PG-19 text at the model’s trained length (8,192 tokens for Llama 3.1 8B, 2,048 for TinyLlama) so unseen positions cannot confound the result, and measure per-position loss under three masks: full causal, window only (<var>W</var> = 1,024 for Llama, 256 for TinyLlama), and window plus the first 4 tokens, StreamingLLM’s recipe from “Attention sinks”. Plot loss against position in buckets. Also add gpt-oss’s sink logit as an option: one extra logit <var>b</var> per head in the softmax denominator.</p>
+    <p class="check">Below position <var>W</var> the three curves coincide exactly (same backend, same chunking), because the masks agree there: a free test of your mask code. Past <var>W</var>, window-only loss rises sharply while window plus 4 sinks stays close to full attention, so dropping the sinks costs far more than dropping the long-range context. Your sink-logit softmax reproduces ordinary softmax as <var>b</var> → −∞ and drives the head’s output toward zero when <var>b</var> dominates every score.</p>
+  </li>
+  <li>
+    <div class="ms-title">Stretch TinyLlama from 2,048 to 16,384 tokens with five RoPE rules</div>
+    <p>This is the experiment behind “Stretching the context window”, run zero-shot (no fine-tuning). Feed 16,384-token chunks of PG-19 books (<var>s</var> = 8) through TinyLlama under each rule: <code>none</code>, <code>pi</code>, <code>ntk</code>, <code>llama3</code> (factor 8, low and high frequency factors 1 and 4, original length 2,048) and <code>yarn</code> (factor 8). Plot per-position loss for all five on one chart. A 16K × 16K score matrix for 32 heads is 17 GB per layer in BF16, so switch <code>attention()</code> to <code>backend="sdpa"</code> here; the frequencies stay yours. Before you look at the curves, predict them: for each rule, list which of TinyLlama’s 32 pairs reach angles by position 16,384 that they never reached below 2,048.</p>
+    <p class="check">For <code>none</code>, the out-of-range pairs are exactly those with wavelengths above 2,048 tokens (pairs 21–31), and the loss climbs steeply soon after position 2,048. Below 2,048, <code>ntk</code> and <code>llama3</code> stay much closer to <code>none</code> than <code>pi</code> does, because <code>pi</code> squeezes the fast pairs 8×. Past 2,048, the frequency-aware rules degrade far more gracefully than <code>none</code>. Your out-of-range table predicts the ordering you see; write one paragraph in <code>REPORT.md</code> on why every rule still loses quality far out, with “Long context in practice” in mind.</p>
+  </li>
+  <li>
+    <div class="ms-title">Measure the n² problem and the memory-bound decode</div>
+    <p>Benchmark one attention layer with Llama 3.1 8B’s shapes (32 query heads, 8 KV heads, <var>d</var><sub>h</sub> = 128, BF16) on random tensors; no model needed. Prefill: for <var>n</var> = 1K … 32K, time your naive backend (no chunking) and SDPA’s flash kernel, and record peak extra memory. You are <em>using</em> FlashAttention here, not building it; that is <a href="15-serving.html">Chapter 15</a>. Decode: one query row per head against <var>t</var> = 1K … 128K cached keys and values, with your grouped implementation, a <code>repeat_kv</code> version that expands to 32 heads first, and <var>h</var><sub>kv</sub> ∈ {32, 8, 1}. Convert every timing into achieved TFLOP/s and GB/s using the counts in “The n² problem: cost at prefill and decode”.</p>
+    <pre><code><span class="k">def</span> <span class="f">bench</span>(fn, *args, warmup=<span class="n">5</span>, iters=<span class="n">50</span>) -&gt; float:
+    <span class="s">"""Median milliseconds, timed with torch.cuda.Event."""</span>
+
+<span class="k">def</span> <span class="f">decode_bytes</span>(t, h_kv, d_h=<span class="n">128</span>, bytes_per=<span class="n">2</span>) -&gt; int: ...  <span class="c"># K and V read per step</span>
+<span class="k">def</span> <span class="f">decode_flops</span>(t, h, d_h=<span class="n">128</span>) -&gt; int: ...</code></pre>
+    <p class="check">Naive peak extra memory grows as <var>n</var>² and is a small multiple of 2·<var>n</var>²·<var>h</var> bytes (one copy of <var>S</var> is 4.3 GB per layer at 8,192, the chapter’s number); the naive version runs out of memory by 32K even on an 80 GB card, while SDPA’s extra memory grows linearly. On a log-log plot, SDPA prefill time approaches slope 2 at large <var>n</var>. Decode time grows linearly in <var>t</var> and in <var>h</var><sub>kv</sub>. At large <var>t</var> your achieved bandwidth is a sizeable fraction of your GPU’s HBM spec, and FLOPs per byte come out near <var>g</var> (1 for MHA, 4 for GQA-8, 32 for MQA), far below the ridge point (“Low-level: decode attention is memory-bound”). The <code>repeat_kv</code> version is measurably slower than the grouped one at the same <var>h</var><sub>kv</sub>.</p>
+  </li>
+</ol>
+
+<h3>Done when</h3>
+<ul class="checklist">
+  <li><code>pytest</code> is green: attention versus SDPA for MHA, GQA and MQA; the causality, permutation and relative-position property tests; your <code>llama3</code> and <code>yarn</code> frequencies versus Hugging Face’s; and the sabotage tests fail the way they should.</li>
+  <li>Your layer runs inside every block of TinyLlama (FP32 logits within 1e-3, identical greedy text) and of Llama 3.1 8B (perplexity within 0.5% of stock).</li>
+  <li><code>heads.png</code> and <code>ablation.png</code> show three head-type heatmaps and an ablation chart in which the top induction heads hurt copying far more than random heads do.</li>
+  <li><code>sinks.png</code> shows window-only loss breaking past <var>W</var> and four sink tokens repairing it.</li>
+  <li><code>context.png</code> shows five RoPE rules on one loss-versus-position chart out to 16,384, explained pair by pair.</li>
+  <li><code>cost.png</code> shows prefill time and memory versus <var>n</var> and decode time versus <var>t</var> and <var>h</var><sub>kv</sub>, annotated with achieved GB/s and FLOPs per byte.</li>
+  <li><code>REPORT.md</code> puts at least ten of this chapter’s numbers (the wavelengths, pairs 0–28/29–34/35–63, 40,890, 1.208, 134 MB, 4.3 GB, ≈ 4 FLOPs/byte, 41,943,040 attention parameters per layer, …) next to your own values.</li>
+</ul>
+
+<details class="deep-dive"><summary>Hints (open only when stuck)</summary>
+<ul>
+  <li>Compute position × θ in FP32 or FP64, never BF16. BF16 keeps 8 significant bits, so position 10,000 becomes 9,984. Cast cos and sin to the model’s dtype only at the end.</li>
+  <li>Hugging Face checkpoints use the <code>"half"</code> layout; their conversion script permuted the rows of <var>W</var><sub>Q</sub> and <var>W</var><sub>K</sub> to match. Meta’s original checkpoints use <code>"interleaved"</code>.</li>
+  <li>If <var>q</var> is (<var>B</var>, <var>h</var>, <var>n</var>, <var>d</var><sub>h</sub>) with heads contiguous, <code>q.view(B, h_kv, g, n, d_h)</code> puts query head <var>j</var> in group <var>j</var> // <var>g</var>, which is what Llama expects. <code>k.unsqueeze(2)</code> then broadcasts over the group without a copy.</li>
+  <li>Run the softmax in FP32 and cast back, as the stock eager path does; a BF16 softmax over thousands of keys eats your 0.5% budget. For the FP32 comparisons, set <code>torch.backends.cuda.matmul.allow_tf32 = False</code>.</li>
+  <li>−∞ is safe in causal rows because the diagonal is always allowed, but any fully masked row becomes NaN. Write a test for it and decide what you want (the “Low-level: how the mask is applied” callout).</li>
+  <li>Recent <code>transformers</code> versions keep RoPE settings in <code>config.rope_parameters</code>; older ones use <code>config.rope_theta</code> and <code>config.rope_scaling</code>. TinyLlama’s config has no base at all, so the default 10,000 applies.</li>
+  <li>The decoder layer calls <code>self_attn</code> with keyword arguments. Accept <code>**kwargs</code> and ignore <code>attention_mask</code>; that is only safe because you use batch size 1 or equal-length, unpadded batches.</li>
+  <li>Hugging Face’s YaRN folds the attention factor into cos and sin, so both <var>q</var> and <var>k</var> are scaled and the scores grow by its square. Use the same convention when you compare.</li>
+  <li>Induction sequences: draw ordinary token IDs (no special tokens), <var>T</var> between 200 and 500, BOS first, and score only the second copy.</li>
+  <li>Benchmarks: warm up, synchronize, take medians, and call <code>torch.cuda.reset_peak_memory_stats()</code> before each size. Force the kernel with <code>torch.nn.attention.sdpa_kernel(SDPBackend.FLASH_ATTENTION)</code> so you know what you measured.</li>
+</ul>
+</details>
+
+<h3>Stretch goals</h3>
+<ul>
+  <li><strong>MLA in miniature.</strong> With random weights at DeepSeek-V3’s sizes (<var>d</var><sub>c</sub> = 512, <var>d</var><sub>R</sub> = 64, 128 heads), implement MLA naively and with “The absorption trick”. Show the two agree to FP32 rounding, count the cached numbers per token (576, against 2,048 for Llama’s GQA), and benchmark decode intensity against the chapter’s ≈ 240 FLOPs/byte.</li>
+  <li><strong>Passkey retrieval.</strong> Hide a 5-digit number at depths 0–100% of a 4K–16K haystack and plot accuracy against depth and length for each RoPE rule on TinyLlama, or for Llama 3.1 8B out to 128K with the SDPA backend (compute logits only for the answer positions). Compare with “Long context in practice”.</li>
+  <li><strong>Linear attention as an RNN.</strong> Implement causal linear attention in its parallel (masked matrix) and recurrent (state <var>S</var><sub><var>t</var></sub>) forms and check they agree. Then write <var>N</var> random key/value pairs into one <var>d</var><sub>h</sub> × <var>d</var><sub>h</sub> state, read them back, and plot retrieval error as <var>N</var> passes <var>d</var><sub>h</sub>: the overfull hash table from “Beyond softmax attention”.</li>
+  <li><strong>Train the stretch in.</strong> Fine-tune TinyLlama for a few hundred steps on 8K-token chunks of books outside your evaluation set, with your <code>llama3</code> or <code>yarn</code> rule (LoRA through <code>peft</code> is fine), and re-plot milestone 6: the “then training briefly on long text” half of the story.</li>
+</ul>
 </section>
 
 <section>

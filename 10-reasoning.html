@@ -69,6 +69,7 @@
     <li>What a reasoning response is, token by token: <code>&lt;think&gt;</code> blocks and harmony channels, which tokens are billed, shown, and kept for the next turn; hidden, summarized and encrypted reasoning in commercial APIs; thinking between tool calls.</li>
     <li>Effort and thinking budgets in the OpenAI, Anthropic, Gemini, Qwen3 and gpt-oss interfaces, and the four ways effort is implemented: prompt conditioning, budget forcing, hard caps and adaptive thinking.</li>
     <li>What thinking costs (worked example on Llama 3.1 8B), how it fails, and how to pick an effort level. An interactive effort simulator.</li>
+    <li><strong>Build it:</strong> a one-GPU reasoning lab: measure thinking longer vs thinking wider on real models, write a budget forcer and the GRPO loss from the equations, run a mini R1-Zero on a 0.5B base model, and pit it against distillation.</li>
   </ul>
 </div>
 
@@ -1322,6 +1323,194 @@ Current date: 2026-10-31
 </ol>
 
 <aside class="callout key"><div class="callout-title">Key takeaway</div><p>A reasoning model buys accuracy with tokens. Every effort level is a point on a curve where each extra 10× of thinking costs 10× in output tokens, latency and KV-cache time, and returns a shrinking gain. Pick the point per workload, verify it with evals, and remember that the thinking you do not see is still on the bill.</p></aside>
+</section>
+
+<section class="build">
+<h2><span class="build-tag">Build it</span>A one-GPU reasoning lab: test-time compute, budget forcing, and a mini R1-Zero with GRPO</h2>
+
+<div class="build-meta">
+  <span><b>Time</b>18–25 hours, plus 8–12 GPU-hours unattended</span>
+  <span><b>Level</b>Intermediate–advanced</span>
+  <span><b>Stack</b>Python, PyTorch, transformers, vLLM, datasets, math-verify, matplotlib (TRL for one cross-check)</span>
+  <span><b>Hardware</b>1 GPU, 24 GB+ (40–80 GB for the 1.5B option; 2–8 GPUs only for one stretch goal)</span>
+  <span><b>Uses</b>Sections: Why thinking helps; Test-time compute: think longer or think wider; Training reasoning with reinforcement learning; GRPO step by step; The DeepSeek-R1 recipe, and distillation; Outcome rewards vs process rewards; How effort is implemented; What thinking costs; How reasoning fails</span>
+</div>
+
+<p>You will build <code>reasonlab</code>, a small lab that does to real models everything this chapter describes. It measures why thinking helps. It spends test-time compute both ways: wider (many samples and a vote) and longer (a budget-forced thinking loop). It implements GRPO from the equations and uses it to run a mini R1-Zero on a 0.5B base model. Then it distills a thinking model into the same base and compares the two paths. Each piece is small: the verifier is about 40 lines, the GRPO loss about 30, the budget forcer is the chapter's 20-line loop. The work is in the measurements.</p>
+
+<p>Why this project: nearly every claim in this chapter can be tested on one GPU. The advantages in Figure 10.7, the clip and KL numbers, pass@<var>N</var> = 1 − (1 − <var>p</var>)<sup><var>N</var></sup>, 128 KiB of KV cache per thinking token, "generation dominates the RL step", "RL shifts probability mass toward chains the model already finds", "distillation beats RL on small models". Some will match to the decimal. Some will match only in shape. One or two may not hold at 0.5B, and explaining why is the most valuable part.</p>
+
+<p>At the end you have a tested library, a model you trained with RL, a distilled model, six plots, and a report that puts your numbers next to the chapter's.</p>
+
+<h3>The deliverable</h3>
+<ul>
+  <li>A <code>reasonlab/</code> package with a <code>pytest</code> suite: the verifier, pass@k and maj@k, the budget forcer (tested against a scripted fake model), and the GRPO loss.</li>
+  <li>A JSONL cache of every sampled rollout (prompt, token IDs, thinking-token count, extracted answer, reward). Every plot is computed from it, never from a fresh run.</li>
+  <li>Six plots: answer-now vs think-first by digit count; pass@k and maj@k vs <var>k</var> with two formula predictions; accuracy vs thinking tokens (budget-forced vs hard-capped, easy vs hard tasks); sequential vs parallel at matched token spend; the RL dashboard; pass@k curves for base, GRPO and distilled models.</li>
+  <li>Two checkpoints, <code>qwen0.5b-grpo</code> and <code>qwen0.5b-distill</code>, loadable with <code>AutoModelForCausalLM</code>.</li>
+  <li><code>REPORT.md</code>: a "the chapter says / I measured / why they differ" row for every line of the Reference numbers table below.</li>
+</ul>
+
+<h3>Setup</h3>
+<p>Install <code>torch transformers datasets vllm math-verify matplotlib pytest</code>, plus <code>trl</code> for the cross-check in milestone 6. Data: <code>openai/gsm8k</code> (config <code>main</code>: 7,473 train and 1,319 test problems, integer answers after <code>####</code>) and <code>HuggingFaceH4/MATH-500</code> (500 problems with an <code>answer</code> and a <code>level</code> from 1 to 5). Models, all on Hugging Face:</p>
+<ul>
+  <li><code>meta-llama/Llama-3.1-8B-Instruct</code> for milestones 2–3, so the chapter's numbers apply directly. It is gated; <code>Qwen/Qwen2.5-1.5B-Instruct</code> is the ungated fallback.</li>
+  <li><code>Qwen/Qwen3-1.7B</code>, the thinking model for milestones 4 and 7. It writes the <code>&lt;think&gt;</code> (ID 151667) … <code>&lt;/think&gt;</code> (ID 151668) format of Figure 10.10 and has the <code>enable_thinking</code> switch. It is small enough that 8,000-token chains are cheap.</li>
+  <li><code>Qwen/Qwen2.5-0.5B</code> (the base model, not Instruct) as the RL and distillation student. At 0.49B parameters its GRPO states are about 9 GB, so a full run fits a 24 GB card. With 40–80 GB, use <code>Qwen/Qwen2.5-1.5B</code>.</li>
+</ul>
+<p>Why not run RL on Llama 3.1 8B? The chapter's own accounting answers it: policy plus reference is ≈ 144 GB before activations ("Low-level: what one RL step costs"). Use vLLM for all bulk sampling and plain <code>transformers</code> for the reference loops and for training. If you built Chapter 9's SFT loop, reuse it in milestone 7; otherwise TRL's <code>SFTTrainer</code> is fine.</p>
+<pre><code>reasonlab/
+  verify.py      <span class="c"># extract_answer, reward, format_ok              (M1)</span>
+  tasks.py       <span class="c"># GSM8K, MATH-500, make_mult                     (M1)</span>
+  sample.py      <span class="c"># vLLM sampling → JSONL cache of every rollout   (M2–M4)</span>
+  tts.py         <span class="c"># pass@k, maj@k, formula predictions             (M3)</span>
+  budget.py      <span class="c"># generate_with_budget (HF), vllm_with_budget    (M4)</span>
+  grpo.py        <span class="c"># advantages, KL, loss, token_logprobs           (M5)</span>
+  train_rl.py    <span class="c"># the RLVR loop of Figure 10.6                   (M6)</span>
+  distill.py     <span class="c"># rejection sampling + SFT, final comparison     (M7)</span>
+  tests/         <span class="c"># test_verify, test_tts, test_budget, test_grpo</span>
+runs/            <span class="c"># samples/*.jsonl, logs, plots, REPORT.md</span></code></pre>
+
+<h3>Reference numbers</h3>
+<p>The chapter's claims, and what each one becomes in this project. The milestones refer back to them.</p>
+<div class="table-wrap">
+<table class="data">
+  <tr><th>Quantity</th><th>Chapter's claim (section)</th><th>Target in this project</th></tr>
+  <tr><td>KV cache per thinking token</td><td>128 KiB for Llama 3.1 8B (Two resources a token gets)</td><td>exactly 131,072 B; 28,672 B for Qwen2.5-1.5B; 114,688 B for Qwen3-1.7B</td></tr>
+  <tr><td>FLOPs per thinking token</td><td>2<var>N</var> + 4·<var>L</var>·<var>d</var>·<var>t</var> (Why thinking helps)</td><td>16.06 GFLOP + 524,288·<var>t</var> for Llama 3.1 8B, used in your cost table</td></tr>
+  <tr><td>pass@<var>N</var> with independent samples</td><td>1 − (1 − <var>p</var>)<sup><var>N</var></sup> (Combining parallel samples)</td><td>94.2% at <var>p</var> = 0.30, <var>N</var> = 8; 96.2% at <var>p</var> = 0.05, <var>N</var> = 64; per-problem form within ±2 points of measured</td></tr>
+  <tr><td>Group advantages, 3 of 8 correct</td><td>mean 0.375, std 0.484, Â = +1.29 / −0.77 (GRPO step by step)</td><td>exact to two decimals; advantages sum to 0</td></tr>
+  <tr><td>Clipped ratio</td><td>ρ = 1.15 gives 1.48 and a gradient; ρ = 1.30 gives 1.55 and none (The objective, symbol by symbol)</td><td>exact, gradient checked with autograd</td></tr>
+  <tr><td>KL estimator</td><td>0.0093 at π<sub>ref</sub> = 0.20, π<sub>θ</sub> = 0.23 (same)</td><td>exact</td></tr>
+  <tr><td>GRPO memory</td><td>trainable policy at 16 B/param + frozen reference at 2 B/param (Low-level: what one RL step costs)</td><td>18 B/param × 0.49B ≈ 8.9 GB for Qwen2.5-0.5B, before activations</td></tr>
+  <tr><td>Where RL step time goes</td><td>generation usually dominates wall-clock (Figure 10.6)</td><td>more than 50% of every step</td></tr>
+  <tr><td>RL on a small base</td><td>RL reinforces strategies the model sometimes finds (Training reasoning with reinforcement learning)</td><td>+5 points or more on held-out GSM8K in ~300 steps; SimpleRL-Zoo (2025) reports 36.7% → 49.5% for this base with a bigger budget</td></tr>
+  <tr><td>"Wait" extension</td><td>s1-32B: 50% → 57% on AIME 2024 (2. Budget forcing)</td><td>measured on MATH-500 levels 4–5; at 1.7B a small gain or none is a valid result</td></tr>
+  <tr><td>Distillation vs RL</td><td>72.6% vs 47.0% at 32B (Distillation: the cheap way to a small reasoning model)</td><td>measured at 0.5B, with GPU-hours for each path</td></tr>
+</table>
+</div>
+
+<h3>Milestones</h3>
+<ol class="milestones">
+  <li>
+    <div class="ms-title">A strict verifier and the task suite</div>
+    <p>Everything downstream trusts this function, so make it boring and strict. <code>extract_answer</code> returns the content of the last <code>\boxed{…}</code> with balanced braces, or <code>None</code>. For GSM8K, normalize (strip <code>$</code>, commas, spaces, a trailing <code>.0</code>) and compare as integers. For MATH-500, call <code>math_verify.verify(parse(gold), parse(pred))</code>; argument order matters, gold first. Add a format check for the R1-Zero shape from "R1-Zero: RL straight on a base model": a thinking region, then a boxed answer. Add <code>make_mult</code>, the chapter's 47 × 38 generalized to <var>n</var>-digit × <var>n</var>-digit. This is the outcome verifier of "Outcome rewards vs process rewards". It cannot be flattered, so make sure it cannot be fooled either: no credit for an answer that appears only in prose, and none for a box holding two candidates.</p>
+    <pre><code><span class="c"># verify.py: the only judge of correctness in this project</span>
+<span class="k">def</span> <span class="f">extract_answer</span>(text: str) -&gt; str | None: ...      <span class="c"># last \boxed{...}, braces balanced</span>
+<span class="k">def</span> <span class="f">gsm8k_gold</span>(solution: str) -&gt; str: ...               <span class="c"># the text after "####"</span>
+<span class="k">def</span> <span class="f">reward</span>(text: str, gold: str, task: str) -&gt; float: ... <span class="c"># 1.0 or 0.0, never partial</span>
+<span class="k">def</span> <span class="f">format_ok</span>(text: str) -&gt; bool: ...                    <span class="c"># &lt;think&gt;…&lt;/think&gt; then a boxed answer</span>
+
+<span class="c"># tasks.py</span>
+<span class="k">def</span> <span class="f">make_mult</span>(n_digits: int, k: int, seed: int) -&gt; list[dict]: ...  <span class="c"># {"q": "47 × 38", "gold": "1786"}</span></code></pre>
+    <p class="check">A table-driven test with at least 15 cases passes: <code>\boxed{1,786}</code>, <code>\boxed{1786.0}</code>, <code>$\boxed{1786}$</code>, two boxes (the last wins), <code>\boxed{\frac{1}{2}}</code> against gold <code>0.5</code> on MATH, no box, an empty box, <code>\boxed{1786 or 1796}</code>. Wrapping every GSM8K train gold answer as <code>\boxed{gold}</code> scores 7,473 / 7,473; pairing each with a shuffled gold scores a few percent at most.</p>
+  </li>
+  <li>
+    <div class="ms-title">Answer now or think first: the depth experiment</div>
+    <p>Turn Figure 10.1 into a measurement. For <var>n</var> = 1 to 6, make 100 <var>n</var>-digit × <var>n</var>-digit problems and run the instruct model in two modes. Direct: the prompt demands only the number; greedy, at most 16 new tokens, parse the first integer. Think first: step by step, final answer boxed; greedy, up to 2,048 tokens. Plot accuracy against <var>n</var> for both modes, and the mean number of generated tokens in think-first mode. For every think-first answer, fill in the chapter's bill from "Why thinking helps" and "What thinking costs": forward passes, serial depth (tokens × <var>L</var>), FLOPs, KV bytes, and seconds at the 209 tok/s ceiling. Then measure one number directly: run a prompt through the HF model, sum the bytes of every key and value tensor in <code>past_key_values</code>, and divide by the sequence length.</p>
+    <pre><code><span class="k">def</span> <span class="f">direct_messages</span>(a: int, b: int) -&gt; list[dict]: ...   <span class="c"># "Reply with only the number."</span>
+<span class="k">def</span> <span class="f">cot_messages</span>(a: int, b: int) -&gt; list[dict]: ...      <span class="c"># "Think step by step, then \boxed{}."</span>
+<span class="k">def</span> <span class="f">kv_bytes_per_token</span>(past_key_values, seq_len: int) -&gt; float: ...
+<span class="k">def</span> <span class="f">bill</span>(n_out: int, n_prompt: int, cfg, tok_per_s: float) -&gt; dict: ...
+    <span class="c"># passes, serial layers, FLOPs (2N + 4·L·d·t per token), KV bytes, seconds</span></code></pre>
+    <p class="check">Bytes per token are exactly 2 · <var>L</var> · <var>n</var><sub>kv</sub> · <var>d</var><sub>head</sub> · 2: 131,072 for Llama 3.1 8B (the chapter's 128 KiB), 28,672 for Qwen2.5-1.5B. The Llama 3 tokenizer splits <code>1786</code> into <span class="tok">178</span> + <span class="tok">6</span>, as the chapter says. Expected shape: both modes near 100% at <var>n</var> = 1; direct collapses first; think-first stays clearly above it for <var>n</var> ≥ 3, while its token count grows steadily with <var>n</var>. At 5–6 digits both fail: chains get long enough for one arithmetic slip to ruin them.</p>
+  </li>
+  <li>
+    <div class="ms-title">Think wider: pass@k, majority vote, and the formula</div>
+    <p>Sample <var>n</var> = 64 completions for 500 GSM8K test problems with vLLM (<code>SamplingParams(n=64, …)</code>, using the sampling defaults from the model's <code>generation_config.json</code>). The 64 samples share one cached prompt (Chapter 12). Cache everything. From the cache, without re-sampling, compute: each problem's success rate <var>p̂</var><sub><var>i</var></sub>; pass@k for <var>k</var> = 1, 2, 4, …, 64 with the unbiased estimator 1 − C(<var>n</var>−<var>c</var>, <var>k</var>) / C(<var>n</var>, <var>k</var>) (Chen et al., 2021); maj@k (the chapter's cons@k) by drawing <var>k</var> of the 64 at random many times and voting; and two predictions from "Combining parallel samples": the mean <var>p̄</var> plugged into 1 − (1 − <var>p</var>)<sup><var>N</var></sup>, and the per-problem average of 1 − (1 − <var>p̂</var><sub><var>i</var></sub>)<sup><var>N</var></sup>. Then time one prompt at <var>n</var> = 1, 8 and 64.</p>
+    <pre><code><span class="k">def</span> <span class="f">pass_at_k</span>(n: int, c: int, k: int) -&gt; float: ...      <span class="c"># unbiased, numerically stable</span>
+<span class="k">def</span> <span class="f">maj_at_k</span>(answers: list[str | None], gold: str, k: int,
+             trials: int = <span class="n">500</span>, rng=None) -&gt; float: ...   <span class="c"># vote over k of the n samples</span>
+<span class="k">def</span> <span class="f">predict_pass_at_k</span>(p_hat: np.ndarray, k: int) -&gt; tuple[float, float]: ...
+    <span class="c"># (from the mean p, from per-problem p)</span></code></pre>
+    <p class="check">On synthetic Bernoulli data your code reproduces the chapter's 94.2% (<var>p</var> = 0.30, <var>N</var> = 8) and 96.2% (<var>p</var> = 0.05, <var>N</var> = 64). On real data the per-problem prediction tracks measured pass@k within ±2 points at every <var>k</var>, while the mean-<var>p</var> prediction overshoots at every <var>k</var> &gt; 1: problems are not equally hard, and 1 − (1 − <var>p</var>)<sup><var>k</var></sup> is concave. maj@k rises, then flattens below pass@k; that gap is what a perfect verifier would add (o1: 83% vs 93%). Every problem where the vote fails has a wrong answer as its most common answer, the condition the chapter states. Time per decode step (wall-clock ÷ longest sample) at <var>n</var> = 8 is within ~1.3× of <var>n</var> = 1; total wall-clock grows mainly because you wait for the longest sample.</p>
+  </li>
+  <li>
+    <div class="ms-title">Think longer: a budget forcer and the accuracy-vs-tokens curve</div>
+    <p>Implement <code>generate_with_budget</code> from "How effort is implemented" twice. First, as the chapter's token-by-token loop over an HF model with a KV cache. It is the reference, and you unit-test it against a scripted <code>FakeLM</code> whose logits you control. Second, as a fast vLLM version: generate thinking with <code>max_tokens</code> set to the budget and <code>stop_token_ids=[151668]</code>. If it stopped before <code>min_think</code>, append <span class="tok"> Wait</span> and continue. If it hit the budget, append Qwen3's own "Considering the limited time…" sentence and <code>&lt;/think&gt;</code>, then generate the answer. Pass token IDs between phases (<code>{"prompt_token_ids": ids}</code>), not re-decoded text, and let prefix caching absorb the re-prefill.</p>
+    <p>Sweep Qwen3-1.7B on MATH-500 and on GSM8K with thinking budgets of 0 (thinking off: <code>enable_thinking=False</code> pre-fills the empty block), 128, 256, 512, 1k, 2k, 4k, 8k and unlimited, using Qwen3's recommended thinking-mode sampling (not greedy; see "How reasoning fails"). At each budget, also run the crude alternative from "3. Hard caps": no forcing, just <code>max_tokens</code> = budget + 512. Try the "Wait" extension on MATH-500 levels 4–5. Finally, reproduce Figure 10.4 at matched spend: at 2k, 4k and 8k thinking tokens per problem, compare one chain at the full budget with 4 or 8 chains at budget ÷ <var>k</var> plus your majority vote. Record accuracy and wall-clock for both.</p>
+    <pre><code><span class="k">@dataclass</span>
+<span class="k">class</span> <span class="f">Trace</span>:
+    ids: list[int]; n_think: int; n_forced: int; n_wait: int; capped: bool
+
+<span class="k">def</span> <span class="f">generate_with_budget</span>(lm, prompt_ids: list[int], min_think: int, max_think: int,
+                         max_tokens: int, sample) -&gt; Trace: ...   <span class="c"># reference: HF + KV cache</span>
+<span class="k">def</span> <span class="f">vllm_with_budget</span>(llm, prompts: list[list[int]], min_think: int, max_think: int,
+                     params) -&gt; list[Trace]: ...                  <span class="c"># think, force, answer</span>
+
+<span class="k">class</span> <span class="f">FakeLM</span>:   <span class="c"># step i returns logits whose argmax is script[i]; runs on a CPU</span>
+    <span class="k">def</span> <span class="f">__init__</span>(self, script: list[int], vocab: int = <span class="n">16</span>): ...</code></pre>
+    <p class="check">FakeLM tests: a model that wants <code>&lt;/think&gt;</code> at step 3 with <code>min_think</code> = 10 receives <span class="tok"> Wait</span> and ends with at least 10 thinking tokens; a model that never stops gets exactly <code>max_think</code> thinking tokens, then a forced close; no trace ever exceeds <code>max_tokens</code>. In the sweep, no real trace exceeds its budget. Plotted against thinking tokens actually used (log x-axis), MATH-500 accuracy rises roughly linearly through the middle budgets and flattens at the top, the left panel of Figure 10.5. Levels 4–5 keep gaining longest; GSM8K is nearly flat after a few hundred tokens (overthinking territory). Budget 0 is its own point: do not be surprised if tiny budgets land below it. Hard-capped accuracy sits far below budget-forced accuracy at small budgets because most traces end with no answer: the "Truncation" failure, measured.</p>
+  </li>
+  <li>
+    <div class="ms-title">GRPO from the equations, tested against Figure 10.7</div>
+    <p>Write the objective from "The objective, symbol by symbol" as a loss over padded tensors. <code>logp</code>, <code>logp_old</code> and <code>logp_ref</code> have shape (<var>B</var>, <var>T</var>) and hold the per-token log-probabilities of the sampled tokens; a mask marks completion tokens; each rollout has one advantage. Implement the three normalizations the chapter and its deep dive discuss: <code>"seq"</code> (1/|<var>o</var><sub><var>i</var></sub>|, then the mean over the group: the formula as written), <code>"token"</code> (one mean over all tokens, as in DAPO) and <code>"dr_grpo"</code> (a constant divisor and no std scaling). Return diagnostics with the loss: clip fraction, mean ratio, mean KL. Also write the helper that turns model logits into log-probs of the sampled tokens, micro-batch by micro-batch.</p>
+    <pre><code><span class="k">def</span> <span class="f">group_advantages</span>(r: Tensor, G: int, scale_std: bool = True,
+                     eps: float = <span class="n">1e-6</span>) -&gt; Tensor: ...
+<span class="k">def</span> <span class="f">kl_k3</span>(logp: Tensor, logp_ref: Tensor) -&gt; Tensor: ...   <span class="c"># per token, always ≥ 0</span>
+<span class="k">def</span> <span class="f">grpo_loss</span>(logp, logp_old, logp_ref, adv, mask, clip_eps=<span class="n">0.2</span>, beta=<span class="n">1e-3</span>,
+              norm=<span class="s">"seq"</span>) -&gt; tuple[Tensor, dict]: ...   <span class="c"># "seq" | "token" | "dr_grpo"</span>
+<span class="k">def</span> <span class="f">token_logprobs</span>(model, ids, attn, n_prompt, temperature=<span class="n">1.0</span>,
+                   micro=<span class="n">8</span>) -&gt; Tensor: ...   <span class="c"># (B, T); full-batch logits never exist</span></code></pre>
+    <p class="check">Tests reproduce the chapter to two decimals: rewards with 3 of 8 correct give mean 0.375, std 0.484, Â = +1.29 / −0.77, summing to 0. A token at ρ = 1.15 with Â = +1.29 contributes 1.48 and has a nonzero gradient; at ρ = 1.30 it contributes 1.55 and autograd returns exactly 0. A token in a losing rollout whose probability rose (ρ = 1.3, Â = −0.77) is not clipped. KL at π<sub>ref</sub> = 0.20, π<sub>θ</sub> = 0.23 is 0.0093. All-equal rewards give zero advantages and no NaN. With <code>logp_old = logp.detach()</code> and β = 0, the gradient on each token is −Â<sub><var>i</var></sub> / (<var>G</var>·|<var>o</var><sub><var>i</var></sub>|): "supervised training on your own samples", weighted by the advantage. With <code>norm="seq"</code>, a 100-token losing rollout gets 1/10 the per-token push of a 10-token one: the deep dive's length bias.</p>
+  </li>
+  <li>
+    <div class="ms-title">A mini R1-Zero on one GPU</div>
+    <p>Wire the pieces into the loop of Figure 10.6 and train Qwen2.5-0.5B (base) on GSM8K train. First filter the pool as "Training reasoning with reinforcement learning" says: sample 8 rollouts per training problem from the base model with vLLM, drop the problems it solves 0/8 or 8/8, and record what fraction survives. Starting hyperparameters: 16 prompts × <var>G</var> = 8 = 128 rollouts per step (R1-Zero used 32 × 16), temperature 1.0, 512 new tokens, AdamW at a constant 1e-6 (R1: 3e-6), ε = 0.2, β = 0.001, two to four mini-batch updates per rollout batch, about 300 steps. Generate with HF <code>generate</code> from the live policy, so there is no weight sync to get wrong. Every 25 steps, evaluate greedily on a fixed 500-problem slice of GSM8K test.</p>
+    <p>Log per step: mean reward, format rate, mean length of correct and of wrong rollouts, fraction of zero-variance groups, KL to the reference, clip fraction, the rate of "wait", "verify", "check" and "mistake" per 1,000 tokens (the R1-Zero reflection words), memory, and wall-clock split into generate, log-probs and update.</p>
+    <pre><code><span class="k">for</span> step <span class="k">in</span> range(n_steps):
+    probs = pool.sample(<span class="n">16</span>)
+    <span class="k">with</span> clock(<span class="s">"generate"</span>): ro = rollout(policy, probs, G=<span class="n">8</span>, T=<span class="n">1.0</span>, max_new=<span class="n">512</span>)
+    r = torch.tensor([reward(o.text, o.gold, <span class="s">"gsm8k"</span>) <span class="k">for</span> o <span class="k">in</span> ro])
+    adv = group_advantages(r, G=<span class="n">8</span>)
+    <span class="k">with</span> clock(<span class="s">"logprobs"</span>): lp_old, lp_ref = ...   <span class="c"># no grad: current policy, frozen reference</span>
+    <span class="k">with</span> clock(<span class="s">"update"</span>):
+        <span class="k">for</span> mb <span class="k">in</span> ro.minibatches(<span class="n">4</span>): ...          <span class="c"># token_logprobs → grpo_loss → backward → step</span>
+    log(step, r, adv, ro, clock)</code></pre>
+    <p class="check">Held-out accuracy ends at least 5 points above step 0. Generation takes more than half of every step. <code>torch.cuda.memory_allocated()</code> right after <code>optimizer.step()</code>, before <code>zero_grad</code>, is close to 18 B/param ≈ 8.9 GB. The zero-variance fraction is lower on the filtered pool than on the raw one, and creeps back up as the model masters problems. Cross-check: TRL's <code>GRPOTrainer</code> with <code>num_generations=8</code>, <code>beta=0.001</code>, <code>loss_type="grpo"</code> and the same prompts, for 50 steps; the two reward curves agree within noise. Whether length grows or "wait" rises at 0.5B is an open question (the chapter's "aha moment" happened at 671B, and SimpleRL-Zoo found length growth does not imply self-verification). Report what you see.</p>
+  </li>
+  <li>
+    <div class="ms-title">Distill instead, and see what RL actually changed</div>
+    <p>Now take the cheap path from "Distillation: the cheap way to a small reasoning model". Use your budget forcer to generate Qwen3-1.7B thinking chains (budget about 1,000) for the GSM8K train problems. Keep only verified-correct ones: the rejection sampling of R1's stage 3. Fine-tune a fresh Qwen2.5-0.5B on them for 2 epochs with the prompt tokens masked out. Then run your milestone 3 harness (64 samples per problem, the same 500 test problems) on three models: base, GRPO, distilled. Count GPU-hours for each path, including data generation.</p>
+    <pre><code><span class="k">def</span> <span class="f">make_distill_set</span>(teacher, problems, budget: int = <span class="n">1000</span>,
+                     tries: int = <span class="n">2</span>) -&gt; list[dict]: ...   <span class="c"># keep a chain only if reward == 1</span>
+<span class="k">def</span> <span class="f">compare</span>(models: dict[str, str], problems, n: int = <span class="n">64</span>) -&gt; dict: ...
+    <span class="c"># pass@1, maj@16, pass@64 per model, plus GPU-hours per path</span></code></pre>
+    <p class="check">A table with pass@1, maj@16 and pass@64 for each model, plus GPU-hours. The chapter predicts two things; test both. (1) At equal student size, distillation beats RL on pass@1 for less compute (R1: 72.6% vs 47.0% at 32B). (2) RL mostly sharpens: its pass@1 gain over the base is much larger than its pass@64 gain, and the base may catch up at large <var>k</var> (Yue et al., 2025 report this crossover). If distillation also lifts pass@64, it handed the student strategies it did not have, which is the chapter's explanation of why distillation wins.</p>
+  </li>
+</ol>
+
+<h3>Done when</h3>
+<ul class="checklist">
+  <li><code>pytest</code> passes: the verifier table, pass@k and maj@k on synthetic Bernoulli data, the budget forcer on <code>FakeLM</code>, and the GRPO loss with every Figure 10.7 number to two decimals.</li>
+  <li>Your depth plot shows think-first above direct for <var>n</var> ≥ 3, and the measured KV bytes per token equal the formula exactly.</li>
+  <li>Your pass@k plot overlays both formula predictions; the per-problem one is within ±2 points everywhere, and the mean-<var>p</var> overshoot is explained in the report.</li>
+  <li>No trace in the budget sweep exceeds its thinking budget; the accuracy-vs-tokens curves for easy and hard tasks, the hard-cap gap and the matched-spend comparison are plotted.</li>
+  <li>The GRPO run improves held-out GSM8K by at least 5 points, with the full dashboard and a step-time split showing generation above 50%.</li>
+  <li><code>REPORT.md</code> fills every row of the Reference numbers table and the base / GRPO / distilled table, with an explanation for every gap.</li>
+</ul>
+
+<details class="deep-dive"><summary>Hints (open only when stuck)</summary>
+<ul>
+  <li><strong>Advantages come out as +1.21 / −0.72:</strong> <code>torch.std</code> defaults to the Bessel-corrected sample std. Figure 10.7 uses the population std (<code>correction=0</code>). Implementations differ; pick one and say which in the report.</li>
+  <li><strong>Out of memory computing log-probs:</strong> 128 rollouts × 700 tokens × 151,936 vocabulary entries × 4 B ≈ 54 GB of FP32 logits. Run the forward pass 4–8 sequences at a time and gather the sampled token's log-prob immediately (logit minus <code>logsumexp</code>).</li>
+  <li><strong>Clip fraction is nonzero on the very first update:</strong> π<sub>old</sub> must come from a forward pass of the same model in the same dtype, not from <code>generate</code>'s scores. If you sample at temperature <var>T</var>, divide the logits by <var>T</var> in every log-prob computation.</li>
+  <li><strong>Clip fraction is always exactly 0:</strong> with one optimizer step per rollout batch, ρ ≡ 1 by construction. Split each batch into 2–4 mini-batches; later ones see ρ ≠ 1.</li>
+  <li><strong>Garbage rollouts in batched generation:</strong> decoder-only models need left padding (<code>tokenizer.padding_side = "left"</code>). The loss mask starts after the prompt and ends at the first EOS, inclusive. A rollout that hits <code>max_new</code> without an answer earns 0, and the policy learns to stop.</li>
+  <li><strong>The 0.5B base will not follow the template:</strong> SimpleRL-Zoo found that complex prompts destabilize zero-RL on weak instruction followers, and used simpler ones for its small Qwen models. Start with "…put your final answer in <code>\boxed{}</code>"; add the <code>&lt;think&gt;</code> format reward only after that trains.</li>
+  <li><strong>maj@k looks too good:</strong> normalize answers before voting (<code>1,786</code> and <code>1786.0</code> are one vote), let <code>None</code> abstain, and break ties uniformly at random. Breaking ties toward the first answer seen quietly inflates the score.</li>
+  <li><strong>Budget counts drift in the vLLM version:</strong> decoding and re-tokenizing between phases can merge tokens across the boundary (Chapter 3). Keep token IDs end to end, and count thinking tokens from IDs, never from text.</li>
+  <li><strong>vLLM and training on one card:</strong> vLLM reserves most of the GPU by default. Lower <code>gpu_memory_utilization</code>, or run the sampling-heavy milestones in a separate process from training.</li>
+</ul>
+</details>
+
+<h3>Stretch goals</h3>
+<ul>
+  <li><strong>The GRPO variants, measured.</strong> Rerun milestone 6 with <code>norm="token"</code>, <code>"dr_grpo"</code>, std scaling off, DAPO's clip-higher (an upper bound of 1.28) and dynamic sampling that refills zero-variance groups. Plot the length of wrong rollouts over training: the deep dive predicts that per-rollout normalization inflates it.</li>
+  <li><strong>Teach an effort tag.</strong> Prefix each RL prompt with <code>Effort: low</code> or <code>Effort: high</code> and penalize length above a target at low effort, the recipe sketched in "1. Conditioning". Show that the trained model has two length distributions and two accuracies: a soft, learned control like gpt-oss's <code>Reasoning: low</code>.</li>
+  <li><strong>Verifiers compared.</strong> On MATH-500 samples from Qwen3-1.7B, compare majority vote, best-of-<var>N</var> scored by an open process reward model (<code>Qwen/Qwen2.5-Math-PRM-7B</code>), and the oracle (pass@<var>N</var>). Find where the PRM lands between them, and collect the cases where it confidently picks a wrong answer.</li>
+  <li><strong>The running model (2–8 rented GPUs).</strong> Run milestone 6 on the Llama 3.1 8B base with TRL (<code>use_vllm=True</code>, server mode) or with LoRA on one 80 GB card, and compare with SimpleRL-Zoo's 39.7% → 79.2% on GSM8K for that base.</li>
+</ul>
 </section>
 
 <section>
